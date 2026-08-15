@@ -2,81 +2,209 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, ScanCommand } from '@aws-sdk/lib-dynamodb';
 import { getGameDealInfo } from '../utils/itadApi.js';
 
-const client = new DynamoDBClient({});
-const docClient = DynamoDBDocumentClient.from(client);
-const TABLE_NAME = process.env.TABLE_NAME || 'zt-radar-table';
+const ddbClient = new DynamoDBClient({});
+const docClient = DynamoDBDocumentClient.from(ddbClient);
+
+const TABLE_NAME = process.env.TABLE_NAME;
 const BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
+
+async function sendDiscordDm(userId, embed) {
+  try {
+    const dmChannelRes = await fetch('https://discord.com/api/v10/users/@me/channels', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bot ${BOT_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ recipient_id: userId }),
+    });
+
+    if (!dmChannelRes.ok) {
+      const errorText = await dmChannelRes.text();
+      throw new Error(`Failed to create DM channel: ${dmChannelRes.status} - ${errorText}`);
+    }
+
+    const dmChannel = await dmChannelRes.json();
+
+    const messageRes = await fetch(`https://discord.com/api/v10/channels/${dmChannel.id}/messages`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bot ${BOT_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ embeds: [embed] }),
+    });
+
+    if (!messageRes.ok) {
+      const errorText = await messageRes.text();
+      throw new Error(`Failed to send message: ${messageRes.status} - ${errorText}`);
+    }
+
+    console.log(`DM successfully sent to user ${userId}`);
+  } catch (error) {
+    console.error(`Error sending DM to user ${userId}:`, error);
+  }
+}
+
+async function sendGuildChannelAlert(channelId, embed) {
+  try {
+    const res = await fetch(`https://discord.com/api/v10/channels/${channelId}/messages`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bot ${BOT_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ embeds: [embed] }),
+    });
+
+    if (!res.ok) {
+      const errorText = await res.text();
+      throw new Error(`Failed to send guild alert: ${res.status} - ${errorText}`);
+    }
+
+    console.log(`Guild alert successfully sent to channel ${channelId}`);
+  } catch (error) {
+    console.error(`Error sending alert to channel ${channelId}:`, error);
+  }
+}
 
 export const handler = async () => {
   console.log('Starting zT Radar scheduled deal scanner...');
 
   try {
+    // Scan all wishlist items and guild channel configurations
     const scanResult = await docClient.send(
       new ScanCommand({
         TableName: TABLE_NAME,
-        FilterExpression: 'begins_with(SK, :skPrefix)',
-        ExpressionAttributeValues: {
-          ':skPrefix': 'GAME#',
-        },
       })
     );
 
-    const wishlistItems = scanResult.Items || [];
-    console.log(`Retrieved ${wishlistItems.length} monitored wishlist items.`);
+    const allItems = scanResult.Items || [];
+    const wishlistItems = allItems.filter((item) => item.SK?.startsWith('GAME#'));
+    const guildConfigs = allItems.filter((item) => item.PK?.startsWith('GUILD#') && item.SK === 'CONFIG');
+
+    console.log(`Retrieved ${wishlistItems.length} wishlist items and ${guildConfigs.length} guild configs.`);
 
     if (wishlistItems.length === 0) {
-      return { statusCode: 200, body: JSON.stringify({ message: 'No games to scan.' }) };
+      console.log('No games to track. Exiting scanner.');
+      return {
+        statusCode: 200,
+        body: JSON.stringify({ message: 'No wishlist items found.' }),
+      };
     }
 
-    const uniqueGames = [];
-    const seen = new Set();
+    // Deduplicate game IDs
+    const uniqueGameIds = [...new Set(wishlistItems.map((item) => item.external_game_id).filter(Boolean))];
+    console.log(`Unique games to fetch deal info: ${uniqueGameIds.length}`);
 
-    for (const item of wishlistItems) {
-      const key = item.external_game_id || item.game_title;
-      if (!seen.has(key)) {
-        seen.add(key);
-        uniqueGames.push({ id: item.external_game_id, title: item.game_title });
+    const dealsMap = new Map();
+    for (const gameId of uniqueGameIds) {
+      const dealInfo = await getGameDealInfo(gameId);
+      if (dealInfo) {
+        dealsMap.set(gameId, dealInfo);
       }
     }
 
-    console.log(`Deduplicated to ${uniqueGames.length} unique titles to query.`);
-
-    const dealsCache = {};
-    for (const game of uniqueGames) {
-      const deal = await getGameDealInfo(game.id, game.title);
-      if (deal) {
-        dealsCache[game.title] = deal;
-      }
-    }
+    // Process alerts for wishlisted users
+    const publicBroadcastDeals = new Set();
 
     for (const item of wishlistItems) {
-      const deal = dealsCache[item.game_title];
-      if (!deal || !deal.primaryDeal) continue;
+      const deal = dealsMap.get(item.external_game_id);
+      if (!deal) continue;
 
-      const mainDeal = deal.primaryDeal;
-      const bestPrice = deal.secondaryDeal ? Math.min(mainDeal.salePrice, deal.secondaryDeal.salePrice) : mainDeal.salePrice;
-      const bestSavings = deal.secondaryDeal ? Math.max(mainDeal.savingsPercent, deal.secondaryDeal.savingsPercent) : mainDeal.savingsPercent;
+      const effectivePrice = deal.bestDeal?.salePrice ?? deal.primaryDeal?.salePrice ?? 0;
+      const effectiveCut = deal.bestDeal?.cutPercent ?? deal.primaryDeal?.cutPercent ?? 0;
 
       let shouldAlert = false;
       let alertReason = '';
 
-      if (item.alert_free && bestPrice === 0) {
+      if (item.alert_free && effectivePrice === 0) {
         shouldAlert = true;
-        alertReason = '100% Free Game Alert!';
+        alertReason = '100% FREE GAME ALERT!';
+        publicBroadcastDeals.add(deal);
+      } else if (item.target_price && effectivePrice <= Number(item.target_price)) {
+        shouldAlert = true;
+        alertReason = `Target Price Reached (<= R$ ${Number(item.target_price).toFixed(2)})!`;
       } else if (deal.isAllTimeLow && item.alert_all_time_low) {
         shouldAlert = true;
-        alertReason = 'Historical Low Price Alert (Menor Preço Histórico)!';
-      } else if (item.target_price && bestPrice <= item.target_price) {
+        alertReason = 'ALL-TIME LOW PRICE HIT!';
+      } else if (item.alert_steep_discount && effectiveCut >= 70) {
         shouldAlert = true;
-        alertReason = `Price reached target (${deal.currencySymbol} ${bestPrice.toFixed(2)} <= ${deal.currencySymbol} ${item.target_price.toFixed(2)})`;
-      } else if (item.alert_steep_discount && bestSavings >= 70) {
-        shouldAlert = true;
-        alertReason = `Massive Discount Alert: ${Math.round(bestSavings)}% OFF!`;
+        alertReason = `Massive Discount Alert: ${effectiveCut}% OFF!`;
+        publicBroadcastDeals.add(deal);
       }
 
       if (shouldAlert) {
-        console.log(`Alert triggered for User ${item.user_id} on game ${item.game_title}: ${alertReason}`);
-        await sendDiscordDirectMessage(item.user_id, deal, alertReason);
+        console.log(`Alert triggered for user ${item.user_id} on ${item.game_title}: ${alertReason}`);
+
+        const fields = [
+          {
+            name: `${deal.primaryDeal.shopName} (Primary Offer)`,
+            value: `Price: **R$ ${deal.primaryDeal.salePrice.toFixed(2)}** (Regular: R$ ${deal.primaryDeal.regularPrice.toFixed(2)} | -${deal.primaryDeal.cutPercent}%)\n[Store Link](${deal.primaryDeal.url})`,
+            inline: false,
+          },
+        ];
+
+        if (deal.cheaperAlternative) {
+          fields.push({
+            name: `Cheaper at ${deal.cheaperAlternative.shopName}!`,
+            value: `Price: **R$ ${deal.cheaperAlternative.salePrice.toFixed(2)}** (Regular: R$ ${deal.cheaperAlternative.regularPrice.toFixed(2)} | -${deal.cheaperAlternative.cutPercent}%)\n[Alternative Store Link](${deal.cheaperAlternative.url})`,
+            inline: false,
+          });
+        }
+
+        const embed = {
+          title: `zT Radar Alert: ${item.game_title}`,
+          description: `**${alertReason}**`,
+          color: 0x5865f2,
+          fields,
+          footer: {
+            text: 'zT Radar Deal Intelligence • AWS Serverless',
+          },
+          timestamp: new Date().toISOString(),
+        };
+
+        await sendDiscordDm(item.user_id, embed);
+      }
+    }
+
+    // Broadcast massive public deals to configured guild channels
+    if (guildConfigs.length > 0 && publicBroadcastDeals.size > 0) {
+      console.log(`Broadcasting ${publicBroadcastDeals.size} major deals to ${guildConfigs.length} guild channels.`);
+
+      for (const deal of publicBroadcastDeals) {
+        const fields = [
+          {
+            name: `${deal.primaryDeal.shopName} (Primary Offer)`,
+            value: `Price: **R$ ${deal.primaryDeal.salePrice.toFixed(2)}** (Regular: R$ ${deal.primaryDeal.regularPrice.toFixed(2)} | -${deal.primaryDeal.cutPercent}%)\n[Store Link](${deal.primaryDeal.url})`,
+            inline: false,
+          },
+        ];
+
+        if (deal.cheaperAlternative) {
+          fields.push({
+            name: `Cheaper at ${deal.cheaperAlternative.shopName}!`,
+            value: `Price: **R$ ${deal.cheaperAlternative.salePrice.toFixed(2)}** (Regular: R$ ${deal.cheaperAlternative.regularPrice.toFixed(2)} | -${deal.cheaperAlternative.cutPercent}%)\n[Alternative Store Link](${deal.cheaperAlternative.url})`,
+            inline: false,
+          });
+        }
+
+        const embed = {
+          title: `Community Deal Alert: ${deal.title}`,
+          description: deal.primaryDeal.salePrice === 0 ? 'Grab this game for FREE!' : 'Massive community discount detected!',
+          color: 0x2ecc71,
+          fields,
+          footer: {
+            text: 'zT Radar Guild Deals • AWS Serverless',
+          },
+          timestamp: new Date().toISOString(),
+        };
+
+        for (const config of guildConfigs) {
+          if (config.alert_channel_id) {
+            await sendGuildChannelAlert(config.alert_channel_id, embed);
+          }
+        }
       }
     }
 
@@ -85,68 +213,10 @@ export const handler = async () => {
       body: JSON.stringify({ message: 'Scan and notifications processed successfully.' }),
     };
   } catch (error) {
-    console.error('Deal Scanner Execution Error:', error);
-    return { statusCode: 500, body: JSON.stringify({ error: error.message }) };
+    console.error('Fatal error during scheduled deal scanner execution:', error);
+    return {
+      statusCode: 500,
+      body: JSON.stringify({ error: 'Internal Server Error' }),
+    };
   }
 };
-
-/**
- * Sends a rich embed DM to a Discord user with multi-store comparison
- */
-async function sendDiscordDirectMessage(userId, deal, reason) {
-  if (!BOT_TOKEN) {
-    console.error('DISCORD_BOT_TOKEN not configured.');
-    return;
-  }
-
-  try {
-    const createDmRes = await fetch('https://discord.com/api/v10/users/@me/channels', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bot ${BOT_TOKEN}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ recipient_id: userId }),
-    });
-
-    if (!createDmRes.ok) return;
-
-    const dmChannel = await createDmRes.json();
-
-    const main = deal.primaryDeal;
-    let descriptionText = `**${reason}**\n\n`;
-
-    // Main Store Block (Steam Priority)
-    descriptionText += `🎮 **${main.storeName}:** [${deal.currencySymbol} ${main.salePrice.toFixed(2)}](${main.dealUrl}) *(was ${deal.currencySymbol} ${main.normalPrice.toFixed(2)} | -${Math.round(main.savingsPercent)}%)*\n`;
-
-    // Secondary / Cheaper Store Block (if applicable)
-    if (deal.secondaryDeal) {
-      const alt = deal.secondaryDeal;
-      descriptionText += `🔥 **Melhor Preço Alternativo (${alt.storeName}):** [${deal.currencySymbol} ${alt.salePrice.toFixed(2)}](${alt.dealUrl}) *(-${Math.round(alt.savingsPercent)}%)*\n`;
-    }
-
-    const embedPayload = {
-      embeds: [
-        {
-          title: `🎯 ${deal.title}`,
-          description: descriptionText,
-          url: main.dealUrl,
-          color: 0x00ff88,
-          thumbnail: deal.thumb ? { url: deal.thumb } : undefined,
-          footer: { text: 'zT Radar Intelligence | Serverless Deal Monitor' },
-        },
-      ],
-    };
-
-    await fetch(`https://discord.com/api/v10/channels/${dmChannel.id}/messages`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bot ${BOT_TOKEN}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(embedPayload),
-    });
-  } catch (err) {
-    console.error(`Failed to send DM to ${userId}:`, err.message);
-  }
-}

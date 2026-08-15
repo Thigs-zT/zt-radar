@@ -1,79 +1,101 @@
-import 'dotenv/config';
-import axios from 'axios';
+import dotenv from 'dotenv';
+dotenv.config();
 
-const appId = process.env.DISCORD_APP_ID;
-const token = process.env.DISCORD_BOT_TOKEN;
+const APPLICATION_ID = process.env.DISCORD_APP_ID || process.env.DISCORD_APPLICATION_ID;
+const BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
 
-if (!appId || !token) {
-  console.error('Error: DISCORD_APP_ID and DISCORD_BOT_TOKEN must be set in .env');
+if (!APPLICATION_ID || !BOT_TOKEN) {
+  console.error('Missing DISCORD_APP_ID or DISCORD_BOT_TOKEN in .env');
   process.exit(1);
 }
 
 const commands = [
   {
     name: 'wishlist',
-    description: 'Manage your tracked games wishlist',
+    description: 'Manage your monitored game deal wishlist',
     options: [
       {
         name: 'add',
-        description: 'Add a game to your wishlist for deal monitoring',
-        type: 1,
+        description: 'Add a game to your monitoring wishlist',
+        type: 1, // SUB_COMMAND
         options: [
           {
             name: 'game',
-            description: 'Start typing to search for a game',
-            type: 3,
+            description: 'Game name to monitor',
+            type: 3, // STRING
             required: true,
             autocomplete: true
           },
           {
             name: 'target_price',
-            description: 'Optional maximum target price in USD (e.g., 20)', // Updated label
-            type: 10,
+            description: 'Target price in BRL (e.g. 50.00)',
+            type: 10, // NUMBER
             required: false
           }
         ]
       },
       {
-        name: 'remove', // NEW SUBCOMMAND
-        description: 'Remove a game from your tracked wishlist',
-        type: 1,
+        name: 'remove',
+        description: 'Remove a game from your monitoring wishlist',
+        type: 1, // SUB_COMMAND
         options: [
           {
             name: 'game',
-            description: 'Start typing to search for a game to remove',
-            type: 3,
+            description: 'Game name to remove',
+            type: 3, // STRING
             required: true,
-            autocomplete: true // We can use autocomplete here too!
+            autocomplete: true
           }
         ]
       },
       {
         name: 'list',
-        description: 'List all games saved in your wishlist',
-        type: 1
+        description: 'List all games currently on your monitored wishlist',
+        type: 1 // SUB_COMMAND
+      }
+    ]
+  },
+  {
+    name: 'config-channel',
+    description: 'Configure a server channel to receive public game deal alerts',
+    default_member_permissions: '32', // MANAGE_GUILD
+    options: [
+      {
+        name: 'channel',
+        description: 'The text channel where alerts will be published',
+        type: 7, // CHANNEL
+        channel_types: [0], // GUILD_TEXT
+        required: true
       }
     ]
   }
 ];
 
-async function registerSlashCommands() {
-  const url = `https://discord.com/api/v10/applications/${appId}/commands`;
+async function registerCommands() {
+  const url = `https://discord.com/api/v10/applications/${APPLICATION_ID}/commands`;
+
+  console.log('Registering global slash commands with Discord...');
 
   try {
-    console.log('Registering slash commands with Discord API...');
-    const response = await axios.put(url, commands, {
+    const response = await fetch(url, {
+      method: 'PUT',
       headers: {
-        Authorization: `Bot ${token}`,
-        'Content-Type': 'application/json',
+        'Authorization': `Bot ${BOT_TOKEN}`,
+        'Content-Type': 'application/json'
       },
+      body: JSON.stringify(commands)
     });
 
-    console.log('Slash commands registered successfully with remove and clarified pricing!');
-    console.log('Active commands:', response.data.map(c => `/${c.name}`).join(', '));
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(`Failed: ${response.status} - ${JSON.stringify(errorData)}`);
+    }
+
+    const data = await response.json();
+    console.log(`Successfully registered ${data.length} commands with Discord!`);
   } catch (error) {
-    console.error('Failed to register commands:', error.response?.data || error.message);
+    console.error('Error registering commands:', error);
   }
 }
 
-registerSlashCommands();
+registerCommands();

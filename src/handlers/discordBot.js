@@ -1,234 +1,385 @@
 import { verifyKey } from 'discord-interactions';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, PutCommand, QueryCommand, DeleteCommand } from '@aws-sdk/lib-dynamodb';
+import {
+  DynamoDBDocumentClient,
+  PutCommand,
+  DeleteCommand,
+  QueryCommand,
+} from '@aws-sdk/lib-dynamodb';
 import { searchGamesForAutocomplete } from '../utils/itadApi.js';
 
-const client = new DynamoDBClient({});
-const docClient = DynamoDBDocumentClient.from(client);
-const TABLE_NAME = process.env.TABLE_NAME || 'zt-radar-table';
+const ddbClient = new DynamoDBClient({});
+const docClient = DynamoDBDocumentClient.from(ddbClient);
+
+const TABLE_NAME = process.env.TABLE_NAME;
+const PUBLIC_KEY = process.env.DISCORD_PUBLIC_KEY;
+
+const RESPONSE_TYPES = {
+  PONG: 1,
+  CHANNEL_MESSAGE_WITH_SOURCE: 4,
+  APPLICATION_COMMAND_AUTOCOMPLETE_RESULT: 8,
+};
+
+const MESSAGE_FLAGS = {
+  EPHEMERAL: 64,
+};
 
 export const handler = async (event) => {
-  const CLIENT_PUBLIC_KEY = process.env.DISCORD_PUBLIC_KEY;
-
-  const signature = event.headers?.['x-signature-ed25519'] || event.headers?.['X-Signature-Ed25519'];
-  const timestamp = event.headers?.['x-signature-timestamp'] || event.headers?.['X-Signature-Timestamp'];
+  const signature = event.headers['x-signature-ed25519'] || event.headers['X-Signature-Ed25519'];
+  const timestamp = event.headers['x-signature-timestamp'] || event.headers['X-Signature-Timestamp'];
 
   let rawBody = event.body || '';
   if (event.isBase64Encoded) {
-    rawBody = Buffer.from(event.body, 'base64').toString('utf8');
+    rawBody = Buffer.from(event.body, 'base64').toString('utf-8');
   }
 
   if (!signature || !timestamp || !rawBody) {
     return {
       statusCode: 401,
-      body: JSON.stringify({ error: 'Missing signature headers' }),
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ error: 'Missing interaction signature headers' }),
     };
   }
 
-  const isValidRequest = await verifyKey(rawBody, signature, timestamp, CLIENT_PUBLIC_KEY);
-
+  // Asynchronous cryptographic Ed25519 verification
+  const isValidRequest = await verifyKey(rawBody, signature, timestamp, PUBLIC_KEY);
   if (!isValidRequest) {
     return {
       statusCode: 401,
-      body: JSON.stringify({ error: 'Invalid signature' }),
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ error: 'Invalid request signature' }),
     };
   }
 
-  const message = JSON.parse(rawBody);
+  const interaction = JSON.parse(rawBody);
 
-  // Type 1: Discord PING verification
-  if (message.type === 1) {
+  // Handle Discord PING verification (Type 1)
+  if (interaction.type === 1) {
     return {
       statusCode: 200,
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ type: 1 }),
+      body: JSON.stringify({ type: RESPONSE_TYPES.PONG }),
     };
   }
 
-  // Type 4: APPLICATION_COMMAND_AUTOCOMPLETE
-  if (message.type === 4) {
-    try {
-      const subCommandOptions = message.data?.options?.[0]?.options || [];
-      const focusedOption = subCommandOptions.find((opt) => opt.focused) || 
-                            message.data?.options?.find((opt) => opt.focused);
+  // Handle Autocomplete Interactions (Type 4)
+  if (interaction.type === 4) {
+    const { name, options } = interaction.data;
+    if (name === 'wishlist') {
+      const subCommand = options?.[0];
+      const focusedOption = subCommand?.options?.find((opt) => opt.focused);
 
-      const queryValue = focusedOption?.value || '';
-      const choices = await searchGamesForAutocomplete(queryValue);
+      if (focusedOption && focusedOption.name === 'game') {
+        const query = focusedOption.value?.trim();
+        if (!query || query.length < 2) {
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              type: RESPONSE_TYPES.APPLICATION_COMMAND_AUTOCOMPLETE_RESULT,
+              data: { choices: [] },
+            }),
+          };
+        }
 
-      return {
-        statusCode: 200,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          type: 8, 
-          data: { choices: choices || [] },
-        }),
-      };
-    } catch (err) {
-      console.error('Autocomplete Error:', err);
-      return {
-        statusCode: 200,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type: 8, data: { choices: [] } }),
-      };
+        try {
+          const suggestions = await searchGamesForAutocomplete(query);
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              type: RESPONSE_TYPES.APPLICATION_COMMAND_AUTOCOMPLETE_RESULT,
+              data: { choices: suggestions.slice(0, 25) },
+            }),
+          };
+        } catch (error) {
+          console.error('Error handling autocomplete lookup:', error);
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              type: RESPONSE_TYPES.APPLICATION_COMMAND_AUTOCOMPLETE_RESULT,
+              data: { choices: [] },
+            }),
+          };
+        }
+      }
     }
   }
 
-  // Type 2: Slash Commands
-  if (message.type === 2) {
-    const { name, options } = message.data;
-    const userId = message.member?.user?.id || message.user?.id;
+  // Handle Slash Command Interactions (Type 2)
+  if (interaction.type === 2) {
+    const { name, options } = interaction.data;
+    const userId = interaction.member?.user?.id || interaction.user?.id;
+    const guildId = interaction.guild_id;
+
+    if (name === 'config-channel') {
+      if (!guildId) {
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
+            data: {
+              flags: MESSAGE_FLAGS.EPHEMERAL,
+              content: 'This command can only be used inside a Discord server (guild).',
+            },
+          }),
+        };
+      }
+
+      const channelOption = options?.find((opt) => opt.name === 'channel');
+      const channelId = channelOption?.value;
+
+      if (!channelId) {
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
+            data: {
+              flags: MESSAGE_FLAGS.EPHEMERAL,
+              content: 'Please select a valid text channel.',
+            },
+          }),
+        };
+      }
+
+      try {
+        await docClient.send(
+          new PutCommand({
+            TableName: TABLE_NAME,
+            Item: {
+              PK: `GUILD#${guildId}`,
+              SK: 'CONFIG',
+              guild_id: guildId,
+              alert_channel_id: channelId,
+              updated_by: userId,
+              updated_at: new Date().toISOString(),
+            },
+          })
+        );
+
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
+            data: {
+              flags: MESSAGE_FLAGS.EPHEMERAL,
+              content: `Server deals broadcast channel successfully configured to <#${channelId}>!`,
+            },
+          }),
+        };
+      } catch (error) {
+        console.error('Error saving guild channel config:', error);
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
+            data: {
+              flags: MESSAGE_FLAGS.EPHEMERAL,
+              content: 'Failed to configure alert channel. Please try again.',
+            },
+          }),
+        };
+      }
+    }
 
     if (name === 'wishlist') {
-      const subCommand = options?.[0]?.name;
+      const subCommand = options?.[0];
+      const subCommandName = subCommand?.name;
 
-      if (subCommand === 'add') {
-        const subOptions = options[0].options || [];
-        const gameOption = subOptions.find((opt) => opt.name === 'game');
-        const priceOption = subOptions.find((opt) => opt.name === 'target_price');
+      if (subCommandName === 'add') {
+        const gameOption = subCommand.options?.find((opt) => opt.name === 'game');
+        const targetPriceOption = subCommand.options?.find((opt) => opt.name === 'target_price');
 
-        const rawValue = gameOption?.value;
-        const targetPrice = priceOption?.value ? Number(priceOption.value) : null;
+        const rawGameValue = gameOption?.value;
+        const targetPrice = targetPriceOption ? parseFloat(targetPriceOption.value) : null;
 
-        if (!rawValue) return createEphemeralResponse('Game title is required.');
-
-        let externalGameId = null;
-        let gameTitle = rawValue;
-
-        if (rawValue.includes('|')) {
-          const parts = rawValue.split('|');
-          externalGameId = parts[0];
-          gameTitle = parts[1];
+        if (!rawGameValue || !rawGameValue.includes('|')) {
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
+              data: {
+                flags: MESSAGE_FLAGS.EPHEMERAL,
+                content: 'Please select a valid game from the autocomplete suggestion list.',
+              },
+            }),
+          };
         }
 
-        const normalizedGame = gameTitle.trim().toLowerCase();
+        const [externalGameId, ...titleParts] = rawGameValue.split('|');
+        const gameTitle = titleParts.join('|');
+        const normalizedTitle = gameTitle.toLowerCase().trim();
 
         try {
-          const item = {
-            PK: `USER#${userId}`,
-            SK: `GAME#${normalizedGame}`,
-            game_title: gameTitle.trim(),
-            external_game_id: externalGameId,
-            target_price: targetPrice,
-            alert_all_time_low: true,
-            alert_free: true,
-            alert_steep_discount: true,
-            user_id: userId,
-            created_at: new Date().toISOString(),
-          };
-
           await docClient.send(
             new PutCommand({
               TableName: TABLE_NAME,
-              Item: item,
-            })
-          );
-
-          const customPriceMsg = targetPrice ? ` or target price R$ ${targetPrice.toFixed(2)}` : '';
-          return createEphemeralResponse(
-            `Added **"${gameTitle.trim()}"** to your zT Radar wishlist!\n` +
-            `🔔 **Active Alerts:** Historical Lows, 100% Free deals, Discounts >= 70%${customPriceMsg}.`
-          );
-        } catch (dbError) {
-          console.error('DynamoDB Put Error:', dbError);
-          return createEphemeralResponse('Failed to save game. Please try again.');
-        }
-      }
-
-      if (subCommand === 'remove') { // NEW SUBCOMMAND LOGIC
-        const subOptions = options[0].options || [];
-        const gameOption = subOptions.find((opt) => opt.name === 'game');
-
-        const rawValue = gameOption?.value;
-
-        if (!rawValue) return createEphemeralResponse('Game selection is required.');
-
-        // Reuse autocomplete parsing logic
-        let gameTitle = rawValue;
-        if (rawValue.includes('|')) {
-          gameTitle = rawValue.split('|')[1];
-        }
-
-        const normalizedGame = gameTitle.trim().toLowerCase();
-
-        try {
-          // Verify if item exists before deletion (optional, but good for UX)
-          const getResponse = await docClient.send(
-            new QueryCommand({
-              TableName: TABLE_NAME,
-              KeyConditionExpression: 'PK = :pk AND SK = :sk',
-              ExpressionAttributeValues: {
-                ':pk': `USER#${userId}`,
-                ':sk': `GAME#${normalizedGame}`,
+              Item: {
+                PK: `USER#${userId}`,
+                SK: `GAME#${normalizedTitle}`,
+                game_title: gameTitle,
+                external_game_id: externalGameId,
+                target_price: targetPrice,
+                alert_all_time_low: true,
+                alert_free: true,
+                alert_steep_discount: true,
+                user_id: userId,
+                created_at: new Date().toISOString(),
               },
             })
           );
 
-          if (getResponse.Items?.length === 0) {
-            return createEphemeralResponse(`❌ "**${gameTitle.trim()}**" is not currently in your wishlist.`);
-          }
+          const priceInfo = targetPrice ? ` Target Price: R$ ${targetPrice.toFixed(2)}.` : '';
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
+              data: {
+                flags: MESSAGE_FLAGS.EPHEMERAL,
+                content: `Added **${gameTitle}** to your monitoring wishlist!${priceInfo}`,
+              },
+            }),
+          };
+        } catch (error) {
+          console.error('Error saving wishlist item:', error);
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
+              data: {
+                flags: MESSAGE_FLAGS.EPHEMERAL,
+                content: 'Failed to add game to wishlist. Please try again.',
+              },
+            }),
+          };
+        }
+      }
 
+      if (subCommandName === 'remove') {
+        const gameOption = subCommand.options?.find((opt) => opt.name === 'game');
+        const rawGameValue = gameOption?.value;
+
+        let gameTitle = rawGameValue;
+        if (rawGameValue && rawGameValue.includes('|')) {
+          const [, ...titleParts] = rawGameValue.split('|');
+          gameTitle = titleParts.join('|');
+        }
+
+        const normalizedTitle = gameTitle.toLowerCase().trim();
+
+        try {
           await docClient.send(
             new DeleteCommand({
               TableName: TABLE_NAME,
               Key: {
                 PK: `USER#${userId}`,
-                SK: `GAME#${normalizedGame}`,
+                SK: `GAME#${normalizedTitle}`,
               },
             })
           );
 
-          return createEphemeralResponse(`Successfully removed "**${gameTitle.trim()}**" from your zT Radar wishlist.`);
-        } catch (dbError) {
-          console.error('DynamoDB Delete Error:', dbError);
-          return createEphemeralResponse('Failed to remove game from database. Please try again.');
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
+              data: {
+                flags: MESSAGE_FLAGS.EPHEMERAL,
+                content: `Removed **${gameTitle}** from your wishlist.`,
+              },
+            }),
+          };
+        } catch (error) {
+          console.error('Error removing wishlist item:', error);
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
+              data: {
+                flags: MESSAGE_FLAGS.EPHEMERAL,
+                content: 'Failed to remove game from wishlist. Please try again.',
+              },
+            }),
+          };
         }
       }
 
-      if (subCommand === 'list') {
+      if (subCommandName === 'list') {
         try {
-          const response = await docClient.send(
+          const queryResult = await docClient.send(
             new QueryCommand({
               TableName: TABLE_NAME,
-              KeyConditionExpression: 'PK = :pk AND begins_with(SK, :sk)',
+              KeyConditionExpression: 'PK = :pk AND begins_with(SK, :skPrefix)',
               ExpressionAttributeValues: {
                 ':pk': `USER#${userId}`,
-                ':sk': 'GAME#',
+                ':skPrefix': 'GAME#',
               },
             })
           );
 
-          const items = response.Items || [];
-
+          const items = queryResult.Items || [];
           if (items.length === 0) {
-            return createEphemeralResponse('Your zT Radar wishlist is currently empty. Use `/wishlist add` to start tracking.');
+            return {
+              statusCode: 200,
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
+                data: {
+                  flags: MESSAGE_FLAGS.EPHEMERAL,
+                  content: 'Your monitored wishlist is currently empty. Use `/wishlist add` to start tracking games!',
+                },
+              }),
+            };
           }
 
-          const gameList = items
-            .map((i) => `- **${i.game_title}**${i.target_price ? ` (Target: R$ ${i.target_price.toFixed(2)})` : ' (Auto Deals Active)'}`)
+          const formattedList = items
+            .map((item, index) => {
+              const target = item.target_price ? ` (Target: R$ ${Number(item.target_price).toFixed(2)})` : '';
+              return `${index + 1}. **${item.game_title}**${target}`;
+            })
             .join('\n');
 
-          return createEphemeralResponse(`**Your Tracked Wishlist:**\n${gameList}`);
-        } catch (dbError) {
-          console.error('DynamoDB Query Error:', dbError);
-          return createEphemeralResponse('Failed to retrieve wishlist. Please try again.');
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
+              data: {
+                flags: MESSAGE_FLAGS.EPHEMERAL,
+                content: `**Your Monitored Games (${items.length}):**\n\n${formattedList}`,
+              },
+            }),
+          };
+        } catch (error) {
+          console.error('Error querying wishlist items:', error);
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
+              data: {
+                flags: MESSAGE_FLAGS.EPHEMERAL,
+                content: 'Failed to retrieve your wishlist. Please try again.',
+              },
+            }),
+          };
         }
       }
     }
   }
 
-  return createEphemeralResponse('Command not recognized.');
-};
-
-function createEphemeralResponse(content) {
   return {
-    statusCode: 200,
+    statusCode: 400,
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      type: 4,
-      data: {
-        content: content,
-        flags: 64,
-      },
-    }),
+    body: JSON.stringify({ error: 'Unhandled interaction type' }),
   };
-}
+};
