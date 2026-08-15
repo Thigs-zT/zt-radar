@@ -74,7 +74,6 @@ export const handler = async (event) => {
       if (focusedOption && focusedOption.name === 'game') {
         const query = focusedOption.value?.trim() || '';
 
-        // Autocomplete for Remove: Show user's existing games only
         if (subCommandName === 'remove') {
           try {
             const queryResult = await docClient.send(
@@ -118,7 +117,6 @@ export const handler = async (event) => {
           }
         }
 
-        // Autocomplete for Add: Search ITAD/CheapShark or show trending defaults
         try {
           const suggestions = await searchGamesForAutocomplete(query);
           return {
@@ -179,6 +177,11 @@ export const handler = async (event) => {
           {
             name: '/config-channel <channel>',
             value: 'Admin command to set a server text channel for major community deal announcements.',
+            inline: false,
+          },
+          {
+            name: '/config-channel-remove',
+            value: 'Admin command to disable community deal announcements on this server.',
             inline: false,
           },
         ],
@@ -268,6 +271,59 @@ export const handler = async (event) => {
             data: {
               flags: MESSAGE_FLAGS.EPHEMERAL,
               content: 'Failed to configure alert channel. Please try again.',
+            },
+          }),
+        };
+      }
+    }
+
+    if (name === 'config-channel-remove') {
+      if (!guildId) {
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
+            data: {
+              flags: MESSAGE_FLAGS.EPHEMERAL,
+              content: 'This command can only be used inside a Discord server (guild).',
+            },
+          }),
+        };
+      }
+
+      try {
+        await docClient.send(
+          new DeleteCommand({
+            TableName: TABLE_NAME,
+            Key: {
+              PK: `GUILD#${guildId}`,
+              SK: 'CONFIG',
+            },
+          })
+        );
+
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
+            data: {
+              flags: MESSAGE_FLAGS.EPHEMERAL,
+              content: 'Server deals broadcast channel has been removed and disabled.',
+            },
+          }),
+        };
+      } catch (error) {
+        console.error('Error removing guild config:', error);
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
+            data: {
+              flags: MESSAGE_FLAGS.EPHEMERAL,
+              content: 'Failed to remove alert channel configuration. Please try again.',
             },
           }),
         };

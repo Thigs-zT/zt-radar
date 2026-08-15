@@ -1,5 +1,5 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, ScanCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, ScanCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { getGameDealInfo } from '../utils/itadApi.js';
 
 const ddbClient = new DynamoDBClient({});
@@ -29,12 +29,22 @@ function createStoreButtons(deal) {
     });
   }
 
+  // SteamDB Link generated from resolved steamAppId
+  if (deal.steamAppId) {
+    buttons.push({
+      type: 2,
+      style: 5,
+      label: 'SteamDB',
+      url: `https://steamdb.info/app/${deal.steamAppId}/`,
+    });
+  }
+
   if (buttons.length === 0) return [];
 
   return [
     {
       type: 1, // ACTION_ROW
-      components: buttons,
+      components: buttons.slice(0, 5),
     },
   ];
 }
@@ -77,8 +87,10 @@ async function sendDiscordDm(userId, embed, components = []) {
     }
 
     console.log(`DM successfully sent to user ${userId}`);
+    return true;
   } catch (error) {
     console.error(`Error sending DM to user ${userId}:`, error);
+    return false;
   }
 }
 
@@ -104,8 +116,10 @@ async function sendGuildChannelAlert(channelId, embed, components = []) {
     }
 
     console.log(`Guild alert successfully sent to channel ${channelId}`);
+    return true;
   } catch (error) {
     console.error(`Error sending alert to channel ${channelId}:`, error);
+    return false;
   }
 }
 
@@ -144,8 +158,7 @@ export const handler = async () => {
       }
     }
 
-    const publicBroadcastDeals = new Set();
-
+    // 1. Process Individual User Wishlist Alerts
     for (const item of wishlistItems) {
       const deal = dealsMap.get(item.external_game_id);
       if (!deal) continue;
@@ -159,7 +172,6 @@ export const handler = async () => {
       if (item.alert_free && effectivePrice === 0) {
         shouldAlert = true;
         alertReason = '100% FREE GAME ALERT!';
-        publicBroadcastDeals.add(deal);
       } else if (item.target_price && effectivePrice <= Number(item.target_price)) {
         shouldAlert = true;
         alertReason = `Target Price Reached (<= R$ ${Number(item.target_price).toFixed(2)})!`;
@@ -169,10 +181,27 @@ export const handler = async () => {
       } else if (item.alert_steep_discount && effectiveCut >= 70) {
         shouldAlert = true;
         alertReason = `Massive Discount Alert: ${effectiveCut}% OFF!`;
-        publicBroadcastDeals.add(deal);
       }
 
-      if (shouldAlert) {
+      const lastPrice = item.last_notified_price !== undefined ? Number(item.last_notified_price) : null;
+      const isNewLowerPrice = lastPrice === null || effectivePrice < lastPrice;
+
+      // If price went back up to regular, reset notification state so future discounts trigger alerts
+      if (lastPrice !== null && effectiveCut === 0) {
+        try {
+          await docClient.send(
+            new UpdateCommand({
+              TableName: TABLE_NAME,
+              Key: { PK: item.PK, SK: item.SK },
+              UpdateExpression: 'REMOVE last_notified_price, last_notified_at',
+            })
+          );
+        } catch (resetErr) {
+          console.error(`Failed to reset notification state for ${item.SK}:`, resetErr);
+        }
+      }
+
+      if (shouldAlert && isNewLowerPrice) {
         console.log(`Alert triggered for user ${item.user_id} on ${item.game_title}: ${alertReason}`);
 
         const fields = [
@@ -215,17 +244,39 @@ export const handler = async () => {
         }
 
         const components = createStoreButtons(deal);
-        await sendDiscordDm(item.user_id, embed, components);
+        const sent = await sendDiscordDm(item.user_id, embed, components);
+
+        if (sent) {
+          try {
+            await docClient.send(
+              new UpdateCommand({
+                TableName: TABLE_NAME,
+                Key: { PK: item.PK, SK: item.SK },
+                UpdateExpression: 'SET last_notified_price = :price, last_notified_at = :notifiedAt',
+                ExpressionAttributeValues: {
+                  ':price': effectivePrice,
+                  ':notifiedAt': new Date().toISOString(),
+                },
+              })
+            );
+          } catch (dbError) {
+            console.error(`Failed to update notification state for ${item.SK}:`, dbError);
+          }
+        }
       }
     }
 
-    // Broadcast filtered deals to guild channels (free or score >= 70)
-    if (guildConfigs.length > 0 && publicBroadcastDeals.size > 0) {
-      for (const deal of publicBroadcastDeals) {
-        // Analytical review filter for public broadcasts (bypass if 100% free)
+    // 2. Process Independent Server (Guild) Broadcasts
+    if (guildConfigs.length > 0) {
+      for (const [, deal] of dealsMap) {
         const isFree = deal.primaryDeal?.salePrice === 0 || deal.cheaperAlternative?.salePrice === 0;
+        const effectiveCut = deal.cheaperAlternative?.cutPercent ?? deal.primaryDeal?.cutPercent ?? 0;
+        const isSteepDeal = effectiveCut >= 70;
+
+        if (!isFree && !isSteepDeal) continue;
+
         if (!isFree && deal.reviewScore && deal.reviewScore < 70) {
-          console.log(`Skipping public broadcast for ${deal.title} due to low review score (${deal.reviewScore}/100).`);
+          console.log(`Skipping public broadcast for ${deal.title} due to review score (${deal.reviewScore}/100).`);
           continue;
         }
 
@@ -255,7 +306,7 @@ export const handler = async () => {
 
         const embed = {
           title: `Community Deal Alert: ${deal.title}`,
-          description: isFree ? 'Grab this game for FREE!' : 'Massive community discount detected!',
+          description: isFree ? 'Grab this game for FREE!' : `Massive discount detected (-${effectiveCut}%)!`,
           color: 0x2ecc71,
           fields,
           footer: {

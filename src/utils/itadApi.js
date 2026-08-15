@@ -69,7 +69,6 @@ export async function searchGamesForAutocomplete(query) {
       }
     }
 
-    // Fallback: CheapShark API game lookup
     const csUrl = `${CHEAPSHARK_BASE_URL}/games?title=${encodeURIComponent(trimmedQuery)}&limit=25`;
     const csRes = await fetch(csUrl, { signal: controller.signal });
 
@@ -127,8 +126,9 @@ export async function getGameDealInfo(gameId) {
         const gamePrices = priceData?.[0]?.deals || [];
         const historyLow = historyData?.[0]?.low?.price?.amount ?? null;
 
-        let bannerImage = infoData?.assets?.banner400 || infoData?.assets?.banner300 || infoData?.assets?.boxart || null;
+        const bannerImage = infoData?.assets?.banner400 || infoData?.assets?.banner300 || infoData?.assets?.boxart || null;
         const reviewScore = infoData?.reviews?.steam?.score ?? infoData?.reviews?.metacritic?.score ?? null;
+        const steamAppId = infoData?.appid || infoData?.steam_appid || null;
 
         if (gamePrices.length > 0) {
           const steamOffer = gamePrices.find(
@@ -174,6 +174,7 @@ export async function getGameDealInfo(gameId) {
             title: priceData[0]?.title || 'Monitored Title',
             imageUrl: bannerImage,
             reviewScore,
+            steamAppId,
             isAllTimeLow,
             allTimeLowPrice: historyLow,
             primaryDeal,
@@ -224,6 +225,7 @@ export async function getGameDealInfo(gameId) {
 
         const metacriticScore = csData.info?.metacriticScore ? parseInt(csData.info.metacriticScore, 10) : null;
         const bannerImage = csData.info?.thumb || null;
+        const steamAppId = csData.info?.steamAppID || null;
 
         clearTimeout(timeoutId);
         return {
@@ -231,6 +233,7 @@ export async function getGameDealInfo(gameId) {
           title: csData.info?.title || 'Monitored Title',
           imageUrl: bannerImage,
           reviewScore: metacriticScore,
+          steamAppId,
           isAllTimeLow: csData.cheapestPriceEver?.price
             ? primaryDeal.salePrice <= parseFloat(csData.cheapestPriceEver.price)
             : false,

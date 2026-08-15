@@ -75,6 +75,11 @@ const commands = [
     ],
   },
   {
+    name: 'config-channel-remove',
+    description: 'Disable and remove the configured deals alert channel for this server',
+    default_member_permissions: '32', // MANAGE_GUILD
+  },
+  {
     name: 'radar-help',
     description: 'Display detailed guide on how to use zT Radar commands and deal alerts',
   },
