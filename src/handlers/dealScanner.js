@@ -7,17 +7,6 @@ const docClient = DynamoDBDocumentClient.from(client);
 const TABLE_NAME = process.env.TABLE_NAME || 'zt-radar-table';
 const BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
 
-// Hardcoded store mapping for CheapShark API (MVP)
-// We will move this to a separate API call later for ITAD.
-const STORE_MAP = {
-  "1": "Steam",
-  "2": "GamersGate",
-  "3": "GreenManGaming",
-  "7": "GOG",
-  "11": "Humble Store",
-  "25": "Epic Games Store"
-};
-
 export const handler = async () => {
   console.log('Starting zT Radar scheduled deal scanner...');
 
@@ -39,47 +28,55 @@ export const handler = async () => {
       return { statusCode: 200, body: JSON.stringify({ message: 'No games to scan.' }) };
     }
 
-    const uniqueTitles = [...new Set(wishlistItems.map((item) => item.game_title))];
-    console.log(`Deduplicated to ${uniqueTitles.length} unique titles to query.`);
+    const uniqueGames = [];
+    const seen = new Set();
+
+    for (const item of wishlistItems) {
+      const key = item.external_game_id || item.game_title;
+      if (!seen.has(key)) {
+        seen.add(key);
+        uniqueGames.push({ id: item.external_game_id, title: item.game_title });
+      }
+    }
+
+    console.log(`Deduplicated to ${uniqueGames.length} unique titles to query.`);
 
     const dealsCache = {};
-    for (const title of uniqueTitles) {
-      const deal = await getGameDealInfo(title);
+    for (const game of uniqueGames) {
+      const deal = await getGameDealInfo(game.id, game.title);
       if (deal) {
-        dealsCache[title] = deal;
+        dealsCache[game.title] = deal;
       }
     }
 
     for (const item of wishlistItems) {
       const deal = dealsCache[item.game_title];
-      if (!deal) continue;
+      if (!deal || !deal.primaryDeal) continue;
+
+      const mainDeal = deal.primaryDeal;
+      const bestPrice = deal.secondaryDeal ? Math.min(mainDeal.salePrice, deal.secondaryDeal.salePrice) : mainDeal.salePrice;
+      const bestSavings = deal.secondaryDeal ? Math.max(mainDeal.savingsPercent, deal.secondaryDeal.savingsPercent) : mainDeal.savingsPercent;
 
       let shouldAlert = false;
       let alertReason = '';
 
-      // UPDATED: Clarify comparison is in USD ($)
-      if (item.alert_free && deal.salePrice === 0) {
+      if (item.alert_free && bestPrice === 0) {
         shouldAlert = true;
         alertReason = '100% Free Game Alert!';
-      } else if (item.target_price && deal.salePrice <= item.target_price) {
+      } else if (deal.isAllTimeLow && item.alert_all_time_low) {
         shouldAlert = true;
-        alertReason = `Price reached target ($${deal.salePrice.toFixed(2)} USD <= $${item.target_price.toFixed(2)} USD)`;
-      } else if (item.alert_steep_discount && deal.savingsPercent >= 70) {
+        alertReason = 'Historical Low Price Alert (Menor Preço Histórico)!';
+      } else if (item.target_price && bestPrice <= item.target_price) {
         shouldAlert = true;
-        alertReason = `Massive Discount Alert: ${Math.round(deal.savingsPercent)}% OFF!`;
+        alertReason = `Price reached target (${deal.currencySymbol} ${bestPrice.toFixed(2)} <= ${deal.currencySymbol} ${item.target_price.toFixed(2)})`;
+      } else if (item.alert_steep_discount && bestSavings >= 70) {
+        shouldAlert = true;
+        alertReason = `Massive Discount Alert: ${Math.round(bestSavings)}% OFF!`;
       }
 
       if (shouldAlert) {
-        // Find store name from mapping
-        const rawStoreId = deal.dealId ? deal.dealId.split('_')[0] : ''; // CheapShark dealIDs sometimes contain store information but not always. Better logic needed in itadApi.js later.
-        
-        // CheapShark API v1.0 usually returns best deal, and itadApi.js currently 
-        // retrieves the 'deals' endpoint but doesn't map storeID back efficiently.
-        // We will improve this mapping in the next phase.
-        const storeName = STORE_MAP[rawStoreId] || 'Best Store';
-
         console.log(`Alert triggered for User ${item.user_id} on game ${item.game_title}: ${alertReason}`);
-        await sendDiscordDirectMessage(item.user_id, deal, alertReason, storeName);
+        await sendDiscordDirectMessage(item.user_id, deal, alertReason);
       }
     }
 
@@ -94,9 +91,9 @@ export const handler = async () => {
 };
 
 /**
- * Sends a rich embed DM to a Discord user
+ * Sends a rich embed DM to a Discord user with multi-store comparison
  */
-async function sendDiscordDirectMessage(userId, deal, reason, storeName) {
+async function sendDiscordDirectMessage(userId, deal, reason) {
   if (!BOT_TOKEN) {
     console.error('DISCORD_BOT_TOKEN not configured.');
     return;
@@ -116,15 +113,27 @@ async function sendDiscordDirectMessage(userId, deal, reason, storeName) {
 
     const dmChannel = await createDmRes.json();
 
+    const main = deal.primaryDeal;
+    let descriptionText = `**${reason}**\n\n`;
+
+    // Main Store Block (Steam Priority)
+    descriptionText += `🎮 **${main.storeName}:** [${deal.currencySymbol} ${main.salePrice.toFixed(2)}](${main.dealUrl}) *(was ${deal.currencySymbol} ${main.normalPrice.toFixed(2)} | -${Math.round(main.savingsPercent)}%)*\n`;
+
+    // Secondary / Cheaper Store Block (if applicable)
+    if (deal.secondaryDeal) {
+      const alt = deal.secondaryDeal;
+      descriptionText += `🔥 **Melhor Preço Alternativo (${alt.storeName}):** [${deal.currencySymbol} ${alt.salePrice.toFixed(2)}](${alt.dealUrl}) *(-${Math.round(alt.savingsPercent)}%)*\n`;
+    }
+
     const embedPayload = {
       embeds: [
         {
           title: `🎯 ${deal.title}`,
-          description: `**${reason}**\n\n💰 **Current Price:** $${deal.salePrice.toFixed(2)} USD *(was $${deal.normalPrice.toFixed(2)})*\n📉 **Savings:** ${Math.round(deal.savingsPercent)}% OFF\n🏪 **Available at:** ${storeName}\n⭐ **Metacritic:** ${deal.metacriticScore > 0 ? deal.metacriticScore : 'N/A'}`,
-          url: deal.dealUrl,
+          description: descriptionText,
+          url: main.dealUrl,
           color: 0x00ff88,
-          thumbnail: { url: deal.thumb },
-          footer: { text: 'zT Radar Intelligence | CheapShark USD MVP' }, // Updated footer
+          thumbnail: deal.thumb ? { url: deal.thumb } : undefined,
+          footer: { text: 'zT Radar Intelligence | Serverless Deal Monitor' },
         },
       ],
     };

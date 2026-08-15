@@ -15,6 +15,7 @@ Globals:
         DISCORD_PUBLIC_KEY: !Ref DiscordPublicKey
         DISCORD_APP_ID: !Ref DiscordAppId
         DISCORD_BOT_TOKEN: !Ref DiscordBotToken
+        ITAD_API_KEY: !Ref ItadApiKey
 
 Parameters:
   DiscordPublicKey:
@@ -27,6 +28,10 @@ Parameters:
     Type: String
     NoEcho: true
     Description: Bot Token from Discord Developer Portal
+  ItadApiKey:
+    Type: String
+    NoEcho: true
+    Description: API Key for IsThereAnyDeal v3
 
 Resources:
   # DynamoDB Table - Single-Table Design

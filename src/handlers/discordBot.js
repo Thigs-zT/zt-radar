@@ -123,8 +123,7 @@ export const handler = async (event) => {
             })
           );
 
-          // UPDATED: Clarify USD pricing
-          const customPriceMsg = targetPrice ? ` or target price $${targetPrice.toFixed(2)} (USD)` : '';
+          const customPriceMsg = targetPrice ? ` or target price R$ ${targetPrice.toFixed(2)}` : '';
           return createEphemeralResponse(
             `Added **"${gameTitle.trim()}"** to your zT Radar wishlist!\n` +
             `🔔 **Active Alerts:** Historical Lows, 100% Free deals, Discounts >= 70%${customPriceMsg}.`
@@ -204,9 +203,8 @@ export const handler = async (event) => {
             return createEphemeralResponse('Your zT Radar wishlist is currently empty. Use `/wishlist add` to start tracking.');
           }
 
-          // UPDATED: Clarify USD pricing in list
           const gameList = items
-            .map((i) => `- **${i.game_title}**${i.target_price ? ` (Target: $${i.target_price.toFixed(2)})` : ' (Auto Deals Active)'}`)
+            .map((i) => `- **${i.game_title}**${i.target_price ? ` (Target: R$ ${i.target_price.toFixed(2)})` : ' (Auto Deals Active)'}`)
             .join('\n');
 
           return createEphemeralResponse(`**Your Tracked Wishlist:**\n${gameList}`);
