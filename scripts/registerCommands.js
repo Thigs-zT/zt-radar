@@ -62,7 +62,7 @@ const commands = [
   },
   {
     name: 'config-channel',
-    description: 'Configure a server channel to receive public game deal alerts',
+    description: 'Configure a server channel to receive public market deal broadcasts',
     default_member_permissions: '32', // MANAGE_GUILD
     options: [
       {
@@ -71,6 +71,28 @@ const commands = [
         type: 7, // CHANNEL
         channel_types: [0], // GUILD_TEXT
         required: true,
+      },
+      {
+        name: 'min_discount',
+        description: 'Minimum discount percentage to trigger an alert (default: 70)',
+        type: 4, // INTEGER
+        min_value: 10,
+        max_value: 100,
+        required: false,
+      },
+      {
+        name: 'free_only',
+        description: 'Only broadcast 100% free promotional games (default: false)',
+        type: 5, // BOOLEAN
+        required: false,
+      },
+      {
+        name: 'min_rating',
+        description: 'Minimum review score required out of 100 (default: 70)',
+        type: 4, // INTEGER
+        min_value: 0,
+        max_value: 100,
+        required: false,
       },
     ],
   },

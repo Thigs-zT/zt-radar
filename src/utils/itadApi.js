@@ -252,3 +252,71 @@ export async function getGameDealInfo(gameId) {
     return null;
   }
 }
+
+/**
+ * Fetches top trending deals across the entire market for server broadcast channels.
+ */
+export async function getMarketOverviewDeals() {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 4500);
+
+  try {
+    if (ITAD_API_KEY) {
+      const dealsUrl = `${ITAD_BASE_URL}/deals/v2?key=${ITAD_API_KEY}&country=BR&limit=20&sort=-cut`;
+      const res = await fetch(dealsUrl, { signal: controller.signal });
+
+      if (res.ok) {
+        const data = await res.json();
+        const dealsList = data?.list || [];
+
+        clearTimeout(timeoutId);
+        return dealsList.map((item) => ({
+          gameId: item.id,
+          title: item.title,
+          imageUrl: item.assets?.banner400 || item.assets?.banner300 || item.assets?.boxart || null,
+          reviewScore: item.reviews?.steam?.score ?? item.reviews?.metacritic?.score ?? null,
+          steamAppId: item.appid || item.steam_appid || null,
+          primaryDeal: {
+            shopName: resolveStoreName(item.deal?.shop?.name),
+            salePrice: item.deal?.price?.amount ?? 0,
+            regularPrice: item.deal?.regular?.amount ?? 0,
+            cutPercent: item.deal?.cut ?? 0,
+            url: item.deal?.url,
+          },
+          cheaperAlternative: null,
+        }));
+      }
+    }
+
+    // Fallback: CheapShark Top Deals
+    const csUrl = `${CHEAPSHARK_BASE_URL}/deals?pageSize=20&sortBy=Savings`;
+    const csRes = await fetch(csUrl, { signal: controller.signal });
+
+    if (csRes.ok) {
+      const csDeals = await csRes.json();
+      clearTimeout(timeoutId);
+      return csDeals.map((d) => ({
+        gameId: d.gameID,
+        title: d.title,
+        imageUrl: d.thumb,
+        reviewScore: d.metacriticScore ? parseInt(d.metacriticScore, 10) : null,
+        steamAppId: d.steamAppID || null,
+        primaryDeal: {
+          shopName: resolveStoreName(d.storeID),
+          salePrice: parseFloat(d.salePrice),
+          regularPrice: parseFloat(d.normalPrice),
+          cutPercent: Math.round(parseFloat(d.savings)),
+          url: `https://www.cheapshark.com/redirect?dealID=${d.dealID}`,
+        },
+        cheaperAlternative: null,
+      }));
+    }
+
+    clearTimeout(timeoutId);
+    return [];
+  } catch (error) {
+    clearTimeout(timeoutId);
+    console.error('Error fetching market overview deals:', error.message || error);
+    return [];
+  }
+}

@@ -1,6 +1,6 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, ScanCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
-import { getGameDealInfo } from '../utils/itadApi.js';
+import { getGameDealInfo, getMarketOverviewDeals } from '../utils/itadApi.js';
 
 const ddbClient = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(ddbClient);
@@ -29,13 +29,20 @@ function createStoreButtons(deal) {
     });
   }
 
-  // SteamDB Link generated from resolved steamAppId
+  // SteamDB Button (Direct App link or SteamDB Search fallback)
   if (deal.steamAppId) {
     buttons.push({
       type: 2,
       style: 5,
       label: 'SteamDB',
       url: `https://steamdb.info/app/${deal.steamAppId}/`,
+    });
+  } else if (deal.title) {
+    buttons.push({
+      type: 2,
+      style: 5,
+      label: 'SteamDB',
+      url: `https://steamdb.info/search/?a=app&q=${encodeURIComponent(deal.title)}`,
     });
   }
 
@@ -139,192 +146,183 @@ export const handler = async () => {
 
     console.log(`Retrieved ${wishlistItems.length} wishlist items and ${guildConfigs.length} guild configs.`);
 
-    if (wishlistItems.length === 0) {
-      console.log('No games to track. Exiting scanner.');
-      return {
-        statusCode: 200,
-        body: JSON.stringify({ message: 'No wishlist items found.' }),
-      };
-    }
+    // 1. Process Individual Wishlists (DMs)
+    if (wishlistItems.length > 0) {
+      const uniqueGameIds = [...new Set(wishlistItems.map((item) => item.external_game_id).filter(Boolean))];
+      console.log(`Unique wishlist games to fetch: ${uniqueGameIds.length}`);
 
-    const uniqueGameIds = [...new Set(wishlistItems.map((item) => item.external_game_id).filter(Boolean))];
-    console.log(`Unique games to fetch deal info: ${uniqueGameIds.length}`);
-
-    const dealsMap = new Map();
-    for (const gameId of uniqueGameIds) {
-      const dealInfo = await getGameDealInfo(gameId);
-      if (dealInfo) {
-        dealsMap.set(gameId, dealInfo);
-      }
-    }
-
-    // 1. Process Individual User Wishlist Alerts
-    for (const item of wishlistItems) {
-      const deal = dealsMap.get(item.external_game_id);
-      if (!deal) continue;
-
-      const effectivePrice = deal.cheaperAlternative?.salePrice ?? deal.primaryDeal?.salePrice ?? 0;
-      const effectiveCut = deal.cheaperAlternative?.cutPercent ?? deal.primaryDeal?.cutPercent ?? 0;
-
-      let shouldAlert = false;
-      let alertReason = '';
-
-      if (item.alert_free && effectivePrice === 0) {
-        shouldAlert = true;
-        alertReason = '100% FREE GAME ALERT!';
-      } else if (item.target_price && effectivePrice <= Number(item.target_price)) {
-        shouldAlert = true;
-        alertReason = `Target Price Reached (<= R$ ${Number(item.target_price).toFixed(2)})!`;
-      } else if (deal.isAllTimeLow && item.alert_all_time_low) {
-        shouldAlert = true;
-        alertReason = 'ALL-TIME LOW PRICE HIT!';
-      } else if (item.alert_steep_discount && effectiveCut >= 70) {
-        shouldAlert = true;
-        alertReason = `Massive Discount Alert: ${effectiveCut}% OFF!`;
-      }
-
-      const lastPrice = item.last_notified_price !== undefined ? Number(item.last_notified_price) : null;
-      const isNewLowerPrice = lastPrice === null || effectivePrice < lastPrice;
-
-      // If price went back up to regular, reset notification state so future discounts trigger alerts
-      if (lastPrice !== null && effectiveCut === 0) {
-        try {
-          await docClient.send(
-            new UpdateCommand({
-              TableName: TABLE_NAME,
-              Key: { PK: item.PK, SK: item.SK },
-              UpdateExpression: 'REMOVE last_notified_price, last_notified_at',
-            })
-          );
-        } catch (resetErr) {
-          console.error(`Failed to reset notification state for ${item.SK}:`, resetErr);
+      const dealsMap = new Map();
+      for (const gameId of uniqueGameIds) {
+        const dealInfo = await getGameDealInfo(gameId);
+        if (dealInfo) {
+          dealsMap.set(gameId, dealInfo);
         }
       }
 
-      if (shouldAlert && isNewLowerPrice) {
-        console.log(`Alert triggered for user ${item.user_id} on ${item.game_title}: ${alertReason}`);
+      for (const item of wishlistItems) {
+        const deal = dealsMap.get(item.external_game_id);
+        if (!deal) continue;
 
-        const fields = [
-          {
-            name: `${deal.primaryDeal.shopName} (Primary Offer)`,
-            value: `Price: **R$ ${deal.primaryDeal.salePrice.toFixed(2)}** (Regular: R$ ${deal.primaryDeal.regularPrice.toFixed(2)} | -${deal.primaryDeal.cutPercent}%)`,
-            inline: false,
-          },
-        ];
+        const effectivePrice = deal.cheaperAlternative?.salePrice ?? deal.primaryDeal?.salePrice ?? 0;
+        const effectiveCut = deal.cheaperAlternative?.cutPercent ?? deal.primaryDeal?.cutPercent ?? 0;
 
-        if (deal.cheaperAlternative) {
-          fields.push({
-            name: `Cheaper at ${deal.cheaperAlternative.shopName}!`,
-            value: `Price: **R$ ${deal.cheaperAlternative.salePrice.toFixed(2)}** (Regular: R$ ${deal.cheaperAlternative.regularPrice.toFixed(2)} | -${deal.cheaperAlternative.cutPercent}%)`,
-            inline: false,
-          });
+        let shouldAlert = false;
+        let alertReason = '';
+
+        if (item.alert_free && effectivePrice === 0) {
+          shouldAlert = true;
+          alertReason = '100% FREE GAME ALERT!';
+        } else if (item.target_price && effectivePrice <= Number(item.target_price)) {
+          shouldAlert = true;
+          alertReason = `Target Price Reached (<= R$ ${Number(item.target_price).toFixed(2)})!`;
+        } else if (deal.isAllTimeLow && item.alert_all_time_low) {
+          shouldAlert = true;
+          alertReason = 'ALL-TIME LOW PRICE HIT!';
+        } else if (item.alert_steep_discount && effectiveCut >= 70) {
+          shouldAlert = true;
+          alertReason = `Massive Discount Alert: ${effectiveCut}% OFF!`;
         }
 
-        if (deal.reviewScore) {
-          fields.push({
-            name: 'Review Score',
-            value: `Rating: **${deal.reviewScore}/100**`,
-            inline: true,
-          });
-        }
+        const lastPrice = item.last_notified_price !== undefined ? Number(item.last_notified_price) : null;
+        const isNewLowerPrice = lastPrice === null || effectivePrice < lastPrice;
 
-        const embed = {
-          title: `zT Radar Alert: ${item.game_title}`,
-          description: `**${alertReason}**`,
-          color: 0x5865f2,
-          fields,
-          footer: {
-            text: 'zT Radar Deal Intelligence • AWS Serverless',
-          },
-          timestamp: new Date().toISOString(),
-        };
-
-        if (deal.imageUrl) {
-          embed.image = { url: deal.imageUrl };
-        }
-
-        const components = createStoreButtons(deal);
-        const sent = await sendDiscordDm(item.user_id, embed, components);
-
-        if (sent) {
+        if (lastPrice !== null && effectiveCut === 0) {
           try {
             await docClient.send(
               new UpdateCommand({
                 TableName: TABLE_NAME,
                 Key: { PK: item.PK, SK: item.SK },
-                UpdateExpression: 'SET last_notified_price = :price, last_notified_at = :notifiedAt',
-                ExpressionAttributeValues: {
-                  ':price': effectivePrice,
-                  ':notifiedAt': new Date().toISOString(),
-                },
+                UpdateExpression: 'REMOVE last_notified_price, last_notified_at',
               })
             );
-          } catch (dbError) {
-            console.error(`Failed to update notification state for ${item.SK}:`, dbError);
+          } catch (resetErr) {
+            console.error(`Failed to reset notification state for ${item.SK}:`, resetErr);
+          }
+        }
+
+        if (shouldAlert && isNewLowerPrice) {
+          console.log(`DM Alert triggered for user ${item.user_id} on ${item.game_title}: ${alertReason}`);
+
+          const fields = [
+            {
+              name: `${deal.primaryDeal.shopName} (Primary Offer)`,
+              value: `Price: **R$ ${deal.primaryDeal.salePrice.toFixed(2)}** (Regular: R$ ${deal.primaryDeal.regularPrice.toFixed(2)} | -${deal.primaryDeal.cutPercent}%)`,
+              inline: false,
+            },
+          ];
+
+          if (deal.cheaperAlternative) {
+            fields.push({
+              name: `Cheaper at ${deal.cheaperAlternative.shopName}!`,
+              value: `Price: **R$ ${deal.cheaperAlternative.salePrice.toFixed(2)}** (Regular: R$ ${deal.cheaperAlternative.regularPrice.toFixed(2)} | -${deal.cheaperAlternative.cutPercent}%)`,
+              inline: false,
+            });
+          }
+
+          if (deal.reviewScore) {
+            fields.push({
+              name: 'Review Score',
+              value: `Rating: **${deal.reviewScore}/100**`,
+              inline: true,
+            });
+          }
+
+          const embed = {
+            title: `zT Radar Alert: ${item.game_title}`,
+            description: `**${alertReason}**`,
+            color: 0x5865f2,
+            fields,
+            footer: {
+              text: 'zT Radar Deal Intelligence • AWS Serverless',
+            },
+            timestamp: new Date().toISOString(),
+          };
+
+          if (deal.imageUrl) {
+            embed.image = { url: deal.imageUrl };
+          }
+
+          const components = createStoreButtons(deal);
+          const sent = await sendDiscordDm(item.user_id, embed, components);
+
+          if (sent) {
+            try {
+              await docClient.send(
+                new UpdateCommand({
+                  TableName: TABLE_NAME,
+                  Key: { PK: item.PK, SK: item.SK },
+                  UpdateExpression: 'SET last_notified_price = :price, last_notified_at = :notifiedAt',
+                  ExpressionAttributeValues: {
+                    ':price': effectivePrice,
+                    ':notifiedAt': new Date().toISOString(),
+                  },
+                })
+              );
+            } catch (dbError) {
+              console.error(`Failed to update notification state for ${item.SK}:`, dbError);
+            }
           }
         }
       }
     }
 
-    // 2. Process Independent Server (Guild) Broadcasts
+    // 2. Process Autonomous Global Market Radar for Guild Channels
     if (guildConfigs.length > 0) {
-      for (const [, deal] of dealsMap) {
-        const isFree = deal.primaryDeal?.salePrice === 0 || deal.cheaperAlternative?.salePrice === 0;
-        const effectiveCut = deal.cheaperAlternative?.cutPercent ?? deal.primaryDeal?.cutPercent ?? 0;
-        const isSteepDeal = effectiveCut >= 70;
+      console.log(`Checking market deals for ${guildConfigs.length} configured server channels...`);
+      const marketDeals = await getMarketOverviewDeals();
 
-        if (!isFree && !isSteepDeal) continue;
+      for (const config of guildConfigs) {
+        if (!config.alert_channel_id) continue;
 
-        if (!isFree && deal.reviewScore && deal.reviewScore < 70) {
-          console.log(`Skipping public broadcast for ${deal.title} due to review score (${deal.reviewScore}/100).`);
-          continue;
-        }
+        const targetMinDiscount = config.min_discount ?? 70;
+        const targetFreeOnly = config.free_only ?? false;
+        const targetMinRating = config.min_rating ?? 70;
 
-        const fields = [
-          {
-            name: `${deal.primaryDeal.shopName} (Primary Offer)`,
-            value: `Price: **R$ ${deal.primaryDeal.salePrice.toFixed(2)}** (Regular: R$ ${deal.primaryDeal.regularPrice.toFixed(2)} | -${deal.primaryDeal.cutPercent}%)`,
-            inline: false,
-          },
-        ];
+        for (const deal of marketDeals) {
+          const isFree = deal.primaryDeal?.salePrice === 0;
+          const cut = deal.primaryDeal?.cutPercent ?? 0;
 
-        if (deal.cheaperAlternative) {
-          fields.push({
-            name: `Cheaper at ${deal.cheaperAlternative.shopName}!`,
-            value: `Price: **R$ ${deal.cheaperAlternative.salePrice.toFixed(2)}** (Regular: R$ ${deal.cheaperAlternative.regularPrice.toFixed(2)} | -${deal.cheaperAlternative.cutPercent}%)`,
-            inline: false,
-          });
-        }
+          if (targetFreeOnly && !isFree) continue;
+          if (!targetFreeOnly && !isFree && cut < targetMinDiscount) continue;
 
-        if (deal.reviewScore) {
-          fields.push({
-            name: 'Review Score',
-            value: `Rating: **${deal.reviewScore}/100**`,
-            inline: true,
-          });
-        }
-
-        const embed = {
-          title: `Community Deal Alert: ${deal.title}`,
-          description: isFree ? 'Grab this game for FREE!' : `Massive discount detected (-${effectiveCut}%)!`,
-          color: 0x2ecc71,
-          fields,
-          footer: {
-            text: 'zT Radar Guild Deals • AWS Serverless',
-          },
-          timestamp: new Date().toISOString(),
-        };
-
-        if (deal.imageUrl) {
-          embed.image = { url: deal.imageUrl };
-        }
-
-        const components = createStoreButtons(deal);
-
-        for (const config of guildConfigs) {
-          if (config.alert_channel_id) {
-            await sendGuildChannelAlert(config.alert_channel_id, embed, components);
+          if (!isFree && deal.reviewScore && deal.reviewScore < targetMinRating) {
+            continue;
           }
+
+          const fields = [
+            {
+              name: `${deal.primaryDeal.shopName} (Primary Offer)`,
+              value: `Price: **R$ ${deal.primaryDeal.salePrice.toFixed(2)}** (Regular: R$ ${deal.primaryDeal.regularPrice.toFixed(2)} | -${deal.primaryDeal.cutPercent}%)`,
+              inline: false,
+            },
+          ];
+
+          if (deal.reviewScore) {
+            fields.push({
+              name: 'Review Score',
+              value: `Rating: **${deal.reviewScore}/100**`,
+              inline: true,
+            });
+          }
+
+          const embed = {
+            title: `Market Deal Radar: ${deal.title}`,
+            description: isFree ? 'Grab this game for **FREE**!' : `Massive discount detected (**-${cut}%**)!`,
+            color: isFree ? 0x2ecc71 : 0xf1c40f,
+            fields,
+            footer: {
+              text: 'zT Radar Guild Deals • AWS Serverless',
+            },
+            timestamp: new Date().toISOString(),
+          };
+
+          if (deal.imageUrl) {
+            embed.image = { url: deal.imageUrl };
+          }
+
+          const components = createStoreButtons(deal);
+          await sendGuildChannelAlert(config.alert_channel_id, embed, components);
+          break;
         }
       }
     }

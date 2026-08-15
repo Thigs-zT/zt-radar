@@ -175,8 +175,8 @@ export const handler = async (event) => {
             inline: false,
           },
           {
-            name: '/config-channel <channel>',
-            value: 'Admin command to set a server text channel for major community deal announcements.',
+            name: '/config-channel <channel> [min_discount] [free_only] [min_rating]',
+            value: 'Admin command to set server text channel for global market deal broadcasts with custom filters.',
             inline: false,
           },
           {
@@ -219,7 +219,14 @@ export const handler = async (event) => {
       }
 
       const channelOption = options?.find((opt) => opt.name === 'channel');
+      const minDiscountOption = options?.find((opt) => opt.name === 'min_discount');
+      const freeOnlyOption = options?.find((opt) => opt.name === 'free_only');
+      const minRatingOption = options?.find((opt) => opt.name === 'min_rating');
+
       const channelId = channelOption?.value;
+      const minDiscount = minDiscountOption ? Number(minDiscountOption.value) : 70;
+      const freeOnly = freeOnlyOption ? Boolean(freeOnlyOption.value) : false;
+      const minRating = minRatingOption ? Number(minRatingOption.value) : 70;
 
       if (!channelId) {
         return {
@@ -244,11 +251,18 @@ export const handler = async (event) => {
               SK: 'CONFIG',
               guild_id: guildId,
               alert_channel_id: channelId,
+              min_discount: minDiscount,
+              free_only: freeOnly,
+              min_rating: minRating,
               updated_by: userId,
               updated_at: new Date().toISOString(),
             },
           })
         );
+
+        const filterSummary = freeOnly
+          ? 'Filter: **100% Free Games Only**'
+          : `Filters: **>= ${minDiscount}% Off** | **Min Rating: ${minRating}/100**`;
 
         return {
           statusCode: 200,
@@ -257,7 +271,7 @@ export const handler = async (event) => {
             type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
             data: {
               flags: MESSAGE_FLAGS.EPHEMERAL,
-              content: `Server deals broadcast channel successfully configured to <#${channelId}>!`,
+              content: `Server deals broadcast channel successfully configured to <#${channelId}>!\n${filterSummary}`,
             },
           }),
         };
