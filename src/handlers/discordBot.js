@@ -41,7 +41,6 @@ export const handler = async (event) => {
     };
   }
 
-  // Asynchronous cryptographic Ed25519 verification
   const isValidRequest = await verifyKey(rawBody, signature, timestamp, PUBLIC_KEY);
   if (!isValidRequest) {
     return {
@@ -112,6 +111,56 @@ export const handler = async (event) => {
     const { name, options } = interaction.data;
     const userId = interaction.member?.user?.id || interaction.user?.id;
     const guildId = interaction.guild_id;
+
+    if (name === 'radar-help') {
+      const helpEmbed = {
+        title: 'zT Radar — Game Intelligence Manual',
+        description: 'Serverless game price intelligence bot deployed on AWS.',
+        color: 0x5865f2,
+        fields: [
+          {
+            name: '/wishlist add <game> [target_price]',
+            value: 'Monitor a game with live autocomplete. Optionally provide a target price in BRL (e.g. `50.00`).',
+            inline: false,
+          },
+          {
+            name: '/wishlist remove <game>',
+            value: 'Remove a monitored game from your wishlist.',
+            inline: false,
+          },
+          {
+            name: '/wishlist list',
+            value: 'List all games currently tracked in your personal wishlist.',
+            inline: false,
+          },
+          {
+            name: '/config-channel <channel>',
+            value: 'Admin command to set a text channel for major community deal announcements (100% Free or >= 70% Off).',
+            inline: false,
+          },
+          {
+            name: 'Alert Triggers',
+            value: '• 100% Free Game\n• All-Time Historical Low Price\n• Target Price Reached\n• Steep Discount (>= 70% Off)\n• Steam priority matching with alternative store comparisons.',
+            inline: false,
+          },
+        ],
+        footer: {
+          text: 'zT Radar • AWS Serverless Engine',
+        },
+      };
+
+      return {
+        statusCode: 200,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
+          data: {
+            flags: MESSAGE_FLAGS.EPHEMERAL,
+            embeds: [helpEmbed],
+          },
+        }),
+      };
+    }
 
     if (name === 'config-channel') {
       if (!guildId) {

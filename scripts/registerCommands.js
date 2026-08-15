@@ -24,15 +24,15 @@ const commands = [
             description: 'Game name to monitor',
             type: 3, // STRING
             required: true,
-            autocomplete: true
+            autocomplete: true,
           },
           {
             name: 'target_price',
             description: 'Target price in BRL (e.g. 50.00)',
             type: 10, // NUMBER
-            required: false
-          }
-        ]
+            required: false,
+          },
+        ],
       },
       {
         name: 'remove',
@@ -44,16 +44,16 @@ const commands = [
             description: 'Game name to remove',
             type: 3, // STRING
             required: true,
-            autocomplete: true
-          }
-        ]
+            autocomplete: true,
+          },
+        ],
       },
       {
         name: 'list',
         description: 'List all games currently on your monitored wishlist',
-        type: 1 // SUB_COMMAND
-      }
-    ]
+        type: 1, // SUB_COMMAND
+      },
+    ],
   },
   {
     name: 'config-channel',
@@ -65,10 +65,14 @@ const commands = [
         description: 'The text channel where alerts will be published',
         type: 7, // CHANNEL
         channel_types: [0], // GUILD_TEXT
-        required: true
-      }
-    ]
-  }
+        required: true,
+      },
+    ],
+  },
+  {
+    name: 'radar-help',
+    description: 'Display detailed guide on how to use zT Radar commands and deal alerts',
+  },
 ];
 
 async function registerCommands() {
@@ -80,10 +84,10 @@ async function registerCommands() {
     const response = await fetch(url, {
       method: 'PUT',
       headers: {
-        'Authorization': `Bot ${BOT_TOKEN}`,
-        'Content-Type': 'application/json'
+        Authorization: `Bot ${BOT_TOKEN}`,
+        'Content-Type': 'application/json',
       },
-      body: JSON.stringify(commands)
+      body: JSON.stringify(commands),
     });
 
     if (!response.ok) {

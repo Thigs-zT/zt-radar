@@ -8,12 +8,43 @@ const docClient = DynamoDBDocumentClient.from(ddbClient);
 const TABLE_NAME = process.env.TABLE_NAME;
 const BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
 
-async function sendDiscordDm(userId, embed) {
+function createStoreButtons(deal) {
+  const buttons = [];
+
+  if (deal.primaryDeal?.url) {
+    buttons.push({
+      type: 2, // BUTTON
+      style: 5, // LINK
+      label: `Open in ${deal.primaryDeal.shopName}`,
+      url: deal.primaryDeal.url,
+    });
+  }
+
+  if (deal.cheaperAlternative?.url) {
+    buttons.push({
+      type: 2, // BUTTON
+      style: 5, // LINK
+      label: `Alternative: ${deal.cheaperAlternative.shopName}`,
+      url: deal.cheaperAlternative.url,
+    });
+  }
+
+  if (buttons.length === 0) return [];
+
+  return [
+    {
+      type: 1, // ACTION_ROW
+      components: buttons,
+    },
+  ];
+}
+
+async function sendDiscordDm(userId, embed, components = []) {
   try {
     const dmChannelRes = await fetch('https://discord.com/api/v10/users/@me/channels', {
       method: 'POST',
       headers: {
-        'Authorization': `Bot ${BOT_TOKEN}`,
+        Authorization: `Bot ${BOT_TOKEN}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ recipient_id: userId }),
@@ -26,13 +57,18 @@ async function sendDiscordDm(userId, embed) {
 
     const dmChannel = await dmChannelRes.json();
 
+    const messagePayload = { embeds: [embed] };
+    if (components.length > 0) {
+      messagePayload.components = components;
+    }
+
     const messageRes = await fetch(`https://discord.com/api/v10/channels/${dmChannel.id}/messages`, {
       method: 'POST',
       headers: {
-        'Authorization': `Bot ${BOT_TOKEN}`,
+        Authorization: `Bot ${BOT_TOKEN}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ embeds: [embed] }),
+      body: JSON.stringify(messagePayload),
     });
 
     if (!messageRes.ok) {
@@ -46,15 +82,20 @@ async function sendDiscordDm(userId, embed) {
   }
 }
 
-async function sendGuildChannelAlert(channelId, embed) {
+async function sendGuildChannelAlert(channelId, embed, components = []) {
   try {
+    const messagePayload = { embeds: [embed] };
+    if (components.length > 0) {
+      messagePayload.components = components;
+    }
+
     const res = await fetch(`https://discord.com/api/v10/channels/${channelId}/messages`, {
       method: 'POST',
       headers: {
-        'Authorization': `Bot ${BOT_TOKEN}`,
+        Authorization: `Bot ${BOT_TOKEN}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ embeds: [embed] }),
+      body: JSON.stringify(messagePayload),
     });
 
     if (!res.ok) {
@@ -72,7 +113,6 @@ export const handler = async () => {
   console.log('Starting zT Radar scheduled deal scanner...');
 
   try {
-    // Scan all wishlist items and guild channel configurations
     const scanResult = await docClient.send(
       new ScanCommand({
         TableName: TABLE_NAME,
@@ -93,7 +133,6 @@ export const handler = async () => {
       };
     }
 
-    // Deduplicate game IDs
     const uniqueGameIds = [...new Set(wishlistItems.map((item) => item.external_game_id).filter(Boolean))];
     console.log(`Unique games to fetch deal info: ${uniqueGameIds.length}`);
 
@@ -105,15 +144,14 @@ export const handler = async () => {
       }
     }
 
-    // Process alerts for wishlisted users
     const publicBroadcastDeals = new Set();
 
     for (const item of wishlistItems) {
       const deal = dealsMap.get(item.external_game_id);
       if (!deal) continue;
 
-      const effectivePrice = deal.bestDeal?.salePrice ?? deal.primaryDeal?.salePrice ?? 0;
-      const effectiveCut = deal.bestDeal?.cutPercent ?? deal.primaryDeal?.cutPercent ?? 0;
+      const effectivePrice = deal.cheaperAlternative?.salePrice ?? deal.primaryDeal?.salePrice ?? 0;
+      const effectiveCut = deal.cheaperAlternative?.cutPercent ?? deal.primaryDeal?.cutPercent ?? 0;
 
       let shouldAlert = false;
       let alertReason = '';
@@ -140,7 +178,7 @@ export const handler = async () => {
         const fields = [
           {
             name: `${deal.primaryDeal.shopName} (Primary Offer)`,
-            value: `Price: **R$ ${deal.primaryDeal.salePrice.toFixed(2)}** (Regular: R$ ${deal.primaryDeal.regularPrice.toFixed(2)} | -${deal.primaryDeal.cutPercent}%)\n[Store Link](${deal.primaryDeal.url})`,
+            value: `Price: **R$ ${deal.primaryDeal.salePrice.toFixed(2)}** (Regular: R$ ${deal.primaryDeal.regularPrice.toFixed(2)} | -${deal.primaryDeal.cutPercent}%)`,
             inline: false,
           },
         ];
@@ -148,7 +186,7 @@ export const handler = async () => {
         if (deal.cheaperAlternative) {
           fields.push({
             name: `Cheaper at ${deal.cheaperAlternative.shopName}!`,
-            value: `Price: **R$ ${deal.cheaperAlternative.salePrice.toFixed(2)}** (Regular: R$ ${deal.cheaperAlternative.regularPrice.toFixed(2)} | -${deal.cheaperAlternative.cutPercent}%)\n[Alternative Store Link](${deal.cheaperAlternative.url})`,
+            value: `Price: **R$ ${deal.cheaperAlternative.salePrice.toFixed(2)}** (Regular: R$ ${deal.cheaperAlternative.regularPrice.toFixed(2)} | -${deal.cheaperAlternative.cutPercent}%)`,
             inline: false,
           });
         }
@@ -164,11 +202,11 @@ export const handler = async () => {
           timestamp: new Date().toISOString(),
         };
 
-        await sendDiscordDm(item.user_id, embed);
+        const components = createStoreButtons(deal);
+        await sendDiscordDm(item.user_id, embed, components);
       }
     }
 
-    // Broadcast massive public deals to configured guild channels
     if (guildConfigs.length > 0 && publicBroadcastDeals.size > 0) {
       console.log(`Broadcasting ${publicBroadcastDeals.size} major deals to ${guildConfigs.length} guild channels.`);
 
@@ -176,7 +214,7 @@ export const handler = async () => {
         const fields = [
           {
             name: `${deal.primaryDeal.shopName} (Primary Offer)`,
-            value: `Price: **R$ ${deal.primaryDeal.salePrice.toFixed(2)}** (Regular: R$ ${deal.primaryDeal.regularPrice.toFixed(2)} | -${deal.primaryDeal.cutPercent}%)\n[Store Link](${deal.primaryDeal.url})`,
+            value: `Price: **R$ ${deal.primaryDeal.salePrice.toFixed(2)}** (Regular: R$ ${deal.primaryDeal.regularPrice.toFixed(2)} | -${deal.primaryDeal.cutPercent}%)`,
             inline: false,
           },
         ];
@@ -184,7 +222,7 @@ export const handler = async () => {
         if (deal.cheaperAlternative) {
           fields.push({
             name: `Cheaper at ${deal.cheaperAlternative.shopName}!`,
-            value: `Price: **R$ ${deal.cheaperAlternative.salePrice.toFixed(2)}** (Regular: R$ ${deal.cheaperAlternative.regularPrice.toFixed(2)} | -${deal.cheaperAlternative.cutPercent}%)\n[Alternative Store Link](${deal.cheaperAlternative.url})`,
+            value: `Price: **R$ ${deal.cheaperAlternative.salePrice.toFixed(2)}** (Regular: R$ ${deal.cheaperAlternative.regularPrice.toFixed(2)} | -${deal.cheaperAlternative.cutPercent}%)`,
             inline: false,
           });
         }
@@ -200,9 +238,11 @@ export const handler = async () => {
           timestamp: new Date().toISOString(),
         };
 
+        const components = createStoreButtons(deal);
+
         for (const config of guildConfigs) {
           if (config.alert_channel_id) {
-            await sendGuildChannelAlert(config.alert_channel_id, embed);
+            await sendGuildChannelAlert(config.alert_channel_id, embed, components);
           }
         }
       }
