@@ -1,40 +1,41 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
-Description: zT Radar - Serverless Game Deal Intelligence and Discord Bot Infrastructure
+Description: >
+  zt-radar
+  Serverless Game Deal Intelligence Discord Bot on AWS
 
 Globals:
   Function:
-    Timeout: 15
-    MemorySize: 128
-    Runtime: nodejs20.x
+    Timeout: 10
+    MemorySize: 256
+    Runtime: nodejs24.x
     Architectures:
       - x86_64
     Environment:
       Variables:
         TABLE_NAME: !Ref ZtRadarTable
-        DISCORD_PUBLIC_KEY: !Ref DiscordPublicKey
         DISCORD_APP_ID: !Ref DiscordAppId
+        DISCORD_PUBLIC_KEY: !Ref DiscordPublicKey
         DISCORD_BOT_TOKEN: !Ref DiscordBotToken
         ITAD_API_KEY: !Ref ItadApiKey
 
 Parameters:
-  DiscordPublicKey:
-    Type: String
-    Description: Public Key from Discord Developer Portal for request verification
   DiscordAppId:
     Type: String
-    Description: Application Client ID from Discord Developer Portal
+    Description: Discord Application Client ID
+  DiscordPublicKey:
+    Type: String
+    Description: Discord Application Public Key (Ed25519)
   DiscordBotToken:
     Type: String
+    Description: Discord Bot Authentication Token
     NoEcho: true
-    Description: Bot Token from Discord Developer Portal
   ItadApiKey:
     Type: String
+    Description: IsThereAnyDeal v3 API Key
     NoEcho: true
-    Description: API Key for IsThereAnyDeal v3
 
 Resources:
-  # DynamoDB Table - Single-Table Design
   ZtRadarTable:
     Type: AWS::DynamoDB::Table
     Properties:
@@ -51,50 +52,40 @@ Resources:
         - AttributeName: SK
           KeyType: RANGE
 
-  # HTTP API Gateway for Discord Webhook Interactions
-  HttpApi:
-    Type: AWS::Serverless::HttpApi
-    Properties:
-      Name: zt-radar-api
-
-  # Lambda Handler: Reactive Discord Interactions (/wishlist)
   DiscordBotFunction:
     Type: AWS::Serverless::Function
     Properties:
-      FunctionName: zt-radar-bot-handler
       CodeUri: ./
       Handler: src/handlers/discordBot.handler
-      Events:
-        DiscordApi:
-          Type: HttpApi
-          Properties:
-            Path: /discord
-            Method: post
-            ApiId: !Ref HttpApi
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref ZtRadarTable
+      Events:
+        DiscordWebhook:
+          Type: HttpApi
+          Properties:
+            Path: /interactions
+            Method: post
 
-  # Lambda Handler: Scheduled Market Intelligence Scanner
   DealScannerFunction:
     Type: AWS::Serverless::Function
     Properties:
-      FunctionName: zt-radar-deal-scanner
       CodeUri: ./
       Handler: src/handlers/dealScanner.handler
-      Events:
-        ScheduledScan:
-          Type: Schedule
-          Properties:
-            Schedule: cron(0 12,21 * * ? *) # Runs twice a day at 12:00 UTC and 21:00 UTC
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref ZtRadarTable
+      Events:
+        ScanSchedule:
+          Type: Schedule
+          Properties:
+            Schedule: rate(1 hour)
+            Enabled: true
 
 Outputs:
-  DiscordEndpointUrl:
-    Description: Endpoint URL to set as Interactivity Endpoint URL in Discord Developer Portal
-    Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/discord"
-  TableName:
+  InteractionsWebhookUrl:
+    Description: HTTP API Endpoint for Discord Interactions Webhook
+    Value: !Sub "https://${ServerlessHttpApi}.execute-api.${AWS::Region}.amazonaws.com/interactions"
+  DynamoDBTableName:
     Description: DynamoDB Table Name
     Value: !Ref ZtRadarTable
