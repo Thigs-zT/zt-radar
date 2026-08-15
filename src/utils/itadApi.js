@@ -2,9 +2,7 @@ const ITAD_API_KEY = process.env.ITAD_API_KEY;
 const ITAD_BASE_URL = 'https://api.isthereanydeal.com';
 const CHEAPSHARK_BASE_URL = 'https://www.cheapshark.com/api/1.0';
 
-// Unified store name mapping for clean display
 const STORE_DIRECTORY = {
-  // CheapShark Store IDs
   '1': 'Steam',
   '2': 'GamersGate',
   '3': 'GreenManGaming',
@@ -16,7 +14,6 @@ const STORE_DIRECTORY = {
   '25': 'Epic Games Store',
   '31': 'Blizzard Battle.net',
   '35': 'Nuuvem',
-  // ITAD Store Slugs / Names
   steam: 'Steam',
   gog: 'GOG',
   epic: 'Epic Games Store',
@@ -29,27 +26,35 @@ const STORE_DIRECTORY = {
   fanatical: 'Fanatical',
 };
 
+const POPULAR_SUGGESTIONS = [
+  { name: 'Grand Theft Auto V', value: 'gta-v|Grand Theft Auto V' },
+  { name: 'Cyberpunk 2077', value: 'cyberpunk-2077|Cyberpunk 2077' },
+  { name: 'Elden Ring', value: 'elden-ring|Elden Ring' },
+  { name: 'The Witcher 3: Wild Hunt', value: 'the-witcher-3|The Witcher 3: Wild Hunt' },
+  { name: 'Red Dead Redemption 2', value: 'rdr2|Red Dead Redemption 2' },
+  { name: 'Baldurs Gate 3', value: 'baldurs-gate-3|Baldurs Gate 3' },
+  { name: 'God of War Ragnarok', value: 'gow-ragnarok|God of War Ragnarok' },
+  { name: 'Hogwarts Legacy', value: 'hogwarts-legacy|Hogwarts Legacy' },
+];
+
 export function resolveStoreName(rawStore) {
   if (!rawStore) return 'Authorized Store';
   const key = String(rawStore).toLowerCase().trim();
   return STORE_DIRECTORY[key] || STORE_DIRECTORY[rawStore] || rawStore;
 }
 
-/**
- * Searches for games to populate Discord slash command autocomplete options.
- * Strict 2.0-second timeout ensures completion within Discord 3.0s window.
- */
 export async function searchGamesForAutocomplete(query) {
-  if (!query || query.length < 2) {
-    return [];
+  if (!query || query.trim().length === 0) {
+    return POPULAR_SUGGESTIONS;
   }
 
+  const trimmedQuery = query.trim();
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 2000);
 
   try {
     if (ITAD_API_KEY) {
-      const itadUrl = `${ITAD_BASE_URL}/games/search/v1?key=${ITAD_API_KEY}&title=${encodeURIComponent(query)}&results=25`;
+      const itadUrl = `${ITAD_BASE_URL}/games/search/v1?key=${ITAD_API_KEY}&title=${encodeURIComponent(trimmedQuery)}&results=25`;
       const res = await fetch(itadUrl, { signal: controller.signal });
 
       if (res.ok) {
@@ -65,7 +70,7 @@ export async function searchGamesForAutocomplete(query) {
     }
 
     // Fallback: CheapShark API game lookup
-    const csUrl = `${CHEAPSHARK_BASE_URL}/games?title=${encodeURIComponent(query)}&limit=25`;
+    const csUrl = `${CHEAPSHARK_BASE_URL}/games?title=${encodeURIComponent(trimmedQuery)}&limit=25`;
     const csRes = await fetch(csUrl, { signal: controller.signal });
 
     if (csRes.ok) {
@@ -80,17 +85,14 @@ export async function searchGamesForAutocomplete(query) {
     }
 
     clearTimeout(timeoutId);
-    return [];
+    return POPULAR_SUGGESTIONS.filter((g) => g.name.toLowerCase().includes(trimmedQuery.toLowerCase()));
   } catch (error) {
     clearTimeout(timeoutId);
     console.error('Game search lookup error:', error.message || error);
-    return [];
+    return POPULAR_SUGGESTIONS;
   }
 }
 
-/**
- * Fetches real-time price deal intelligence with Steam store prioritization.
- */
 export async function getGameDealInfo(gameId) {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 4000);
@@ -99,8 +101,9 @@ export async function getGameDealInfo(gameId) {
     if (ITAD_API_KEY) {
       const priceUrl = `${ITAD_BASE_URL}/games/prices/v3?key=${ITAD_API_KEY}&country=BR`;
       const historyUrl = `${ITAD_BASE_URL}/games/historylow/v1?key=${ITAD_API_KEY}&country=BR`;
+      const infoUrl = `${ITAD_BASE_URL}/games/info/v2?key=${ITAD_API_KEY}&id=${gameId}`;
 
-      const [priceRes, historyRes] = await Promise.all([
+      const [priceRes, historyRes, infoRes] = await Promise.all([
         fetch(priceUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -113,21 +116,25 @@ export async function getGameDealInfo(gameId) {
           body: JSON.stringify([gameId]),
           signal: controller.signal,
         }),
+        fetch(infoUrl, { signal: controller.signal }).catch(() => null),
       ]);
 
       if (priceRes.ok) {
         const priceData = await priceRes.json();
         const historyData = historyRes.ok ? await historyRes.json() : [];
+        const infoData = infoRes && infoRes.ok ? await infoRes.json() : null;
 
         const gamePrices = priceData?.[0]?.deals || [];
         const historyLow = historyData?.[0]?.low?.price?.amount ?? null;
+
+        let bannerImage = infoData?.assets?.banner400 || infoData?.assets?.banner300 || infoData?.assets?.boxart || null;
+        const reviewScore = infoData?.reviews?.steam?.score ?? infoData?.reviews?.metacritic?.score ?? null;
 
         if (gamePrices.length > 0) {
           const steamOffer = gamePrices.find(
             (deal) => deal.shop?.name?.toLowerCase().includes('steam') || deal.shop?.id === 61
           );
 
-          // Sort deals by lowest price
           const sortedDeals = [...gamePrices].sort((a, b) => a.price.amount - b.price.amount);
           const cheapestOffer = sortedDeals[0];
 
@@ -156,12 +163,17 @@ export async function getGameDealInfo(gameId) {
               }
             : null;
 
-          const isAllTimeLow = historyLow !== null && (primaryDeal.salePrice <= historyLow || (cheaperAlternative && cheaperAlternative.salePrice <= historyLow));
+          const isAllTimeLow =
+            historyLow !== null &&
+            (primaryDeal.salePrice <= historyLow ||
+              (cheaperAlternative && cheaperAlternative.salePrice <= historyLow));
 
           clearTimeout(timeoutId);
           return {
             gameId,
             title: priceData[0]?.title || 'Monitored Title',
+            imageUrl: bannerImage,
+            reviewScore,
             isAllTimeLow,
             allTimeLowPrice: historyLow,
             primaryDeal,
@@ -171,7 +183,7 @@ export async function getGameDealInfo(gameId) {
       }
     }
 
-    // Fallback: CheapShark deals lookup
+    // Fallback: CheapShark API
     const csUrl = `${CHEAPSHARK_BASE_URL}/games?id=${gameId}`;
     const csRes = await fetch(csUrl, { signal: controller.signal });
 
@@ -180,7 +192,10 @@ export async function getGameDealInfo(gameId) {
       const deals = csData.deals || [];
       if (deals.length > 0) {
         const steamDeal = deals.find((d) => d.storeID === '1');
-        const cheapestDeal = deals.reduce((prev, curr) => (parseFloat(curr.price) < parseFloat(prev.price) ? curr : prev), deals[0]);
+        const cheapestDeal = deals.reduce(
+          (prev, curr) => (parseFloat(curr.price) < parseFloat(prev.price) ? curr : prev),
+          deals[0]
+        );
 
         const primaryRaw = steamDeal || cheapestDeal;
         let secondaryRaw = null;
@@ -207,11 +222,18 @@ export async function getGameDealInfo(gameId) {
             }
           : null;
 
+        const metacriticScore = csData.info?.metacriticScore ? parseInt(csData.info.metacriticScore, 10) : null;
+        const bannerImage = csData.info?.thumb || null;
+
         clearTimeout(timeoutId);
         return {
           gameId,
           title: csData.info?.title || 'Monitored Title',
-          isAllTimeLow: csData.cheapestPriceEver?.price ? primaryDeal.salePrice <= parseFloat(csData.cheapestPriceEver.price) : false,
+          imageUrl: bannerImage,
+          reviewScore: metacriticScore,
+          isAllTimeLow: csData.cheapestPriceEver?.price
+            ? primaryDeal.salePrice <= parseFloat(csData.cheapestPriceEver.price)
+            : false,
           allTimeLowPrice: csData.cheapestPriceEver?.price ? parseFloat(csData.cheapestPriceEver.price) : null,
           primaryDeal,
           cheaperAlternative,

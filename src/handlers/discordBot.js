@@ -52,7 +52,7 @@ export const handler = async (event) => {
 
   const interaction = JSON.parse(rawBody);
 
-  // Handle Discord PING verification (Type 1)
+  // Handshake PING (Type 1)
   if (interaction.type === 1) {
     return {
       statusCode: 200,
@@ -61,26 +61,64 @@ export const handler = async (event) => {
     };
   }
 
-  // Handle Autocomplete Interactions (Type 4)
+  // Autocomplete Handling (Type 4)
   if (interaction.type === 4) {
     const { name, options } = interaction.data;
+    const userId = interaction.member?.user?.id || interaction.user?.id;
+
     if (name === 'wishlist') {
       const subCommand = options?.[0];
+      const subCommandName = subCommand?.name;
       const focusedOption = subCommand?.options?.find((opt) => opt.focused);
 
       if (focusedOption && focusedOption.name === 'game') {
-        const query = focusedOption.value?.trim();
-        if (!query || query.length < 2) {
-          return {
-            statusCode: 200,
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              type: RESPONSE_TYPES.APPLICATION_COMMAND_AUTOCOMPLETE_RESULT,
-              data: { choices: [] },
-            }),
-          };
+        const query = focusedOption.value?.trim() || '';
+
+        // Autocomplete for Remove: Show user's existing games only
+        if (subCommandName === 'remove') {
+          try {
+            const queryResult = await docClient.send(
+              new QueryCommand({
+                TableName: TABLE_NAME,
+                KeyConditionExpression: 'PK = :pk AND begins_with(SK, :skPrefix)',
+                ExpressionAttributeValues: {
+                  ':pk': `USER#${userId}`,
+                  ':skPrefix': 'GAME#',
+                },
+              })
+            );
+
+            const userGames = queryResult.Items || [];
+            const filteredChoices = userGames
+              .filter((item) => item.game_title.toLowerCase().includes(query.toLowerCase()))
+              .slice(0, 25)
+              .map((item) => ({
+                name: item.game_title.length > 100 ? item.game_title.substring(0, 97) + '...' : item.game_title,
+                value: `${item.external_game_id || ''}|${item.game_title}`.substring(0, 100),
+              }));
+
+            return {
+              statusCode: 200,
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                type: RESPONSE_TYPES.APPLICATION_COMMAND_AUTOCOMPLETE_RESULT,
+                data: { choices: filteredChoices },
+              }),
+            };
+          } catch (error) {
+            console.error('Error fetching user games for remove autocomplete:', error);
+            return {
+              statusCode: 200,
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                type: RESPONSE_TYPES.APPLICATION_COMMAND_AUTOCOMPLETE_RESULT,
+                data: { choices: [] },
+              }),
+            };
+          }
         }
 
+        // Autocomplete for Add: Search ITAD/CheapShark or show trending defaults
         try {
           const suggestions = await searchGamesForAutocomplete(query);
           return {
@@ -106,7 +144,7 @@ export const handler = async (event) => {
     }
   }
 
-  // Handle Slash Command Interactions (Type 2)
+  // Slash Command Interactions (Type 2)
   if (interaction.type === 2) {
     const { name, options } = interaction.data;
     const userId = interaction.member?.user?.id || interaction.user?.id;
@@ -120,12 +158,17 @@ export const handler = async (event) => {
         fields: [
           {
             name: '/wishlist add <game> [target_price]',
-            value: 'Monitor a game with live autocomplete. Optionally provide a target price in BRL (e.g. `50.00`).',
+            value: 'Monitor a game with live autocomplete. Optionally set a target price in BRL (e.g. `50.00`).',
             inline: false,
           },
           {
             name: '/wishlist remove <game>',
-            value: 'Remove a monitored game from your wishlist.',
+            value: 'Quickly remove a game directly from your saved list with contextual autocomplete.',
+            inline: false,
+          },
+          {
+            name: '/wishlist clear',
+            value: 'Remove all games from your monitored wishlist at once.',
             inline: false,
           },
           {
@@ -135,12 +178,7 @@ export const handler = async (event) => {
           },
           {
             name: '/config-channel <channel>',
-            value: 'Admin command to set a text channel for major community deal announcements (100% Free or >= 70% Off).',
-            inline: false,
-          },
-          {
-            name: 'Alert Triggers',
-            value: '• 100% Free Game\n• All-Time Historical Low Price\n• Target Price Reached\n• Steep Discount (>= 70% Off)\n• Steam priority matching with alternative store comparisons.',
+            value: 'Admin command to set a server text channel for major community deal announcements.',
             inline: false,
           },
         ],
@@ -239,6 +277,73 @@ export const handler = async (event) => {
     if (name === 'wishlist') {
       const subCommand = options?.[0];
       const subCommandName = subCommand?.name;
+
+      if (subCommandName === 'clear') {
+        try {
+          const queryResult = await docClient.send(
+            new QueryCommand({
+              TableName: TABLE_NAME,
+              KeyConditionExpression: 'PK = :pk AND begins_with(SK, :skPrefix)',
+              ExpressionAttributeValues: {
+                ':pk': `USER#${userId}`,
+                ':skPrefix': 'GAME#',
+              },
+            })
+          );
+
+          const items = queryResult.Items || [];
+          if (items.length === 0) {
+            return {
+              statusCode: 200,
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
+                data: {
+                  flags: MESSAGE_FLAGS.EPHEMERAL,
+                  content: 'Your wishlist is already empty.',
+                },
+              }),
+            };
+          }
+
+          for (const item of items) {
+            await docClient.send(
+              new DeleteCommand({
+                TableName: TABLE_NAME,
+                Key: {
+                  PK: item.PK,
+                  SK: item.SK,
+                },
+              })
+            );
+          }
+
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
+              data: {
+                flags: MESSAGE_FLAGS.EPHEMERAL,
+                content: `Cleared **${items.length}** games from your monitored wishlist.`,
+              },
+            }),
+          };
+        } catch (error) {
+          console.error('Error clearing wishlist:', error);
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
+              data: {
+                flags: MESSAGE_FLAGS.EPHEMERAL,
+                content: 'Failed to clear wishlist. Please try again.',
+              },
+            }),
+          };
+        }
+      }
 
       if (subCommandName === 'add') {
         const gameOption = subCommand.options?.find((opt) => opt.name === 'game');

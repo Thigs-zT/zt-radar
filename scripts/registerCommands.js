@@ -41,12 +41,17 @@ const commands = [
         options: [
           {
             name: 'game',
-            description: 'Game name to remove',
+            description: 'Game name to remove from your tracked wishlist',
             type: 3, // STRING
             required: true,
             autocomplete: true,
           },
         ],
+      },
+      {
+        name: 'clear',
+        description: 'Remove all games from your monitored wishlist',
+        type: 1, // SUB_COMMAND
       },
       {
         name: 'list',

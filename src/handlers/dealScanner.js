@@ -191,6 +191,14 @@ export const handler = async () => {
           });
         }
 
+        if (deal.reviewScore) {
+          fields.push({
+            name: 'Review Score',
+            value: `Rating: **${deal.reviewScore}/100**`,
+            inline: true,
+          });
+        }
+
         const embed = {
           title: `zT Radar Alert: ${item.game_title}`,
           description: `**${alertReason}**`,
@@ -202,15 +210,25 @@ export const handler = async () => {
           timestamp: new Date().toISOString(),
         };
 
+        if (deal.imageUrl) {
+          embed.image = { url: deal.imageUrl };
+        }
+
         const components = createStoreButtons(deal);
         await sendDiscordDm(item.user_id, embed, components);
       }
     }
 
+    // Broadcast filtered deals to guild channels (free or score >= 70)
     if (guildConfigs.length > 0 && publicBroadcastDeals.size > 0) {
-      console.log(`Broadcasting ${publicBroadcastDeals.size} major deals to ${guildConfigs.length} guild channels.`);
-
       for (const deal of publicBroadcastDeals) {
+        // Analytical review filter for public broadcasts (bypass if 100% free)
+        const isFree = deal.primaryDeal?.salePrice === 0 || deal.cheaperAlternative?.salePrice === 0;
+        if (!isFree && deal.reviewScore && deal.reviewScore < 70) {
+          console.log(`Skipping public broadcast for ${deal.title} due to low review score (${deal.reviewScore}/100).`);
+          continue;
+        }
+
         const fields = [
           {
             name: `${deal.primaryDeal.shopName} (Primary Offer)`,
@@ -227,9 +245,17 @@ export const handler = async () => {
           });
         }
 
+        if (deal.reviewScore) {
+          fields.push({
+            name: 'Review Score',
+            value: `Rating: **${deal.reviewScore}/100**`,
+            inline: true,
+          });
+        }
+
         const embed = {
           title: `Community Deal Alert: ${deal.title}`,
-          description: deal.primaryDeal.salePrice === 0 ? 'Grab this game for FREE!' : 'Massive community discount detected!',
+          description: isFree ? 'Grab this game for FREE!' : 'Massive community discount detected!',
           color: 0x2ecc71,
           fields,
           footer: {
@@ -237,6 +263,10 @@ export const handler = async () => {
           },
           timestamp: new Date().toISOString(),
         };
+
+        if (deal.imageUrl) {
+          embed.image = { url: deal.imageUrl };
+        }
 
         const components = createStoreButtons(deal);
 
