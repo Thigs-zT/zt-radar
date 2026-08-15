@@ -14,6 +14,7 @@ Globals:
         TABLE_NAME: !Ref ZtRadarTable
         DISCORD_PUBLIC_KEY: !Ref DiscordPublicKey
         DISCORD_APP_ID: !Ref DiscordAppId
+        DISCORD_BOT_TOKEN: !Ref DiscordBotToken
 
 Parameters:
   DiscordPublicKey:
@@ -22,6 +23,10 @@ Parameters:
   DiscordAppId:
     Type: String
     Description: Application Client ID from Discord Developer Portal
+  DiscordBotToken:
+    Type: String
+    NoEcho: true
+    Description: Bot Token from Discord Developer Portal
 
 Resources:
   # DynamoDB Table - Single-Table Design

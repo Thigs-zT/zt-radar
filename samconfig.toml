@@ -4,7 +4,6 @@ version = 0.1
 stack_name = "zt-radar-stack"
 resolve_s3 = true
 s3_prefix = "zt-radar-stack"
-region = "us-east-2"
 capabilities = "CAPABILITY_IAM"
 parameter_overrides = "DiscordPublicKey=\"02b51d194a836f3bab5592028a98736866a22ec1f9c6fa1f6cfa43b7df48b20a\" DiscordAppId=\"1537623174211182712\""
 image_repositories = []
