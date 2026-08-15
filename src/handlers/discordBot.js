@@ -1,6 +1,6 @@
 import { verifyKey } from 'discord-interactions';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, PutCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, PutCommand, QueryCommand, DeleteCommand } from '@aws-sdk/lib-dynamodb';
 import { searchGamesForAutocomplete } from '../utils/itadApi.js';
 
 const client = new DynamoDBClient({});
@@ -48,24 +48,19 @@ export const handler = async (event) => {
   // Type 4: APPLICATION_COMMAND_AUTOCOMPLETE
   if (message.type === 4) {
     try {
-      // Find focused option in subcommands
       const subCommandOptions = message.data?.options?.[0]?.options || [];
       const focusedOption = subCommandOptions.find((opt) => opt.focused) || 
                             message.data?.options?.find((opt) => opt.focused);
 
       const queryValue = focusedOption?.value || '';
-      console.log('Autocomplete query received for:', queryValue);
-
       const choices = await searchGamesForAutocomplete(queryValue);
 
       return {
         statusCode: 200,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          type: 8, // APPLICATION_COMMAND_AUTOCOMPLETE_RESULT
-          data: {
-            choices: choices || [],
-          },
+          type: 8, 
+          data: { choices: choices || [] },
         }),
       };
     } catch (err) {
@@ -73,10 +68,7 @@ export const handler = async (event) => {
       return {
         statusCode: 200,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          type: 8,
-          data: { choices: [] },
-        }),
+        body: JSON.stringify({ type: 8, data: { choices: [] } }),
       };
     }
   }
@@ -97,11 +89,8 @@ export const handler = async (event) => {
         const rawValue = gameOption?.value;
         const targetPrice = priceOption?.value ? Number(priceOption.value) : null;
 
-        if (!rawValue) {
-          return createEphemeralResponse('Game title is required.');
-        }
+        if (!rawValue) return createEphemeralResponse('Game title is required.');
 
-        // Accepts selected items ("ID|Title") or raw typed text gracefully
         let externalGameId = null;
         let gameTitle = rawValue;
 
@@ -134,7 +123,8 @@ export const handler = async (event) => {
             })
           );
 
-          const customPriceMsg = targetPrice ? ` or target price R$ ${targetPrice.toFixed(2)}` : '';
+          // UPDATED: Clarify USD pricing
+          const customPriceMsg = targetPrice ? ` or target price $${targetPrice.toFixed(2)} (USD)` : '';
           return createEphemeralResponse(
             `Added **"${gameTitle.trim()}"** to your zT Radar wishlist!\n` +
             `🔔 **Active Alerts:** Historical Lows, 100% Free deals, Discounts >= 70%${customPriceMsg}.`
@@ -142,6 +132,56 @@ export const handler = async (event) => {
         } catch (dbError) {
           console.error('DynamoDB Put Error:', dbError);
           return createEphemeralResponse('Failed to save game. Please try again.');
+        }
+      }
+
+      if (subCommand === 'remove') { // NEW SUBCOMMAND LOGIC
+        const subOptions = options[0].options || [];
+        const gameOption = subOptions.find((opt) => opt.name === 'game');
+
+        const rawValue = gameOption?.value;
+
+        if (!rawValue) return createEphemeralResponse('Game selection is required.');
+
+        // Reuse autocomplete parsing logic
+        let gameTitle = rawValue;
+        if (rawValue.includes('|')) {
+          gameTitle = rawValue.split('|')[1];
+        }
+
+        const normalizedGame = gameTitle.trim().toLowerCase();
+
+        try {
+          // Verify if item exists before deletion (optional, but good for UX)
+          const getResponse = await docClient.send(
+            new QueryCommand({
+              TableName: TABLE_NAME,
+              KeyConditionExpression: 'PK = :pk AND SK = :sk',
+              ExpressionAttributeValues: {
+                ':pk': `USER#${userId}`,
+                ':sk': `GAME#${normalizedGame}`,
+              },
+            })
+          );
+
+          if (getResponse.Items?.length === 0) {
+            return createEphemeralResponse(`❌ "**${gameTitle.trim()}**" is not currently in your wishlist.`);
+          }
+
+          await docClient.send(
+            new DeleteCommand({
+              TableName: TABLE_NAME,
+              Key: {
+                PK: `USER#${userId}`,
+                SK: `GAME#${normalizedGame}`,
+              },
+            })
+          );
+
+          return createEphemeralResponse(`Successfully removed "**${gameTitle.trim()}**" from your zT Radar wishlist.`);
+        } catch (dbError) {
+          console.error('DynamoDB Delete Error:', dbError);
+          return createEphemeralResponse('Failed to remove game from database. Please try again.');
         }
       }
 
@@ -164,8 +204,9 @@ export const handler = async (event) => {
             return createEphemeralResponse('Your zT Radar wishlist is currently empty. Use `/wishlist add` to start tracking.');
           }
 
+          // UPDATED: Clarify USD pricing in list
           const gameList = items
-            .map((i) => `- **${i.game_title}**${i.target_price ? ` (Target: R$ ${i.target_price.toFixed(2)})` : ' (Auto Deals Active)'}`)
+            .map((i) => `- **${i.game_title}**${i.target_price ? ` (Target: $${i.target_price.toFixed(2)})` : ' (Auto Deals Active)'}`)
             .join('\n');
 
           return createEphemeralResponse(`**Your Tracked Wishlist:**\n${gameList}`);

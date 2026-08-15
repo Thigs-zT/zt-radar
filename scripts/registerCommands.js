@@ -24,13 +24,27 @@ const commands = [
             description: 'Start typing to search for a game',
             type: 3,
             required: true,
-            autocomplete: true // <--- ENABLES DISCORD AUTOCOMPLETE
+            autocomplete: true
           },
           {
             name: 'target_price',
-            description: 'Optional maximum target price in BRL (e.g., 100)',
+            description: 'Optional maximum target price in USD (e.g., 20)', // Updated label
             type: 10,
             required: false
+          }
+        ]
+      },
+      {
+        name: 'remove', // NEW SUBCOMMAND
+        description: 'Remove a game from your tracked wishlist',
+        type: 1,
+        options: [
+          {
+            name: 'game',
+            description: 'Start typing to search for a game to remove',
+            type: 3,
+            required: true,
+            autocomplete: true // We can use autocomplete here too!
           }
         ]
       },
@@ -55,7 +69,7 @@ async function registerSlashCommands() {
       },
     });
 
-    console.log('Slash commands registered successfully with Autocomplete enabled!');
+    console.log('Slash commands registered successfully with remove and clarified pricing!');
     console.log('Active commands:', response.data.map(c => `/${c.name}`).join(', '));
   } catch (error) {
     console.error('Failed to register commands:', error.response?.data || error.message);
