@@ -176,7 +176,7 @@ export const handler = async (event) => {
           },
           {
             name: '/config-channel <channel> [min_discount] [free_only] [min_rating]',
-            value: 'Admin command to set server text channel for global market deal broadcasts with custom filters.',
+            value: 'Admin command to configure a server deals broadcast channel (Default: >= 80% discount and >= 80 rating).',
             inline: false,
           },
           {
@@ -224,9 +224,9 @@ export const handler = async (event) => {
       const minRatingOption = options?.find((opt) => opt.name === 'min_rating');
 
       const channelId = channelOption?.value;
-      const minDiscount = minDiscountOption ? Number(minDiscountOption.value) : 70;
+      const minDiscount = minDiscountOption ? Number(minDiscountOption.value) : 80;
       const freeOnly = freeOnlyOption ? Boolean(freeOnlyOption.value) : false;
-      const minRating = minRatingOption ? Number(minRatingOption.value) : 70;
+      const minRating = minRatingOption ? Number(minRatingOption.value) : 80;
 
       if (!channelId) {
         return {
@@ -254,6 +254,7 @@ export const handler = async (event) => {
               min_discount: minDiscount,
               free_only: freeOnly,
               min_rating: minRating,
+              last_broadcasted_deals: [],
               updated_by: userId,
               updated_at: new Date().toISOString(),
             },

@@ -62,7 +62,7 @@ const commands = [
   },
   {
     name: 'config-channel',
-    description: 'Configure a server channel to receive public market deal broadcasts',
+    description: 'Configure a server channel to receive curated market deal broadcasts',
     default_member_permissions: '32', // MANAGE_GUILD
     options: [
       {
@@ -74,7 +74,7 @@ const commands = [
       },
       {
         name: 'min_discount',
-        description: 'Minimum discount percentage to trigger an alert (default: 70)',
+        description: 'Minimum discount percentage to trigger an alert (default: 80)',
         type: 4, // INTEGER
         min_value: 10,
         max_value: 100,
@@ -88,7 +88,7 @@ const commands = [
       },
       {
         name: 'min_rating',
-        description: 'Minimum review score required out of 100 (default: 70)',
+        description: 'Minimum review score required out of 100 (default: 80)',
         type: 4, // INTEGER
         min_value: 0,
         max_value: 100,

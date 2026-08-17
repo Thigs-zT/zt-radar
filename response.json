@@ -1,1 +1,1 @@
-{"statusCode":200,"body":"{\"message\":\"Scan and notifications processed successfully.\"}"}
+{"errorType":"Sandbox.Timedout","errorMessage":"RequestId: 3ecc08ea-bf51-4ee3-a1a6-5f23d798d805 Error: Task timed out after 10.00 seconds"}
