@@ -175,8 +175,8 @@ export const handler = async (event) => {
             inline: false,
           },
           {
-            name: '/config-channel <channel> [min_discount] [free_only] [min_rating]',
-            value: 'Admin command to configure a server deals broadcast channel (Default: >= 80% discount and >= 80 rating).',
+            name: '/config-channel <channel> [min_discount] [free_only] [min_rating] [include_third_party]',
+            value: 'Admin command to configure curated Steam/Epic deal announcements on this server (Default: >= 70% Off, >= 75 Rating).',
             inline: false,
           },
           {
@@ -222,11 +222,13 @@ export const handler = async (event) => {
       const minDiscountOption = options?.find((opt) => opt.name === 'min_discount');
       const freeOnlyOption = options?.find((opt) => opt.name === 'free_only');
       const minRatingOption = options?.find((opt) => opt.name === 'min_rating');
+      const thirdPartyOption = options?.find((opt) => opt.name === 'include_third_party');
 
       const channelId = channelOption?.value;
-      const minDiscount = minDiscountOption ? Number(minDiscountOption.value) : 80;
+      const minDiscount = minDiscountOption ? Number(minDiscountOption.value) : 70;
       const freeOnly = freeOnlyOption ? Boolean(freeOnlyOption.value) : false;
-      const minRating = minRatingOption ? Number(minRatingOption.value) : 80;
+      const minRating = minRatingOption ? Number(minRatingOption.value) : 75;
+      const includeThirdParty = thirdPartyOption ? Boolean(thirdPartyOption.value) : false;
 
       if (!channelId) {
         return {
@@ -254,6 +256,7 @@ export const handler = async (event) => {
               min_discount: minDiscount,
               free_only: freeOnly,
               min_rating: minRating,
+              include_third_party: includeThirdParty,
               last_broadcasted_deals: [],
               updated_by: userId,
               updated_at: new Date().toISOString(),
@@ -261,9 +264,10 @@ export const handler = async (event) => {
           })
         );
 
+        const storeScope = includeThirdParty ? 'All Authorized Stores' : 'Steam & Epic Games Store Only';
         const filterSummary = freeOnly
-          ? 'Filter: **100% Free Games Only**'
-          : `Filters: **>= ${minDiscount}% Off** | **Min Rating: ${minRating}/100**`;
+          ? `Filter: **100% Free Games Only** (${storeScope})`
+          : `Filters: **>= ${minDiscount}% Off** | **Min Rating: ${minRating}/100** | **${storeScope}**`;
 
         return {
           statusCode: 200,

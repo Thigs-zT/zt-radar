@@ -268,34 +268,39 @@ export const handler = async () => {
       }
     }
 
-    // 2. Process Autonomous Global Market Radar for Guild Channels (with Anti-Spam State Tracking)
+    // 2. Process Curated Server Channel Radar (Max 3 announcements per cycle)
     if (guildConfigs.length > 0) {
-      console.log(`Checking market deals for ${guildConfigs.length} configured server channels...`);
-      const marketDeals = await getMarketOverviewDeals();
-
       for (const config of guildConfigs) {
         if (!config.alert_channel_id) continue;
 
-        const targetMinDiscount = config.min_discount ?? 80;
+        const targetMinDiscount = config.min_discount ?? 70;
         const targetFreeOnly = config.free_only ?? false;
-        const targetMinRating = config.min_rating ?? 80;
+        const targetMinRating = config.min_rating ?? 75;
+        const includeThirdParty = config.include_third_party ?? false;
         const broadcastedHistory = config.last_broadcasted_deals || [];
 
+        const marketDeals = await getMarketOverviewDeals(includeThirdParty);
+
+        let sentThisRun = 0;
+        const newlyBroadcastedKeys = [];
+
         for (const deal of marketDeals) {
+          // Cap at maximum 3 deal announcements per server per scan run
+          if (sentThisRun >= 3) break;
+
           const isFree = deal.primaryDeal?.salePrice === 0;
           const cut = deal.primaryDeal?.cutPercent ?? 0;
           const uniqueDealKey = `${deal.gameId}_${deal.primaryDeal.salePrice}`;
 
-          // Anti-Spam Check: Skip if already broadcasted to this server
-          if (broadcastedHistory.includes(uniqueDealKey)) {
+          if (broadcastedHistory.includes(uniqueDealKey) || newlyBroadcastedKeys.includes(uniqueDealKey)) {
             continue;
           }
 
           if (targetFreeOnly && !isFree) continue;
           if (!targetFreeOnly && !isFree && cut < targetMinDiscount) continue;
 
-          // Anti-Slop Check: Must have banner and meet review rating threshold
-          if (!isFree && (!deal.imageUrl || (deal.reviewScore && deal.reviewScore < targetMinRating))) {
+          // Quality threshold check
+          if (!isFree && deal.reviewScore && deal.reviewScore < targetMinRating) {
             continue;
           }
 
@@ -334,23 +339,27 @@ export const handler = async () => {
           const sent = await sendGuildChannelAlert(config.alert_channel_id, embed, components);
 
           if (sent) {
-            // Update guild broadcast history state (keep last 50 deals to avoid unbounded list growth)
-            const updatedHistory = [...broadcastedHistory, uniqueDealKey].slice(-50);
-            try {
-              await docClient.send(
-                new UpdateCommand({
-                  TableName: TABLE_NAME,
-                  Key: { PK: config.PK, SK: config.SK },
-                  UpdateExpression: 'SET last_broadcasted_deals = :history, updated_at = :now',
-                  ExpressionAttributeValues: {
-                    ':history': updatedHistory,
-                    ':now': new Date().toISOString(),
-                  },
-                })
-              );
-            } catch (dbError) {
-              console.error(`Failed to update broadcast history for guild ${config.guild_id}:`, dbError);
-            }
+            sentThisRun++;
+            newlyBroadcastedKeys.push(uniqueDealKey);
+          }
+        }
+
+        if (newlyBroadcastedKeys.length > 0) {
+          const updatedHistory = [...broadcastedHistory, ...newlyBroadcastedKeys].slice(-50);
+          try {
+            await docClient.send(
+              new UpdateCommand({
+                TableName: TABLE_NAME,
+                Key: { PK: config.PK, SK: config.SK },
+                UpdateExpression: 'SET last_broadcasted_deals = :history, updated_at = :now',
+                ExpressionAttributeValues: {
+                  ':history': updatedHistory,
+                  ':now': new Date().toISOString(),
+                },
+              })
+            );
+          } catch (dbError) {
+            console.error(`Failed to update broadcast history for guild ${config.guild_id}:`, dbError);
           }
         }
       }

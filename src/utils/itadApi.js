@@ -26,6 +26,53 @@ const STORE_DIRECTORY = {
   fanatical: 'Fanatical',
 };
 
+const JUNK_KEYWORDS = [
+  'bundle',
+  'season pass',
+  'expansion pass',
+  'expansion pack',
+  'dlc',
+  'soundtrack',
+  ' ost',
+  'artbook',
+  'demo version',
+  ' demo',
+  'certification',
+  'course',
+  'training',
+  'book bundle',
+  'comic bundle',
+  'software bundle',
+  'pack',
+  'upgrade',
+  'guide',
+];
+
+export function resolveStoreName(rawStore) {
+  if (!rawStore) return 'Authorized Store';
+  const key = String(rawStore).toLowerCase().trim();
+  return STORE_DIRECTORY[key] || STORE_DIRECTORY[rawStore] || rawStore;
+}
+
+export function isCuratedGame(title, storeName, imageUrl, includeThirdParty = false) {
+  if (!title || !imageUrl) return false;
+
+  const normalizedTitle = title.toLowerCase();
+
+  for (const keyword of JUNK_KEYWORDS) {
+    if (normalizedTitle.includes(keyword)) {
+      return false;
+    }
+  }
+
+  // Default store filtering: Steam and Epic Games Store only
+  if (!includeThirdParty) {
+    return storeName === 'Steam' || storeName === 'Epic Games Store';
+  }
+
+  return true;
+}
+
 const POPULAR_SUGGESTIONS = [
   { name: 'Grand Theft Auto V', value: 'gta-v|Grand Theft Auto V' },
   { name: 'Cyberpunk 2077', value: 'cyberpunk-2077|Cyberpunk 2077' },
@@ -36,12 +83,6 @@ const POPULAR_SUGGESTIONS = [
   { name: 'God of War Ragnarok', value: 'gow-ragnarok|God of War Ragnarok' },
   { name: 'Hogwarts Legacy', value: 'hogwarts-legacy|Hogwarts Legacy' },
 ];
-
-export function resolveStoreName(rawStore) {
-  if (!rawStore) return 'Authorized Store';
-  const key = String(rawStore).toLowerCase().trim();
-  return STORE_DIRECTORY[key] || STORE_DIRECTORY[rawStore] || rawStore;
-}
 
 export async function searchGamesForAutocomplete(query) {
   if (!query || query.trim().length === 0) {
@@ -254,66 +295,97 @@ export async function getGameDealInfo(gameId) {
 }
 
 /**
- * Fetches top trending deals and free promotions across the entire market.
+ * Fetches popular top-selling deals and active free game promotions.
  */
-export async function getMarketOverviewDeals() {
+export async function getMarketOverviewDeals(includeThirdParty = false) {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 4500);
 
   try {
     if (ITAD_API_KEY) {
-      const dealsUrl = `${ITAD_BASE_URL}/deals/v2?key=${ITAD_API_KEY}&country=BR&limit=50&sort=-cut`;
-      const res = await fetch(dealsUrl, { signal: controller.signal });
+      // Pull both popular best-sellers and high discount deals
+      const [popularRes, deepCutRes] = await Promise.all([
+        fetch(`${ITAD_BASE_URL}/deals/v2?key=${ITAD_API_KEY}&country=BR&limit=60&sort=-popular`, { signal: controller.signal }),
+        fetch(`${ITAD_BASE_URL}/deals/v2?key=${ITAD_API_KEY}&country=BR&limit=60&sort=-cut`, { signal: controller.signal }),
+      ]);
 
-      if (res.ok) {
-        const data = await res.json();
-        const dealsList = data?.list || [];
+      const popularData = popularRes.ok ? await popularRes.json() : { list: [] };
+      const deepCutData = deepCutRes.ok ? await deepCutRes.json() : { list: [] };
 
-        clearTimeout(timeoutId);
-        return dealsList
-          .filter((item) => item.deal && item.title)
-          .map((item) => ({
-            gameId: item.id,
-            title: item.title,
-            imageUrl: item.assets?.banner400 || item.assets?.banner300 || item.assets?.boxart || null,
-            reviewScore: item.reviews?.steam?.score ?? item.reviews?.metacritic?.score ?? null,
-            steamAppId: item.appid || item.steam_appid || null,
-            primaryDeal: {
-              shopName: resolveStoreName(item.deal?.shop?.name),
-              salePrice: item.deal?.price?.amount ?? 0,
-              regularPrice: item.deal?.regular?.amount ?? 0,
-              cutPercent: item.deal?.cut ?? 0,
-              url: item.deal?.url,
-            },
-            cheaperAlternative: null,
-          }));
+      clearTimeout(timeoutId);
+
+      const combinedList = [...(popularData.list || []), ...(deepCutData.list || [])];
+      const seenGameIds = new Set();
+      const mappedDeals = [];
+
+      for (const item of combinedList) {
+        if (!item.deal || !item.title || seenGameIds.has(item.id)) continue;
+
+        const shopName = resolveStoreName(item.deal?.shop?.name);
+        const imageUrl = item.assets?.banner400 || item.assets?.banner300 || item.assets?.boxart || null;
+
+        if (!isCuratedGame(item.title, shopName, imageUrl, includeThirdParty)) {
+          continue;
+        }
+
+        seenGameIds.add(item.id);
+        mappedDeals.push({
+          gameId: item.id,
+          title: item.title,
+          imageUrl,
+          reviewScore: item.reviews?.steam?.score ?? item.reviews?.metacritic?.score ?? null,
+          steamAppId: item.appid || item.steam_appid || null,
+          primaryDeal: {
+            shopName,
+            salePrice: item.deal?.price?.amount ?? 0,
+            regularPrice: item.deal?.regular?.amount ?? 0,
+            cutPercent: item.deal?.cut ?? 0,
+            url: item.deal?.url,
+          },
+          cheaperAlternative: null,
+        });
       }
+
+      return mappedDeals;
     }
 
-    // Fallback: CheapShark Top Deals
-    const csUrl = `${CHEAPSHARK_BASE_URL}/deals?pageSize=50&sortBy=Savings`;
+    // Fallback: CheapShark Popular Top Deals
+    const csUrl = `${CHEAPSHARK_BASE_URL}/deals?pageSize=60&sortBy=Deal%20Rating`;
     const csRes = await fetch(csUrl, { signal: controller.signal });
 
     if (csRes.ok) {
       const csDeals = await csRes.json();
       clearTimeout(timeoutId);
-      return csDeals
-        .filter((d) => d.title)
-        .map((d) => ({
+      const mappedDeals = [];
+
+      for (const d of csDeals) {
+        if (!d.title) continue;
+
+        const shopName = resolveStoreName(d.storeID);
+        const imageUrl = d.thumb || null;
+
+        if (!isCuratedGame(d.title, shopName, imageUrl, includeThirdParty)) {
+          continue;
+        }
+
+        mappedDeals.push({
           gameId: d.gameID,
           title: d.title,
-          imageUrl: d.thumb || null,
+          imageUrl,
           reviewScore: d.metacriticScore ? parseInt(d.metacriticScore, 10) : (d.steamRatingPercent ? parseInt(d.steamRatingPercent, 10) : null),
           steamAppId: d.steamAppID || null,
           primaryDeal: {
-            shopName: resolveStoreName(d.storeID),
+            shopName,
             salePrice: parseFloat(d.salePrice),
             regularPrice: parseFloat(d.normalPrice),
             cutPercent: Math.round(parseFloat(d.savings)),
             url: `https://www.cheapshark.com/redirect?dealID=${d.dealID}`,
           },
           cheaperAlternative: null,
-        }));
+        });
+      }
+
+      return mappedDeals;
     }
 
     clearTimeout(timeoutId);
