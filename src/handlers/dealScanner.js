@@ -29,7 +29,6 @@ function createStoreButtons(deal) {
     });
   }
 
-  // SteamDB Button (Direct App link or SteamDB Search fallback)
   if (deal.steamAppId) {
     buttons.push({
       type: 2,
@@ -69,7 +68,8 @@ async function sendDiscordDm(userId, embed, components = []) {
 
     if (!dmChannelRes.ok) {
       const errorText = await dmChannelRes.text();
-      throw new Error(`Failed to create DM channel: ${dmChannelRes.status} - ${errorText}`);
+      console.warn(`Could not open DM channel for user ${userId}: ${dmChannelRes.status} - ${errorText}`);
+      return false;
     }
 
     const dmChannel = await dmChannelRes.json();
@@ -90,13 +90,14 @@ async function sendDiscordDm(userId, embed, components = []) {
 
     if (!messageRes.ok) {
       const errorText = await messageRes.text();
-      throw new Error(`Failed to send message: ${messageRes.status} - ${errorText}`);
+      console.warn(`Could not send DM message to user ${userId}: ${messageRes.status} - ${errorText}`);
+      return false;
     }
 
     console.log(`DM successfully sent to user ${userId}`);
     return true;
   } catch (error) {
-    console.error(`Error sending DM to user ${userId}:`, error);
+    console.error(`Error sending DM to user ${userId}:`, error.message || error);
     return false;
   }
 }
@@ -119,13 +120,14 @@ async function sendGuildChannelAlert(channelId, embed, components = []) {
 
     if (!res.ok) {
       const errorText = await res.text();
-      throw new Error(`Failed to send guild alert: ${res.status} - ${errorText}`);
+      console.warn(`Could not send guild alert to channel ${channelId}: ${res.status} - ${errorText}`);
+      return false;
     }
 
     console.log(`Guild alert successfully sent to channel ${channelId}`);
     return true;
   } catch (error) {
-    console.error(`Error sending alert to channel ${channelId}:`, error);
+    console.error(`Error sending alert to channel ${channelId}:`, error.message || error);
     return false;
   }
 }
