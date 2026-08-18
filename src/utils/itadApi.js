@@ -2,6 +2,8 @@ const ITAD_API_KEY = process.env.ITAD_API_KEY;
 const ITAD_BASE_URL = 'https://api.isthereanydeal.com';
 const CHEAPSHARK_BASE_URL = 'https://www.cheapshark.com/api/1.0';
 
+const USER_AGENT = 'zT-Radar-Bot/1.0 (https://github.com/zt-radar)';
+
 const STORE_DIRECTORY = {
   '1': 'Steam',
   '2': 'GamersGate',
@@ -17,6 +19,8 @@ const STORE_DIRECTORY = {
   steam: 'Steam',
   gog: 'GOG',
   epic: 'Epic Games Store',
+  'epic game store': 'Epic Games Store',
+  'epic games': 'Epic Games Store',
   nuuvem: 'Nuuvem',
   humblestore: 'Humble Store',
   greenmangaming: 'GreenManGaming',
@@ -26,26 +30,23 @@ const STORE_DIRECTORY = {
   fanatical: 'Fanatical',
 };
 
-const JUNK_KEYWORDS = [
-  'bundle',
-  'season pass',
-  'expansion pass',
-  'expansion pack',
-  'dlc',
-  'soundtrack',
-  ' ost',
-  'artbook',
-  'demo version',
-  ' demo',
-  'certification',
-  'course',
-  'training',
-  'book bundle',
-  'comic bundle',
-  'software bundle',
-  'pack',
-  'upgrade',
-  'guide',
+const NON_GAME_PATTERNS = [
+  /\bsoundtrack\b/i,
+  /\bost\b/i,
+  /\bartbook\b/i,
+  /\bartworks?\b/i,
+  /\bseason pass\b/i,
+  /\bexpansion pass\b/i,
+  /\bsong pack\b/i,
+  /\bdemo version\b/i,
+  /\bdemo\b/i,
+  /\bdlc\b/i,
+  /\bpack\b/i,
+  /\bguide\b/i,
+  /\bupgrade\b/i,
+  /\bcourse\b/i,
+  /\btraining\b/i,
+  /\bcertification\b/i,
 ];
 
 export function resolveStoreName(rawStore) {
@@ -57,16 +58,17 @@ export function resolveStoreName(rawStore) {
 export function isCuratedGame(title, storeName, imageUrl, includeThirdParty = false) {
   if (!title || !imageUrl) return false;
 
-  const normalizedTitle = title.toLowerCase();
-
-  for (const keyword of JUNK_KEYWORDS) {
-    if (normalizedTitle.includes(keyword)) {
+  for (const pattern of NON_GAME_PATTERNS) {
+    if (pattern.test(title)) {
       return false;
     }
   }
 
-  if (!includeThirdParty) {
-    return storeName === 'Steam' || storeName === 'Epic Games Store';
+  const normalizedStore = storeName.toLowerCase();
+  const isSteamOrEpic = normalizedStore.includes('steam') || normalizedStore.includes('epic');
+
+  if (!includeThirdParty && !isSteamOrEpic) {
+    return false;
   }
 
   return true;
@@ -95,7 +97,10 @@ export async function searchGamesForAutocomplete(query) {
   try {
     if (ITAD_API_KEY) {
       const itadUrl = `${ITAD_BASE_URL}/games/search/v1?key=${ITAD_API_KEY}&title=${encodeURIComponent(trimmedQuery)}&results=25`;
-      const res = await fetch(itadUrl, { signal: controller.signal });
+      const res = await fetch(itadUrl, {
+        headers: { 'User-Agent': USER_AGENT },
+        signal: controller.signal,
+      });
 
       if (res.ok) {
         const data = await res.json();
@@ -110,7 +115,10 @@ export async function searchGamesForAutocomplete(query) {
     }
 
     const csUrl = `${CHEAPSHARK_BASE_URL}/games?title=${encodeURIComponent(trimmedQuery)}&limit=25`;
-    const csRes = await fetch(csUrl, { signal: controller.signal });
+    const csRes = await fetch(csUrl, {
+      headers: { 'User-Agent': USER_AGENT },
+      signal: controller.signal,
+    });
 
     if (csRes.ok) {
       const csData = await csRes.json();
@@ -145,17 +153,26 @@ export async function getGameDealInfo(gameId) {
       const [priceRes, historyRes, infoRes] = await Promise.all([
         fetch(priceUrl, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            'User-Agent': USER_AGENT,
+          },
           body: JSON.stringify([gameId]),
           signal: controller.signal,
         }),
         fetch(historyUrl, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            'User-Agent': USER_AGENT,
+          },
           body: JSON.stringify([gameId]),
           signal: controller.signal,
         }),
-        fetch(infoUrl, { signal: controller.signal }).catch(() => null),
+        fetch(infoUrl, {
+          headers: { 'User-Agent': USER_AGENT },
+          signal: controller.signal,
+        }).catch(() => null),
       ]);
 
       if (priceRes.ok) {
@@ -226,7 +243,10 @@ export async function getGameDealInfo(gameId) {
 
     // Fallback: CheapShark API
     const csUrl = `${CHEAPSHARK_BASE_URL}/games?id=${gameId}`;
-    const csRes = await fetch(csUrl, { signal: controller.signal });
+    const csRes = await fetch(csUrl, {
+      headers: { 'User-Agent': USER_AGENT },
+      signal: controller.signal,
+    });
 
     if (csRes.ok) {
       const csData = await csRes.json();
@@ -294,114 +314,143 @@ export async function getGameDealInfo(gameId) {
 }
 
 /**
- * Fetches curated top-tier deals from Steam & Epic with fallback to CheapShark.
+ * Fetches 100% Free promotional games (top priority) + acclaimed popular titles (Steam & Epic).
  */
 export async function getMarketOverviewDeals(includeThirdParty = false) {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 4500);
 
   try {
+    const freeDeals = [];
+    const discountedDeals = [];
+    const seenTitles = new Set();
+
+    // 1. Fetch 100% Free Game Promotions (Steam & Epic from ITAD with sort=-cut)
     if (ITAD_API_KEY) {
-      // 61: Steam, 16: Epic Games Store
-      const storeFilter = includeThirdParty ? '' : '&shops=61,16';
-      const itadUrl = `${ITAD_BASE_URL}/deals/v2?key=${ITAD_API_KEY}&country=BR&limit=60${storeFilter}`;
-      
-      const res = await fetch(itadUrl, { signal: controller.signal });
+      try {
+        const storeFilter = includeThirdParty ? '' : '&shops=61,16';
+        const itadFreeUrl = `${ITAD_BASE_URL}/deals/v2?key=${ITAD_API_KEY}&country=BR&limit=30&sort=-cut${storeFilter}`;
+        const itadRes = await fetch(itadFreeUrl, {
+          headers: { 'User-Agent': USER_AGENT },
+          signal: controller.signal,
+        });
 
-      if (res.ok) {
-        const data = await res.json();
-        const dealsList = data?.list || [];
+        if (itadRes.ok) {
+          const itadData = await itadRes.json();
+          const list = itadData?.list || [];
 
-        clearTimeout(timeoutId);
-        const mappedDeals = [];
-        const seenTitles = new Set();
+          for (const item of list) {
+            if (!item.deal || !item.title) continue;
+            const price = item.deal?.price?.amount ?? 1;
 
-        for (const item of dealsList) {
-          if (!item.deal || !item.title) continue;
+            if (price === 0) {
+              const shopName = resolveStoreName(item.deal?.shop?.name);
+              const imageUrl = item.assets?.banner400 || item.assets?.banner300 || item.assets?.boxart || null;
 
-          const shopName = resolveStoreName(item.deal?.shop?.name);
-          const imageUrl = item.assets?.banner400 || item.assets?.banner300 || item.assets?.boxart || null;
+              if (!isCuratedGame(item.title, shopName, imageUrl, includeThirdParty)) {
+                continue;
+              }
 
-          if (!isCuratedGame(item.title, shopName, imageUrl, includeThirdParty)) {
+              const normalizedTitle = item.title.toLowerCase().trim();
+              if (seenTitles.has(normalizedTitle)) continue;
+              seenTitles.add(normalizedTitle);
+
+              freeDeals.push({
+                gameId: item.id,
+                title: item.title,
+                imageUrl,
+                reviewScore: item.reviews?.steam?.score ?? item.reviews?.metacritic?.score ?? null,
+                steamAppId: item.appid || item.steam_appid || null,
+                primaryDeal: {
+                  shopName,
+                  salePrice: 0,
+                  regularPrice: item.deal?.regular?.amount ?? 0,
+                  cutPercent: 100,
+                  url: item.deal?.url,
+                },
+                cheaperAlternative: null,
+              });
+            }
+          }
+        }
+      } catch (itadErr) {
+        console.error('ITAD free deals error:', itadErr);
+      }
+    }
+
+    // 2. Fetch Acclaimed Steam & Epic Deals (CheapShark with steamRating >= 75 and savings >= 60%)
+    try {
+      const [steamRes, epicRes] = await Promise.all([
+        fetch(
+          `${CHEAPSHARK_BASE_URL}/deals?storeID=1&pageSize=40&sortBy=Deal%20Rating&desc=0&steamRating=75`,
+          {
+            headers: { 'User-Agent': USER_AGENT },
+            signal: controller.signal,
+          }
+        ),
+        fetch(
+          `${CHEAPSHARK_BASE_URL}/deals?storeID=25&pageSize=20&sortBy=Deal%20Rating&desc=0`,
+          {
+            headers: { 'User-Agent': USER_AGENT },
+            signal: controller.signal,
+          }
+        ).catch(() => null),
+      ]);
+
+      const processCheapSharkList = async (res, defaultStoreName) => {
+        if (!res || !res.ok) return;
+        const csDeals = await res.json();
+        for (const d of csDeals) {
+          if (!d.title) continue;
+
+          const shopName = defaultStoreName;
+          const imageUrl = d.thumb || null;
+          const savings = Math.round(parseFloat(d.savings));
+          const rating = d.steamRatingPercent ? parseInt(d.steamRatingPercent, 10) : (d.metacriticScore ? parseInt(d.metacriticScore, 10) : null);
+
+          // Skip low discount (< 60%) or low rating (< 75) to prevent low-tier random games
+          if (savings < 60 || (rating && rating < 75)) {
             continue;
           }
 
-          if (seenTitles.has(item.title.toLowerCase())) continue;
-          seenTitles.add(item.title.toLowerCase());
+          if (!isCuratedGame(d.title, shopName, imageUrl, includeThirdParty)) {
+            continue;
+          }
 
-          mappedDeals.push({
-            gameId: item.id,
-            title: item.title,
+          const normalizedTitle = d.title.toLowerCase().trim();
+          if (seenTitles.has(normalizedTitle)) continue;
+          seenTitles.add(normalizedTitle);
+
+          discountedDeals.push({
+            gameId: d.gameID,
+            title: d.title,
             imageUrl,
-            reviewScore: item.reviews?.steam?.score ?? item.reviews?.metacritic?.score ?? null,
-            steamAppId: item.appid || item.steam_appid || null,
+            reviewScore: rating,
+            steamAppId: d.steamAppID || null,
             primaryDeal: {
               shopName,
-              salePrice: item.deal?.price?.amount ?? 0,
-              regularPrice: item.deal?.regular?.amount ?? 0,
-              cutPercent: item.deal?.cut ?? 0,
-              url: item.deal?.url,
+              salePrice: parseFloat(d.salePrice),
+              regularPrice: parseFloat(d.normalPrice),
+              cutPercent: savings,
+              url: `https://www.cheapshark.com/redirect?dealID=${d.dealID}`,
             },
             cheaperAlternative: null,
           });
         }
+      };
 
-        if (mappedDeals.length > 0) {
-          return mappedDeals;
-        }
-      }
-    }
-
-    // Fallback: CheapShark Top Rated & Best-Selling Deals
-    // storeID=1 (Steam) & storeID=25 (Epic)
-    const storeQuery = includeThirdParty ? '' : '&storeID=1,25';
-    const csUrl = `${CHEAPSHARK_BASE_URL}/deals?pageSize=60&sortBy=Deal%20Rating${storeQuery}`;
-    const csRes = await fetch(csUrl, { signal: controller.signal });
-
-    if (csRes.ok) {
-      const csDeals = await csRes.json();
-      clearTimeout(timeoutId);
-      const mappedDeals = [];
-      const seenTitles = new Set();
-
-      for (const d of csDeals) {
-        if (!d.title) continue;
-
-        const shopName = resolveStoreName(d.storeID);
-        const imageUrl = d.thumb || null;
-
-        if (!isCuratedGame(d.title, shopName, imageUrl, includeThirdParty)) {
-          continue;
-        }
-
-        if (seenTitles.has(d.title.toLowerCase())) continue;
-        seenTitles.add(d.title.toLowerCase());
-
-        mappedDeals.push({
-          gameId: d.gameID,
-          title: d.title,
-          imageUrl,
-          reviewScore: d.metacriticScore ? parseInt(d.metacriticScore, 10) : (d.steamRatingPercent ? parseInt(d.steamRatingPercent, 10) : null),
-          steamAppId: d.steamAppID || null,
-          primaryDeal: {
-            shopName,
-            salePrice: parseFloat(d.salePrice),
-            regularPrice: parseFloat(d.normalPrice),
-            cutPercent: Math.round(parseFloat(d.savings)),
-            url: `https://www.cheapshark.com/redirect?dealID=${d.dealID}`,
-          },
-          cheaperAlternative: null,
-        });
-      }
-
-      return mappedDeals;
+      await processCheapSharkList(steamRes, 'Steam');
+      await processCheapSharkList(epicRes, 'Epic Games Store');
+    } catch (csErr) {
+      console.error('CheapShark deals fetch error:', csErr);
     }
 
     clearTimeout(timeoutId);
-    return [];
+    // Return Free games first, followed by curated classic discounts
+    return [...freeDeals, ...discountedDeals];
   } catch (error) {
     clearTimeout(timeoutId);
-    console.error('Error fetching market overview deals:', error.message || error);
+    console.error('Fatal error in market overview deals lookup:', error.message || error);
     return [];
   }
 }
