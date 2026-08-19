@@ -314,7 +314,7 @@ export async function getGameDealInfo(gameId) {
 }
 
 /**
- * Fetches 100% Free promotional games (top priority) + acclaimed popular titles (Steam & Epic).
+ * Fetches curated top-selling & acclaimed games with high review counts + active 100% free promotions.
  */
 export async function getMarketOverviewDeals(includeThirdParty = false) {
   const controller = new AbortController();
@@ -325,7 +325,7 @@ export async function getMarketOverviewDeals(includeThirdParty = false) {
     const discountedDeals = [];
     const seenTitles = new Set();
 
-    // 1. Fetch 100% Free Game Promotions (Steam & Epic from ITAD with sort=-cut)
+    // 1. Fetch Active 100% Free Games from ITAD
     if (ITAD_API_KEY) {
       try {
         const storeFilter = includeThirdParty ? '' : '&shops=61,16';
@@ -378,37 +378,31 @@ export async function getMarketOverviewDeals(includeThirdParty = false) {
       }
     }
 
-    // 2. Fetch Acclaimed Steam & Epic Deals (CheapShark with steamRating >= 75 and savings >= 60%)
+    // 2. Fetch Acclaimed Games from CheapShark (Requiring Steam Review Count >= 1000 OR Metacritic Score)
     try {
-      const [steamRes, epicRes] = await Promise.all([
-        fetch(
-          `${CHEAPSHARK_BASE_URL}/deals?storeID=1&pageSize=40&sortBy=Deal%20Rating&desc=0&steamRating=75`,
-          {
-            headers: { 'User-Agent': USER_AGENT },
-            signal: controller.signal,
-          }
-        ),
-        fetch(
-          `${CHEAPSHARK_BASE_URL}/deals?storeID=25&pageSize=20&sortBy=Deal%20Rating&desc=0`,
-          {
-            headers: { 'User-Agent': USER_AGENT },
-            signal: controller.signal,
-          }
-        ).catch(() => null),
-      ]);
+      const csUrl = `${CHEAPSHARK_BASE_URL}/deals?storeID=1&pageSize=40&sortBy=Deal%20Rating&desc=0`;
+      const csRes = await fetch(csUrl, {
+        headers: { 'User-Agent': USER_AGENT },
+        signal: controller.signal,
+      });
 
-      const processCheapSharkList = async (res, defaultStoreName) => {
-        if (!res || !res.ok) return;
-        const csDeals = await res.json();
+      if (csRes.ok) {
+        const csDeals = await csRes.json();
         for (const d of csDeals) {
           if (!d.title) continue;
 
-          const shopName = defaultStoreName;
+          const shopName = 'Steam';
           const imageUrl = d.thumb || null;
           const savings = Math.round(parseFloat(d.savings));
           const rating = d.steamRatingPercent ? parseInt(d.steamRatingPercent, 10) : (d.metacriticScore ? parseInt(d.metacriticScore, 10) : null);
+          const reviewCount = d.steamRatingCount ? parseInt(d.steamRatingCount, 10) : 0;
+          const hasMetacritic = Boolean(d.metacriticScore && parseInt(d.metacriticScore, 10) > 0);
 
-          // Skip low discount (< 60%) or low rating (< 75) to prevent low-tier random games
+          // Popularity Barrier: Discard games with fewer than 1000 Steam reviews unless they have a Metacritic score
+          if (!hasMetacritic && reviewCount < 1000) {
+            continue;
+          }
+
           if (savings < 60 || (rating && rating < 75)) {
             continue;
           }
@@ -437,16 +431,12 @@ export async function getMarketOverviewDeals(includeThirdParty = false) {
             cheaperAlternative: null,
           });
         }
-      };
-
-      await processCheapSharkList(steamRes, 'Steam');
-      await processCheapSharkList(epicRes, 'Epic Games Store');
+      }
     } catch (csErr) {
-      console.error('CheapShark deals fetch error:', csErr);
+      console.error('CheapShark overview deals error:', csErr);
     }
 
     clearTimeout(timeoutId);
-    // Return Free games first, followed by curated classic discounts
     return [...freeDeals, ...discountedDeals];
   } catch (error) {
     clearTimeout(timeoutId);
