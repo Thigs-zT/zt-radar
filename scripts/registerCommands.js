@@ -73,22 +73,22 @@ const commands = [
         required: true,
       },
       {
-        name: 'min_discount',
-        description: 'Minimum discount percentage to trigger an alert (default: 70)',
-        type: 4, // INTEGER
-        min_value: 10,
-        max_value: 100,
-        required: false,
-      },
-      {
         name: 'free_only',
         description: 'Only broadcast 100% free promotional games (default: false)',
         type: 5, // BOOLEAN
         required: false,
       },
       {
+        name: 'min_discount',
+        description: '[Experimental] Custom minimum discount percentage (default: 70)',
+        type: 4, // INTEGER
+        min_value: 10,
+        max_value: 100,
+        required: false,
+      },
+      {
         name: 'min_rating',
-        description: 'Minimum review score required out of 100 (default: 75)',
+        description: '[Experimental] Custom minimum review score out of 100 (default: 80)',
         type: 4, // INTEGER
         min_value: 0,
         max_value: 100,
@@ -96,7 +96,7 @@ const commands = [
       },
       {
         name: 'include_third_party',
-        description: 'Include authorized third-party stores like Nuuvem/GOG (default: false - Steam & Epic only)',
+        description: '[Experimental] Include third-party stores like Nuuvem/GOG (default: false)',
         type: 5, // BOOLEAN
         required: false,
       },

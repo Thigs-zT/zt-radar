@@ -314,7 +314,7 @@ export async function getGameDealInfo(gameId) {
 }
 
 /**
- * Fetches curated top-selling & acclaimed games with high review counts + active 100% free promotions.
+ * Fetches 100% Free promotions (highest priority) + critically acclaimed, high-demand titles.
  */
 export async function getMarketOverviewDeals(includeThirdParty = false) {
   const controller = new AbortController();
@@ -325,7 +325,7 @@ export async function getMarketOverviewDeals(includeThirdParty = false) {
     const discountedDeals = [];
     const seenTitles = new Set();
 
-    // 1. Fetch Active 100% Free Games from ITAD
+    // 1. Fetch 100% Free Game Promotions (Steam & Epic)
     if (ITAD_API_KEY) {
       try {
         const storeFilter = includeThirdParty ? '' : '&shops=61,16';
@@ -378,9 +378,9 @@ export async function getMarketOverviewDeals(includeThirdParty = false) {
       }
     }
 
-    // 2. Fetch Acclaimed Games from CheapShark (Requiring Steam Review Count >= 1000 OR Metacritic Score)
+    // 2. Fetch Acclaimed Games from CheapShark
     try {
-      const csUrl = `${CHEAPSHARK_BASE_URL}/deals?storeID=1&pageSize=40&sortBy=Deal%20Rating&desc=0`;
+      const csUrl = `${CHEAPSHARK_BASE_URL}/deals?storeID=1&pageSize=50&sortBy=Deal%20Rating&desc=0`;
       const csRes = await fetch(csUrl, {
         headers: { 'User-Agent': USER_AGENT },
         signal: controller.signal,
@@ -396,14 +396,30 @@ export async function getMarketOverviewDeals(includeThirdParty = false) {
           const savings = Math.round(parseFloat(d.savings));
           const rating = d.steamRatingPercent ? parseInt(d.steamRatingPercent, 10) : (d.metacriticScore ? parseInt(d.metacriticScore, 10) : null);
           const reviewCount = d.steamRatingCount ? parseInt(d.steamRatingCount, 10) : 0;
-          const hasMetacritic = Boolean(d.metacriticScore && parseInt(d.metacriticScore, 10) > 0);
+          const normalPrice = parseFloat(d.normalPrice);
+          const hasMetacritic = Boolean(d.metacriticScore && parseInt(d.metacriticScore, 10) >= 75);
 
-          // Popularity Barrier: Discard games with fewer than 1000 Steam reviews unless they have a Metacritic score
-          if (!hasMetacritic && reviewCount < 1000) {
+          // Barrier A: Skip ultra-cheap shovelware ($4.99 base price threshold)
+          if (normalPrice < 4.99) {
             continue;
           }
 
-          if (savings < 60 || (rating && rating < 75)) {
+          // Barrier B: Strict Universal Review Score (Must be >= 80% positive)
+          if (rating && rating < 80) {
+            continue;
+          }
+
+          // Barrier C: Real-World Popularity Barrier
+          // If acclaimed by Metacritic (>=75), require at least 1,500 Steam reviews
+          // If no Metacritic, require at least 4,000 Steam reviews
+          if (hasMetacritic && reviewCount < 1500) {
+            continue;
+          }
+          if (!hasMetacritic && reviewCount < 4000) {
+            continue;
+          }
+
+          if (savings < 60) {
             continue;
           }
 
@@ -424,7 +440,7 @@ export async function getMarketOverviewDeals(includeThirdParty = false) {
             primaryDeal: {
               shopName,
               salePrice: parseFloat(d.salePrice),
-              regularPrice: parseFloat(d.normalPrice),
+              regularPrice: normalPrice,
               cutPercent: savings,
               url: `https://www.cheapshark.com/redirect?dealID=${d.dealID}`,
             },
