@@ -167,6 +167,7 @@ export const handler = async () => {
 
         const effectivePrice = deal.cheaperAlternative?.salePrice ?? deal.primaryDeal?.salePrice ?? 0;
         const effectiveCut = deal.cheaperAlternative?.cutPercent ?? deal.primaryDeal?.cutPercent ?? 0;
+        const sym = deal.primaryDeal?.currencySymbol || 'R$';
 
         let shouldAlert = false;
         let alertReason = '';
@@ -176,7 +177,7 @@ export const handler = async () => {
           alertReason = '100% FREE GAME ALERT!';
         } else if (item.target_price && effectivePrice <= Number(item.target_price)) {
           shouldAlert = true;
-          alertReason = `Target Price Reached (<= R$ ${Number(item.target_price).toFixed(2)})!`;
+          alertReason = `Target Price Reached (<= ${sym} ${Number(item.target_price).toFixed(2)})!`;
         } else if (deal.isAllTimeLow && item.alert_all_time_low) {
           shouldAlert = true;
           alertReason = 'ALL-TIME LOW PRICE HIT!';
@@ -205,18 +206,20 @@ export const handler = async () => {
         if (shouldAlert && isNewLowerPrice) {
           console.log(`DM Alert triggered for user ${item.user_id} on ${item.game_title}: ${alertReason}`);
 
+          const primarySym = deal.primaryDeal.currencySymbol || 'R$';
           const fields = [
             {
               name: `${deal.primaryDeal.shopName} (Primary Offer)`,
-              value: `Price: **R$ ${deal.primaryDeal.salePrice.toFixed(2)}** (Regular: R$ ${deal.primaryDeal.regularPrice.toFixed(2)} | -${deal.primaryDeal.cutPercent}%)`,
+              value: `Price: **${primarySym} ${deal.primaryDeal.salePrice.toFixed(2)}** (Regular: ${primarySym} ${deal.primaryDeal.regularPrice.toFixed(2)} | -${deal.primaryDeal.cutPercent}%)`,
               inline: false,
             },
           ];
 
           if (deal.cheaperAlternative) {
+            const altSym = deal.cheaperAlternative.currencySymbol || primarySym;
             fields.push({
               name: `Cheaper at ${deal.cheaperAlternative.shopName}!`,
-              value: `Price: **R$ ${deal.cheaperAlternative.salePrice.toFixed(2)}** (Regular: R$ ${deal.cheaperAlternative.regularPrice.toFixed(2)} | -${deal.cheaperAlternative.cutPercent}%)`,
+              value: `Price: **${altSym} ${deal.cheaperAlternative.salePrice.toFixed(2)}** (Regular: ${altSym} ${deal.cheaperAlternative.regularPrice.toFixed(2)} | -${deal.cheaperAlternative.cutPercent}%)`,
               inline: false,
             });
           }
@@ -268,14 +271,14 @@ export const handler = async () => {
       }
     }
 
-    // 2. Process Curated Server Channel Radar (Max 3 announcements per cycle)
+    // 2. Process Curated Server Channel Radar
     if (guildConfigs.length > 0) {
       for (const config of guildConfigs) {
         if (!config.alert_channel_id) continue;
 
         const targetMinDiscount = config.min_discount ?? 70;
         const targetFreeOnly = config.free_only ?? false;
-        const targetMinRating = config.min_rating ?? 75;
+        const targetMinRating = config.min_rating ?? 80;
         const includeThirdParty = config.include_third_party ?? false;
         const broadcastedHistory = config.last_broadcasted_deals || [];
 
@@ -285,7 +288,6 @@ export const handler = async () => {
         const newlyBroadcastedKeys = [];
 
         for (const deal of marketDeals) {
-          // Cap at maximum 3 deal announcements per server per scan run
           if (sentThisRun >= 3) break;
 
           const isFree = deal.primaryDeal?.salePrice === 0;
@@ -299,15 +301,15 @@ export const handler = async () => {
           if (targetFreeOnly && !isFree) continue;
           if (!targetFreeOnly && !isFree && cut < targetMinDiscount) continue;
 
-          // Quality threshold check
           if (!isFree && deal.reviewScore && deal.reviewScore < targetMinRating) {
             continue;
           }
 
+          const sym = deal.primaryDeal.currencySymbol || '$';
           const fields = [
             {
               name: `${deal.primaryDeal.shopName} (Primary Offer)`,
-              value: `Price: **R$ ${deal.primaryDeal.salePrice.toFixed(2)}** (Regular: R$ ${deal.primaryDeal.regularPrice.toFixed(2)} | -${deal.primaryDeal.cutPercent}%)`,
+              value: `Price: **${sym} ${deal.primaryDeal.salePrice.toFixed(2)}** (Regular: ${sym} ${deal.primaryDeal.regularPrice.toFixed(2)} | -${deal.primaryDeal.cutPercent}%)`,
               inline: false,
             },
           ];

@@ -47,6 +47,10 @@ const NON_GAME_PATTERNS = [
   /\bcourse\b/i,
   /\btraining\b/i,
   /\bcertification\b/i,
+  /\bsuite\b/i,
+  /\bthemes?\b/i,
+  /\badd-?ons?\b/i,
+  /\bplugins?\b/i,
 ];
 
 export function resolveStoreName(rawStore) {
@@ -208,6 +212,8 @@ export async function getGameDealInfo(gameId) {
             regularPrice: primaryRaw.regular.amount,
             cutPercent: primaryRaw.cut,
             url: primaryRaw.url,
+            currency: 'BRL',
+            currencySymbol: 'R$',
           };
 
           const cheaperAlternative = secondaryRaw
@@ -217,6 +223,8 @@ export async function getGameDealInfo(gameId) {
                 regularPrice: secondaryRaw.regular.amount,
                 cutPercent: secondaryRaw.cut,
                 url: secondaryRaw.url,
+                currency: 'BRL',
+                currencySymbol: 'R$',
               }
             : null;
 
@@ -241,7 +249,7 @@ export async function getGameDealInfo(gameId) {
       }
     }
 
-    // Fallback: CheapShark API
+    // Fallback: CheapShark API (USD)
     const csUrl = `${CHEAPSHARK_BASE_URL}/games?id=${gameId}`;
     const csRes = await fetch(csUrl, {
       headers: { 'User-Agent': USER_AGENT },
@@ -271,6 +279,8 @@ export async function getGameDealInfo(gameId) {
           regularPrice: parseFloat(primaryRaw.retailPrice),
           cutPercent: Math.round(parseFloat(primaryRaw.savings)),
           url: `https://www.cheapshark.com/redirect?dealID=${primaryRaw.dealID}`,
+          currency: 'USD',
+          currencySymbol: '$',
         };
 
         const cheaperAlternative = secondaryRaw
@@ -280,6 +290,8 @@ export async function getGameDealInfo(gameId) {
               regularPrice: parseFloat(secondaryRaw.retailPrice),
               cutPercent: Math.round(parseFloat(secondaryRaw.savings)),
               url: `https://www.cheapshark.com/redirect?dealID=${secondaryRaw.dealID}`,
+              currency: 'USD',
+              currencySymbol: '$',
             }
           : null;
 
@@ -313,9 +325,6 @@ export async function getGameDealInfo(gameId) {
   }
 }
 
-/**
- * Fetches 100% Free promotions (highest priority) + critically acclaimed, high-demand titles.
- */
 export async function getMarketOverviewDeals(includeThirdParty = false) {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 4500);
@@ -367,6 +376,8 @@ export async function getMarketOverviewDeals(includeThirdParty = false) {
                   regularPrice: item.deal?.regular?.amount ?? 0,
                   cutPercent: 100,
                   url: item.deal?.url,
+                  currency: 'BRL',
+                  currencySymbol: 'R$',
                 },
                 cheaperAlternative: null,
               });
@@ -399,19 +410,14 @@ export async function getMarketOverviewDeals(includeThirdParty = false) {
           const normalPrice = parseFloat(d.normalPrice);
           const hasMetacritic = Boolean(d.metacriticScore && parseInt(d.metacriticScore, 10) >= 75);
 
-          // Barrier A: Skip ultra-cheap shovelware ($4.99 base price threshold)
           if (normalPrice < 4.99) {
             continue;
           }
 
-          // Barrier B: Strict Universal Review Score (Must be >= 80% positive)
           if (rating && rating < 80) {
             continue;
           }
 
-          // Barrier C: Real-World Popularity Barrier
-          // If acclaimed by Metacritic (>=75), require at least 1,500 Steam reviews
-          // If no Metacritic, require at least 4,000 Steam reviews
           if (hasMetacritic && reviewCount < 1500) {
             continue;
           }
@@ -443,6 +449,8 @@ export async function getMarketOverviewDeals(includeThirdParty = false) {
               regularPrice: normalPrice,
               cutPercent: savings,
               url: `https://www.cheapshark.com/redirect?dealID=${d.dealID}`,
+              currency: 'USD',
+              currencySymbol: '$',
             },
             cheaperAlternative: null,
           });
