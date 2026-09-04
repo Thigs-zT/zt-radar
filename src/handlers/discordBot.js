@@ -25,6 +25,36 @@ const MESSAGE_FLAGS = {
   EPHEMERAL: 64,
 };
 
+// 24-bit Decimal Color Codes (Hex equivalent)
+const PALETTE = {
+  BRAND: 0x5865F2,   // Blurple
+  SUCCESS: 0x57F287, // Emerald
+  WARNING: 0xFEE75C, // Amber
+  DANGER: 0xED4245,  // Crimson
+  NEUTRAL: 0x2B2D31, // Slate Dark
+};
+
+function createEphemeralEmbed(title, description, color = PALETTE.BRAND, fields = []) {
+  return {
+    type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
+    data: {
+      flags: MESSAGE_FLAGS.EPHEMERAL,
+      embeds: [
+        {
+          title,
+          description,
+          color,
+          fields,
+          footer: {
+            text: 'zT Radar • Deal Intelligence Engine',
+          },
+          timestamp: new Date().toISOString(),
+        },
+      ],
+    },
+  };
+}
+
 export const handler = async (event) => {
   const signature = event.headers['x-signature-ed25519'] || event.headers['X-Signature-Ed25519'];
   const timestamp = event.headers['x-signature-timestamp'] || event.headers['X-Signature-Timestamp'];
@@ -170,26 +200,22 @@ export const handler = async (event) => {
         return {
           statusCode: 200,
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
-            data: {
-              flags: MESSAGE_FLAGS.EPHEMERAL,
-              content: `Your preferred wishlist currency has been set to **${selectedCurrency} (${sym})**! Private deal notifications will be formatted accordingly.`,
-            },
-          }),
+          body: JSON.stringify(
+            createEphemeralEmbed(
+              'Preferred Currency Updated',
+              `Your private notification currency is now set to **${selectedCurrency} (${sym})**.\nAll direct wishlist alerts will prioritize this regional format.`,
+              PALETTE.SUCCESS
+            )
+          ),
         };
       } catch (error) {
         console.error('Error updating user currency preference:', error);
         return {
           statusCode: 200,
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
-            data: {
-              flags: MESSAGE_FLAGS.EPHEMERAL,
-              content: 'Failed to update preferred currency. Please try again.',
-            },
-          }),
+          body: JSON.stringify(
+            createEphemeralEmbed('Operation Failed', 'Unable to update currency settings. Please try again.', PALETTE.DANGER)
+          ),
         };
       }
     }
@@ -219,40 +245,40 @@ export const handler = async (event) => {
         }
 
         const serverCurrency = guildConfig?.currency || 'USD';
-        const serverStatusDesc = guildId
+        const serverSummary = guildId
           ? guildConfig
-            ? `Configured channel: <#${guildConfig.alert_channel_id}>\nCurrency: **${serverCurrency}** (${serverCurrency === 'BRL' ? 'R$' : '$'})\nFilter: Min Discount ${guildConfig.min_discount}% | Min Rating ${guildConfig.min_rating}/100\nFree Only: ${guildConfig.free_only ? 'Enabled' : 'Disabled'}`
-            : 'No alert channel configured for this server yet. Use `/config-channel` to set one up!'
-          : 'Direct Message session. Server-wide broadcast settings not applicable.';
+            ? `▸ Channel: <#${guildConfig.alert_channel_id}>\n▸ Currency: **${serverCurrency}** (${serverCurrency === 'BRL' ? 'R$' : '$'})\n▸ Thresholds: **≥ ${guildConfig.min_discount}% off** | **≥ ${guildConfig.min_rating}/100 score**\n▸ Mode: **${guildConfig.free_only ? 'Free Promotions Only' : 'Full Curated Radar'}**`
+            : 'No alert channel active for this guild. Use `/config-channel` to configure.'
+          : 'Direct Message session. Guild-level configurations do not apply.';
 
         const statusEmbed = {
-          title: 'zT Radar — Operational Status',
-          description: 'Serverless Game Deal Intelligence Bot hosted on AWS.',
-          color: 0x2ecc71,
+          title: 'zT Radar ❖ System Telemetry',
+          description: 'High-precision game deal tracking engine hosted on AWS Serverless infrastructure.',
+          color: PALETTE.BRAND,
           fields: [
             {
-              name: 'System Engine',
-              value: 'AWS Lambda (Node.js 20 ES Modules) • DynamoDB Single-Table',
+              name: 'Compute & Runtime',
+              value: '```yaml\nRuntime: Node.js 22.x LTS\nArchitecture: AWS Graviton (arm64)\nLatency: Sub-second (Cold: ~300ms)\n```',
               inline: false,
             },
             {
-              name: 'Pricing Engine',
-              value: 'Dual-Currency Engine: Default USD ($) with Official Steam BRL (R$) Regional Lookup.',
+              name: 'Storage & Pricing Engines',
+              value: '```yaml\nDatabase: Amazon DynamoDB (Single-Table)\nRegional Lookup: IsThereAnyDeal (BRL) & CheapShark (USD)\nCurated Barrier: Metacritic/Steam Quality Filter Active\n```',
               inline: false,
             },
             {
-              name: 'Database Records',
-              value: `Tracking **${scanResult.Count || 0}** total items across active wishlists and configurations.`,
+              name: 'Telemetric Data',
+              value: `▸ Active Database Records: **${scanResult.Count || 0}**\n▸ Target Guild Context: **${guildId || 'Direct Message'}**`,
               inline: false,
             },
             {
-              name: guildId ? 'Server Broadcast Status' : 'Session Context',
-              value: serverStatusDesc,
+              name: 'Guild Broadcast Scope',
+              value: serverSummary,
               inline: false,
             },
           ],
           footer: {
-            text: 'zT Radar Deal Intelligence • Production-Ready',
+            text: 'zT Radar • Operational & Healthy',
           },
           timestamp: new Date().toISOString(),
         };
@@ -273,66 +299,56 @@ export const handler = async (event) => {
         return {
           statusCode: 200,
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
-            data: {
-              flags: MESSAGE_FLAGS.EPHEMERAL,
-              content: 'Failed to retrieve bot status. Please try again.',
-            },
-          }),
+          body: JSON.stringify(
+            createEphemeralEmbed('Telemetry Error', 'Could not query runtime telemetry metrics.', PALETTE.DANGER)
+          ),
         };
       }
     }
 
     if (name === 'radar-help') {
       const helpEmbed = {
-        title: 'zT Radar — Game Intelligence Manual',
-        description: 'Serverless game price intelligence bot deployed on AWS.',
-        color: 0x5865f2,
+        title: 'zT Radar ❖ Command Directory',
+        description: 'Comprehensive guide to monitoring sales, setting price ceilings, and server deal broadcasting.',
+        color: PALETTE.BRAND,
         fields: [
           {
-            name: '/wishlist add <game> [target_price]',
-            value: 'Monitor a game with live autocomplete. Optionally set a target price.',
+            name: 'Personal Wishlist Management',
+            value: [
+              '▸ `/wishlist add <game> [target_price]`',
+              '  └─ Register a game to monitor. Live search suggestions included.',
+              '▸ `/wishlist remove <game>`',
+              '  └─ Delete a game directly from your personal tracked list.',
+              '▸ `/wishlist list`',
+              '  └─ Display all tracked games with targets and currency settings.',
+              '▸ `/wishlist clear`',
+              '  └─ Wipe your entire personal monitoring list at once.',
+            ].join('\n'),
             inline: false,
           },
           {
-            name: '/currency <choice>',
-            value: 'Set your preferred currency for private wishlist alerts: USD ($) or BRL (R$).',
+            name: 'Currency & Preferences',
+            value: [
+              '▸ `/currency <choice>`',
+              '  └─ Set alert formatting between **USD ($)** and **BRL (R$)**.',
+            ].join('\n'),
             inline: false,
           },
           {
-            name: '/wishlist remove <game>',
-            value: 'Quickly remove a game directly from your saved list with contextual autocomplete.',
-            inline: false,
-          },
-          {
-            name: '/wishlist clear',
-            value: 'Remove all games from your monitored wishlist at once.',
-            inline: false,
-          },
-          {
-            name: '/wishlist list',
-            value: 'List all games currently tracked in your personal wishlist.',
-            inline: false,
-          },
-          {
-            name: '/config-channel <channel> [currency] [free_only] [min_discount] [min_rating]',
-            value: 'Admin command to configure curated deal broadcasts (Supports USD or BRL currency).',
-            inline: false,
-          },
-          {
-            name: '/config-channel-remove',
-            value: 'Admin command to disable community deal announcements on this server.',
-            inline: false,
-          },
-          {
-            name: '/radar-status',
-            value: 'Check system health, database metrics, and active server configuration.',
+            name: 'Server Broadcast Administration',
+            value: [
+              '▸ `/config-channel <channel> [currency] [free_only] [min_discount] [min_rating]`',
+              '  └─ Route curated deals into a designated server channel.',
+              '▸ `/config-channel-remove`',
+              '  └─ Deactivate automatic broadcasts for this server.',
+              '▸ `/radar-status`',
+              '  └─ Inquire system metrics, engine version, and active guild parameters.',
+            ].join('\n'),
             inline: false,
           },
         ],
         footer: {
-          text: 'zT Radar • AWS Serverless Engine',
+          text: 'zT Radar • Production Architecture',
         },
       };
 
@@ -354,13 +370,9 @@ export const handler = async (event) => {
         return {
           statusCode: 200,
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
-            data: {
-              flags: MESSAGE_FLAGS.EPHEMERAL,
-              content: 'This command can only be used inside a Discord server (guild).',
-            },
-          }),
+          body: JSON.stringify(
+            createEphemeralEmbed('Scope Restriction', 'This command can only be executed within a Discord server.', PALETTE.WARNING)
+          ),
         };
       }
 
@@ -382,13 +394,9 @@ export const handler = async (event) => {
         return {
           statusCode: 200,
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
-            data: {
-              flags: MESSAGE_FLAGS.EPHEMERAL,
-              content: 'Please select a valid text channel.',
-            },
-          }),
+          body: JSON.stringify(
+            createEphemeralEmbed('Missing Parameter', 'Please designate a valid text channel for announcements.', PALETTE.WARNING)
+          ),
         };
       }
 
@@ -413,34 +421,40 @@ export const handler = async (event) => {
           })
         );
 
-        const storeScope = includeThirdParty ? 'All Authorized Stores' : 'Steam & Epic Games Store Only';
-        const filterSummary = freeOnly
-          ? `Filter: **100% Free Games Only** (${storeScope} | Currency: **${currency}**)`
-          : `Filters: **>= ${minDiscount}% Off** | **Min Rating: ${minRating}/100** | Currency: **${currency}** | **${storeScope}**`;
+        const storeScope = includeThirdParty ? 'All Authorized Stores' : 'Steam & Epic Games Store';
+        const fields = [
+          { name: 'Target Channel', value: `<#${channelId}>`, inline: true },
+          { name: 'Currency', value: `**${currency}** (${currency === 'BRL' ? 'R$' : '$'})`, inline: true },
+          { name: 'Store Coverage', value: storeScope, inline: true },
+          {
+            name: 'Filtering Criteria',
+            value: freeOnly
+              ? '▸ Mode: **100% Free Games Only**'
+              : `▸ Minimum Discount: **≥ ${minDiscount}%**\n▸ Minimum Review Rating: **≥ ${minRating}/100**`,
+            inline: false,
+          },
+        ];
 
         return {
           statusCode: 200,
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
-            data: {
-              flags: MESSAGE_FLAGS.EPHEMERAL,
-              content: `Server deals broadcast channel successfully configured to <#${channelId}>!\n${filterSummary}`,
-            },
-          }),
+          body: JSON.stringify(
+            createEphemeralEmbed(
+              'Broadcast Channel Configured',
+              'Curated deals scanning is now active for this server.',
+              PALETTE.SUCCESS,
+              fields
+            )
+          ),
         };
       } catch (error) {
         console.error('Error saving guild channel config:', error);
         return {
           statusCode: 200,
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
-            data: {
-              flags: MESSAGE_FLAGS.EPHEMERAL,
-              content: 'Failed to configure alert channel. Please try again.',
-            },
-          }),
+          body: JSON.stringify(
+            createEphemeralEmbed('Configuration Error', 'Failed to register the alert channel. Please try again.', PALETTE.DANGER)
+          ),
         };
       }
     }
@@ -450,13 +464,9 @@ export const handler = async (event) => {
         return {
           statusCode: 200,
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
-            data: {
-              flags: MESSAGE_FLAGS.EPHEMERAL,
-              content: 'This command can only be used inside a Discord server (guild).',
-            },
-          }),
+          body: JSON.stringify(
+            createEphemeralEmbed('Scope Restriction', 'This command can only be executed within a Discord server.', PALETTE.WARNING)
+          ),
         };
       }
 
@@ -474,26 +484,22 @@ export const handler = async (event) => {
         return {
           statusCode: 200,
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
-            data: {
-              flags: MESSAGE_FLAGS.EPHEMERAL,
-              content: 'Server deals broadcast channel has been removed and disabled.',
-            },
-          }),
+          body: JSON.stringify(
+            createEphemeralEmbed(
+              'Broadcast Channel Deactivated',
+              'Automated deals publication has been disabled for this server.',
+              PALETTE.WARNING
+            )
+          ),
         };
       } catch (error) {
         console.error('Error removing guild config:', error);
         return {
           statusCode: 200,
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
-            data: {
-              flags: MESSAGE_FLAGS.EPHEMERAL,
-              content: 'Failed to remove alert channel configuration. Please try again.',
-            },
-          }),
+          body: JSON.stringify(
+            createEphemeralEmbed('Removal Error', 'Failed to remove server configuration.', PALETTE.DANGER)
+          ),
         };
       }
     }
@@ -520,13 +526,9 @@ export const handler = async (event) => {
             return {
               statusCode: 200,
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
-                data: {
-                  flags: MESSAGE_FLAGS.EPHEMERAL,
-                  content: 'Your wishlist is already empty.',
-                },
-              }),
+              body: JSON.stringify(
+                createEphemeralEmbed('Wishlist Empty', 'Your tracking list contains no items to clear.', PALETTE.NEUTRAL)
+              ),
             };
           }
 
@@ -545,26 +547,22 @@ export const handler = async (event) => {
           return {
             statusCode: 200,
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
-              data: {
-                flags: MESSAGE_FLAGS.EPHEMERAL,
-                content: `Cleared **${items.length}** games from your monitored wishlist.`,
-              },
-            }),
+            body: JSON.stringify(
+              createEphemeralEmbed(
+                'Wishlist Cleared',
+                `Successfully removed **${items.length}** titles from your personal tracking registry.`,
+                PALETTE.WARNING
+              )
+            ),
           };
         } catch (error) {
           console.error('Error clearing wishlist:', error);
           return {
             statusCode: 200,
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
-              data: {
-                flags: MESSAGE_FLAGS.EPHEMERAL,
-                content: 'Failed to clear wishlist. Please try again.',
-              },
-            }),
+            body: JSON.stringify(
+              createEphemeralEmbed('Registry Error', 'Unable to clear your wishlist entries.', PALETTE.DANGER)
+            ),
           };
         }
       }
@@ -580,13 +578,13 @@ export const handler = async (event) => {
           return {
             statusCode: 200,
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
-              data: {
-                flags: MESSAGE_FLAGS.EPHEMERAL,
-                content: 'Please select a valid game from the autocomplete suggestion list.',
-              },
-            }),
+            body: JSON.stringify(
+              createEphemeralEmbed(
+                'Selection Required',
+                'Please select a game directly from the live autocomplete suggestions dropdown.',
+                PALETTE.WARNING
+              )
+            ),
           };
         }
 
@@ -595,7 +593,6 @@ export const handler = async (event) => {
         const normalizedTitle = gameTitle.toLowerCase().trim();
 
         try {
-          // Check if user has currency config, otherwise initialize default USD
           const userConfigResult = await docClient.send(
             new QueryCommand({
               TableName: TABLE_NAME,
@@ -623,7 +620,7 @@ export const handler = async (event) => {
                 },
               })
             );
-            firstTimeNotice = '\n*Tip: Currency set to **USD ($)** by default. Use `/currency` anytime to switch to **BRL (R$)**!*';
+            firstTimeNotice = '\n*Currency set to **USD ($)** by default. Run `/currency` anytime to switch to **BRL (R$)**.*';
           }
 
           await docClient.send(
@@ -645,31 +642,35 @@ export const handler = async (event) => {
           );
 
           const sym = userCurrency === 'BRL' ? 'R$' : '$';
-          const priceInfo = targetPrice ? ` Target Price: ${sym} ${targetPrice.toFixed(2)}.` : '';
+          const fields = [
+            { name: 'Monitored Title', value: `**${gameTitle}**`, inline: true },
+            {
+              name: 'Price Ceiling',
+              value: targetPrice ? `**${sym} ${targetPrice.toFixed(2)}**` : 'Any major promotion',
+              inline: true,
+            },
+          ];
 
           return {
             statusCode: 200,
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
-              data: {
-                flags: MESSAGE_FLAGS.EPHEMERAL,
-                content: `Added **${gameTitle}** to your monitoring wishlist!${priceInfo}${firstTimeNotice}`,
-              },
-            }),
+            body: JSON.stringify(
+              createEphemeralEmbed(
+                'Title Added to Radar',
+                `You will receive private alerts whenever this game meets your pricing conditions.${firstTimeNotice}`,
+                PALETTE.SUCCESS,
+                fields
+              )
+            ),
           };
         } catch (error) {
           console.error('Error saving wishlist item:', error);
           return {
             statusCode: 200,
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
-              data: {
-                flags: MESSAGE_FLAGS.EPHEMERAL,
-                content: 'Failed to add game to wishlist. Please try again.',
-              },
-            }),
+            body: JSON.stringify(
+              createEphemeralEmbed('Storage Error', 'Could not persist title to your tracking registry.', PALETTE.DANGER)
+            ),
           };
         }
       }
@@ -700,26 +701,22 @@ export const handler = async (event) => {
           return {
             statusCode: 200,
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
-              data: {
-                flags: MESSAGE_FLAGS.EPHEMERAL,
-                content: `Removed **${gameTitle}** from your wishlist.`,
-              },
-            }),
+            body: JSON.stringify(
+              createEphemeralEmbed(
+                'Title Removed',
+                `**${gameTitle}** has been removed from your radar wishlist.`,
+                PALETTE.WARNING
+              )
+            ),
           };
         } catch (error) {
           console.error('Error removing wishlist item:', error);
           return {
             statusCode: 200,
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
-              data: {
-                flags: MESSAGE_FLAGS.EPHEMERAL,
-                content: 'Failed to remove game from wishlist. Please try again.',
-              },
-            }),
+            body: JSON.stringify(
+              createEphemeralEmbed('Removal Error', 'Failed to remove game from registry.', PALETTE.DANGER)
+            ),
           };
         }
       }
@@ -754,13 +751,13 @@ export const handler = async (event) => {
             return {
               statusCode: 200,
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
-                data: {
-                  flags: MESSAGE_FLAGS.EPHEMERAL,
-                  content: 'Your monitored wishlist is currently empty. Use `/wishlist add` to start tracking games!',
-                },
-              }),
+              body: JSON.stringify(
+                createEphemeralEmbed(
+                  'Wishlist Empty',
+                  'You have no monitored titles. Use `/wishlist add` to initiate tracking.',
+                  PALETTE.NEUTRAL
+                )
+              ),
             };
           }
 
@@ -769,10 +766,22 @@ export const handler = async (event) => {
 
           const formattedList = items
             .map((item, index) => {
-              const target = item.target_price ? ` (Target: ${sym} ${Number(item.target_price).toFixed(2)})` : '';
-              return `${index + 1}. **${item.game_title}**${target}`;
+              const target = item.target_price
+                ? `\n  └─ Target Price: **${sym} ${Number(item.target_price).toFixed(2)}**`
+                : '\n  └─ Target Price: **Any promotional drop**';
+              return `❖ **${item.game_title}**${target}`;
             })
-            .join('\n');
+            .join('\n\n');
+
+          const listEmbed = {
+            title: `Personal Radar Registry ❖ ${items.length} Active`,
+            description: formattedList,
+            color: PALETTE.BRAND,
+            footer: {
+              text: `Display Currency: ${userCurrency} (${sym}) • Use /currency to toggle`,
+            },
+            timestamp: new Date().toISOString(),
+          };
 
           return {
             statusCode: 200,
@@ -781,7 +790,7 @@ export const handler = async (event) => {
               type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
               data: {
                 flags: MESSAGE_FLAGS.EPHEMERAL,
-                content: `**Your Monitored Games (${items.length}) [Currency: ${userCurrency} (${sym})]:**\n\n${formattedList}`,
+                embeds: [listEmbed],
               },
             }),
           };
@@ -790,13 +799,9 @@ export const handler = async (event) => {
           return {
             statusCode: 200,
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
-              data: {
-                flags: MESSAGE_FLAGS.EPHEMERAL,
-                content: 'Failed to retrieve your wishlist. Please try again.',
-              },
-            }),
+            body: JSON.stringify(
+              createEphemeralEmbed('Query Error', 'Unable to retrieve your monitored titles.', PALETTE.DANGER)
+            ),
           };
         }
       }

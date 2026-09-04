@@ -1,5 +1,5 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, ScanCommand, UpdateCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, ScanCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { getGameDealInfo, getMarketOverviewDeals } from '../utils/itadApi.js';
 
 const ddbClient = new DynamoDBClient({});
@@ -22,8 +22,8 @@ function createStoreButtons(deal) {
 
   if (deal.cheaperAlternative?.url) {
     buttons.push({
-      type: 2, // BUTTON
-      style: 5, // LINK
+      type: 2,
+      style: 5,
       label: `Alternative: ${deal.cheaperAlternative.shopName}`,
       url: deal.cheaperAlternative.url,
     });
@@ -33,14 +33,14 @@ function createStoreButtons(deal) {
     buttons.push({
       type: 2,
       style: 5,
-      label: 'SteamDB',
+      label: 'SteamDB Entry',
       url: `https://steamdb.info/app/${deal.steamAppId}/`,
     });
   } else if (deal.title) {
     buttons.push({
       type: 2,
       style: 5,
-      label: 'SteamDB',
+      label: 'SteamDB Search',
       url: `https://steamdb.info/search/?a=app&q=${encodeURIComponent(deal.title)}`,
     });
   }
@@ -171,16 +171,16 @@ export const handler = async () => {
 
         if (item.alert_free && effectivePrice === 0) {
           shouldAlert = true;
-          alertReason = '100% FREE GAME ALERT!';
+          alertReason = 'PROMOTIONAL GIVEAWAY DETECTED (100% FREE)';
         } else if (item.target_price && effectivePrice <= Number(item.target_price)) {
           shouldAlert = true;
-          alertReason = `Target Price Reached (<= ${sym} ${Number(item.target_price).toFixed(2)})!`;
+          alertReason = `TARGET PRICE REACHED (≤ ${sym} ${Number(item.target_price).toFixed(2)})`;
         } else if (deal.isAllTimeLow && item.alert_all_time_low) {
           shouldAlert = true;
-          alertReason = 'ALL-TIME LOW PRICE HIT!';
+          alertReason = 'HISTORICAL ALL-TIME LOW PRICE HIT';
         } else if (item.alert_steep_discount && effectiveCut >= 70) {
           shouldAlert = true;
-          alertReason = `Massive Discount Alert: ${effectiveCut}% OFF!`;
+          alertReason = `MAJOR SALE: -${effectiveCut}% DISCOUNT`;
         }
 
         const lastPrice = item.last_notified_price !== undefined ? Number(item.last_notified_price) : null;
@@ -204,10 +204,17 @@ export const handler = async () => {
           console.log(`DM Alert triggered for user ${item.user_id} on ${item.game_title}: ${alertReason}`);
 
           const primarySym = deal.primaryDeal.currencySymbol || sym;
+          const diffPricing = [
+            '```diff',
+            `- Regular Price: ${primarySym} ${deal.primaryDeal.regularPrice.toFixed(2)}`,
+            `+ Sale Price:    ${primarySym} ${deal.primaryDeal.salePrice.toFixed(2)} (-${deal.primaryDeal.cutPercent}%)`,
+            '```',
+          ].join('\n');
+
           const fields = [
             {
-              name: `${deal.primaryDeal.shopName} (Primary Offer)`,
-              value: `Price: **${primarySym} ${deal.primaryDeal.salePrice.toFixed(2)}** (Regular: ${primarySym} ${deal.primaryDeal.regularPrice.toFixed(2)} | -${deal.primaryDeal.cutPercent}%)`,
+              name: `Store Offer ❖ ${deal.primaryDeal.shopName}`,
+              value: diffPricing,
               inline: false,
             },
           ];
@@ -215,27 +222,27 @@ export const handler = async () => {
           if (deal.cheaperAlternative) {
             const altSym = deal.cheaperAlternative.currencySymbol || primarySym;
             fields.push({
-              name: `Cheaper at ${deal.cheaperAlternative.shopName}!`,
-              value: `Price: **${altSym} ${deal.cheaperAlternative.salePrice.toFixed(2)}** (Regular: ${altSym} ${deal.cheaperAlternative.regularPrice.toFixed(2)} | -${deal.cheaperAlternative.cutPercent}%)`,
+              name: `Alternative Retailer ❖ ${deal.cheaperAlternative.shopName}`,
+              value: `▸ Price: **${altSym} ${deal.cheaperAlternative.salePrice.toFixed(2)}** (-${deal.cheaperAlternative.cutPercent}%)`,
               inline: false,
             });
           }
 
           if (deal.reviewScore) {
             fields.push({
-              name: 'Review Score',
-              value: `Rating: **${deal.reviewScore}/100**`,
+              name: 'Community Evaluation',
+              value: `▸ Score: **${deal.reviewScore}/100** approval rating`,
               inline: true,
             });
           }
 
           const embed = {
-            title: `zT Radar Alert: ${item.game_title}`,
+            title: `zT Radar ❖ Wishlist Alert: ${item.game_title}`,
             description: `**${alertReason}**`,
-            color: 0x5865f2,
+            color: 0x57F287,
             fields,
             footer: {
-              text: 'zT Radar Deal Intelligence • AWS Serverless',
+              text: 'zT Radar • Direct Wishlist Dispatch',
             },
             timestamp: new Date().toISOString(),
           };
@@ -304,29 +311,45 @@ export const handler = async () => {
           }
 
           const sym = deal.primaryDeal.currencySymbol || (targetCurrency === 'BRL' ? 'R$' : '$');
+          const diffPricing = isFree
+            ? [
+                '```diff',
+                `- Regular Price: ${sym} ${deal.primaryDeal.regularPrice.toFixed(2)}`,
+                '+ Promotional:   FREE OF CHARGE (-100%)',
+                '```',
+              ].join('\n')
+            : [
+                '```diff',
+                `- Regular Price: ${sym} ${deal.primaryDeal.regularPrice.toFixed(2)}`,
+                `+ Sale Price:    ${sym} ${deal.primaryDeal.salePrice.toFixed(2)} (-${deal.primaryDeal.cutPercent}%)`,
+                '```',
+              ].join('\n');
+
           const fields = [
             {
-              name: `${deal.primaryDeal.shopName} (Primary Offer)`,
-              value: `Price: **${sym} ${deal.primaryDeal.salePrice.toFixed(2)}** (Regular: ${sym} ${deal.primaryDeal.regularPrice.toFixed(2)} | -${deal.primaryDeal.cutPercent}%)`,
+              name: `Store Offer ❖ ${deal.primaryDeal.shopName}`,
+              value: diffPricing,
               inline: false,
             },
           ];
 
           if (deal.reviewScore) {
             fields.push({
-              name: 'Review Score',
-              value: `Rating: **${deal.reviewScore}/100**`,
+              name: 'Community Evaluation',
+              value: `▸ Score: **${deal.reviewScore}/100** approval rating`,
               inline: true,
             });
           }
 
           const embed = {
-            title: `Market Deal Radar: ${deal.title}`,
-            description: isFree ? 'Grab this game for **FREE**!' : `Massive discount detected (**-${cut}%**)!`,
-            color: isFree ? 0x2ecc71 : 0xf1c40f,
+            title: `zT Radar ❖ ${deal.title}`,
+            description: isFree
+              ? 'Promotional giveaway active for a limited time.'
+              : `High-value promotion detected on verified storefront.`,
+            color: isFree ? 0x57F287 : 0x5865F2,
             fields,
             footer: {
-              text: 'zT Radar Guild Deals • AWS Serverless',
+              text: `zT Radar • Curated Deal Broadcast (${targetCurrency})`,
             },
             timestamp: new Date().toISOString(),
           };
