@@ -108,6 +108,10 @@ const commands = [
     default_member_permissions: '32', // MANAGE_GUILD
   },
   {
+    name: 'radar-status',
+    description: 'Check zT Radar system health, active configurations, and telemetry',
+  },
+  {
     name: 'radar-help',
     description: 'Display detailed guide on how to use zT Radar commands and deal alerts',
   },

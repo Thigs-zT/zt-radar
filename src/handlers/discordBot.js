@@ -5,6 +5,7 @@ import {
   PutCommand,
   DeleteCommand,
   QueryCommand,
+  ScanCommand,
 } from '@aws-sdk/lib-dynamodb';
 import { searchGamesForAutocomplete } from '../utils/itadApi.js';
 
@@ -148,6 +149,95 @@ export const handler = async (event) => {
     const userId = interaction.member?.user?.id || interaction.user?.id;
     const guildId = interaction.guild_id;
 
+    if (name === 'radar-status') {
+      try {
+        const scanResult = await docClient.send(
+          new ScanCommand({
+            TableName: TABLE_NAME,
+            Select: 'COUNT',
+          })
+        );
+
+        let guildConfig = null;
+        if (guildId) {
+          const guildQueryResult = await docClient.send(
+            new QueryCommand({
+              TableName: TABLE_NAME,
+              KeyConditionExpression: 'PK = :pk AND SK = :sk',
+              ExpressionAttributeValues: {
+                ':pk': `GUILD#${guildId}`,
+                ':sk': 'CONFIG',
+              },
+            })
+          );
+          guildConfig = guildQueryResult.Items?.[0] || null;
+        }
+
+        const serverStatusDesc = guildId
+          ? guildConfig
+            ? `Configured channel: <#${guildConfig.alert_channel_id}>\nFilter: Min Discount ${guildConfig.min_discount}% | Min Rating ${guildConfig.min_rating}/100\nFree Only: ${guildConfig.free_only ? 'Enabled' : 'Disabled'}`
+            : 'No alert channel configured for this server yet. Use `/config-channel` to set one up!'
+          : 'Direct Message session. Server-wide broadcast settings not applicable.';
+
+        const statusEmbed = {
+          title: 'zT Radar — Operational Status',
+          description: 'Serverless Game Deal Intelligence Bot hosted on AWS.',
+          color: 0x2ecc71,
+          fields: [
+            {
+              name: 'System Engine',
+              value: 'AWS Lambda (Node.js 20 ES Modules) • DynamoDB Single-Table',
+              inline: false,
+            },
+            {
+              name: 'Pricing Engine',
+              value: 'Regional Pricing Active (Steam BRL + USD Fallback) • IsThereAnyDeal & CheapShark',
+              inline: false,
+            },
+            {
+              name: 'Database Records',
+              value: `Tracking **${scanResult.Count || 0}** total items across active wishlists and server configurations.`,
+              inline: false,
+            },
+            {
+              name: guildId ? 'Server Broadcast Status' : 'Session Context',
+              value: serverStatusDesc,
+              inline: false,
+            },
+          ],
+          footer: {
+            text: 'zT Radar Deal Intelligence • Production-Ready',
+          },
+          timestamp: new Date().toISOString(),
+        };
+
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
+            data: {
+              flags: MESSAGE_FLAGS.EPHEMERAL,
+              embeds: [statusEmbed],
+            },
+          }),
+        };
+      } catch (statusError) {
+        console.error('Error fetching radar status:', statusError);
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
+            data: {
+              flags: MESSAGE_FLAGS.EPHEMERAL,
+              content: 'Failed to retrieve bot status. Please try again.',
+            },
+          }),
+        };
+      }
+    }
+
     if (name === 'radar-help') {
       const helpEmbed = {
         title: 'zT Radar — Game Intelligence Manual',
@@ -175,13 +265,18 @@ export const handler = async (event) => {
             inline: false,
           },
           {
-            name: '/config-channel <channel> [min_discount] [free_only] [min_rating] [include_third_party]',
-            value: 'Admin command to configure curated Steam/Epic deal announcements on this server (Default: >= 70% Off, >= 75 Rating).',
+            name: '/config-channel <channel> [free_only] [min_discount] [min_rating] [include_third_party]',
+            value: 'Admin command to configure curated Steam/Epic deal announcements on this server.',
             inline: false,
           },
           {
             name: '/config-channel-remove',
             value: 'Admin command to disable community deal announcements on this server.',
+            inline: false,
+          },
+          {
+            name: '/radar-status',
+            value: 'Check system health, database metrics, and active server configuration.',
             inline: false,
           },
         ],
@@ -227,7 +322,7 @@ export const handler = async (event) => {
       const channelId = channelOption?.value;
       const minDiscount = minDiscountOption ? Number(minDiscountOption.value) : 70;
       const freeOnly = freeOnlyOption ? Boolean(freeOnlyOption.value) : false;
-      const minRating = minRatingOption ? Number(minRatingOption.value) : 75;
+      const minRating = minRatingOption ? Number(minRatingOption.value) : 80;
       const includeThirdParty = thirdPartyOption ? Boolean(thirdPartyOption.value) : false;
 
       if (!channelId) {

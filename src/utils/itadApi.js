@@ -325,9 +325,59 @@ export async function getGameDealInfo(gameId) {
   }
 }
 
+/**
+ * Attempts to look up the official Steam Brazil (BRL) price from ITAD for a given title.
+ */
+async function lookupBrlPriceForTitle(title) {
+  if (!ITAD_API_KEY || !title) return null;
+
+  try {
+    const searchUrl = `${ITAD_BASE_URL}/games/search/v1?key=${ITAD_API_KEY}&title=${encodeURIComponent(title)}&results=1`;
+    const searchRes = await fetch(searchUrl, {
+      headers: { 'User-Agent': USER_AGENT },
+    });
+
+    if (!searchRes.ok) return null;
+    const searchData = await searchRes.json();
+    const gameId = searchData?.[0]?.id;
+    if (!gameId) return null;
+
+    const priceUrl = `${ITAD_BASE_URL}/games/prices/v3?key=${ITAD_API_KEY}&country=BR`;
+    const priceRes = await fetch(priceUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'User-Agent': USER_AGENT,
+      },
+      body: JSON.stringify([gameId]),
+    });
+
+    if (!priceRes.ok) return null;
+    const priceData = await priceRes.json();
+    const deals = priceData?.[0]?.deals || [];
+
+    const steamDeal = deals.find(
+      (deal) => deal.shop?.name?.toLowerCase().includes('steam') || deal.shop?.id === 61
+    );
+
+    if (steamDeal) {
+      return {
+        salePrice: steamDeal.price.amount,
+        regularPrice: steamDeal.regular.amount,
+        cutPercent: steamDeal.cut,
+        url: steamDeal.url,
+      };
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 export async function getMarketOverviewDeals(includeThirdParty = false) {
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 4500);
+  const timeoutId = setTimeout(() => controller.abort(), 5000);
 
   try {
     const freeDeals = [];
@@ -437,6 +487,24 @@ export async function getMarketOverviewDeals(includeThirdParty = false) {
           if (seenTitles.has(normalizedTitle)) continue;
           seenTitles.add(normalizedTitle);
 
+          // Attempt BRL Regional Price Enrichment
+          let salePrice = parseFloat(d.salePrice);
+          let regularPrice = normalPrice;
+          let cutPercent = savings;
+          let currency = 'USD';
+          let currencySymbol = '$';
+          let dealUrl = `https://www.cheapshark.com/redirect?dealID=${d.dealID}`;
+
+          const brlData = await lookupBrlPriceForTitle(d.title);
+          if (brlData && brlData.salePrice !== undefined) {
+            salePrice = brlData.salePrice;
+            regularPrice = brlData.regularPrice;
+            cutPercent = brlData.cutPercent;
+            currency = 'BRL';
+            currencySymbol = 'R$';
+            if (brlData.url) dealUrl = brlData.url;
+          }
+
           discountedDeals.push({
             gameId: d.gameID,
             title: d.title,
@@ -445,12 +513,12 @@ export async function getMarketOverviewDeals(includeThirdParty = false) {
             steamAppId: d.steamAppID || null,
             primaryDeal: {
               shopName,
-              salePrice: parseFloat(d.salePrice),
-              regularPrice: normalPrice,
-              cutPercent: savings,
-              url: `https://www.cheapshark.com/redirect?dealID=${d.dealID}`,
-              currency: 'USD',
-              currencySymbol: '$',
+              salePrice,
+              regularPrice,
+              cutPercent,
+              url: dealUrl,
+              currency,
+              currencySymbol,
             },
             cheaperAlternative: null,
           });
