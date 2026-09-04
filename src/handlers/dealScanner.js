@@ -1,5 +1,5 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, ScanCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, ScanCommand, UpdateCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import { getGameDealInfo, getMarketOverviewDeals } from '../utils/itadApi.js';
 
 const ddbClient = new DynamoDBClient({});
@@ -145,29 +145,26 @@ export const handler = async () => {
     const allItems = scanResult.Items || [];
     const wishlistItems = allItems.filter((item) => item.SK?.startsWith('GAME#'));
     const guildConfigs = allItems.filter((item) => item.PK?.startsWith('GUILD#') && item.SK === 'CONFIG');
+    const userConfigs = allItems.filter((item) => item.PK?.startsWith('USER#') && item.SK === 'CONFIG');
+
+    const userCurrencyMap = new Map();
+    userConfigs.forEach((cfg) => {
+      const uid = cfg.PK.replace('USER#', '');
+      userCurrencyMap.set(uid, cfg.preferred_currency || 'USD');
+    });
 
     console.log(`Retrieved ${wishlistItems.length} wishlist items and ${guildConfigs.length} guild configs.`);
 
     // 1. Process Individual Wishlists (DMs)
     if (wishlistItems.length > 0) {
-      const uniqueGameIds = [...new Set(wishlistItems.map((item) => item.external_game_id).filter(Boolean))];
-      console.log(`Unique wishlist games to fetch: ${uniqueGameIds.length}`);
-
-      const dealsMap = new Map();
-      for (const gameId of uniqueGameIds) {
-        const dealInfo = await getGameDealInfo(gameId);
-        if (dealInfo) {
-          dealsMap.set(gameId, dealInfo);
-        }
-      }
-
       for (const item of wishlistItems) {
-        const deal = dealsMap.get(item.external_game_id);
+        const preferredCurrency = userCurrencyMap.get(item.user_id) || 'USD';
+        const deal = await getGameDealInfo(item.external_game_id, preferredCurrency);
         if (!deal) continue;
 
         const effectivePrice = deal.cheaperAlternative?.salePrice ?? deal.primaryDeal?.salePrice ?? 0;
         const effectiveCut = deal.cheaperAlternative?.cutPercent ?? deal.primaryDeal?.cutPercent ?? 0;
-        const sym = deal.primaryDeal?.currencySymbol || 'R$';
+        const sym = deal.primaryDeal?.currencySymbol || (preferredCurrency === 'BRL' ? 'R$' : '$');
 
         let shouldAlert = false;
         let alertReason = '';
@@ -206,7 +203,7 @@ export const handler = async () => {
         if (shouldAlert && isNewLowerPrice) {
           console.log(`DM Alert triggered for user ${item.user_id} on ${item.game_title}: ${alertReason}`);
 
-          const primarySym = deal.primaryDeal.currencySymbol || 'R$';
+          const primarySym = deal.primaryDeal.currencySymbol || sym;
           const fields = [
             {
               name: `${deal.primaryDeal.shopName} (Primary Offer)`,
@@ -276,13 +273,14 @@ export const handler = async () => {
       for (const config of guildConfigs) {
         if (!config.alert_channel_id) continue;
 
+        const targetCurrency = config.currency || 'USD';
         const targetMinDiscount = config.min_discount ?? 70;
         const targetFreeOnly = config.free_only ?? false;
         const targetMinRating = config.min_rating ?? 80;
         const includeThirdParty = config.include_third_party ?? false;
         const broadcastedHistory = config.last_broadcasted_deals || [];
 
-        const marketDeals = await getMarketOverviewDeals(includeThirdParty);
+        const marketDeals = await getMarketOverviewDeals(includeThirdParty, targetCurrency);
 
         let sentThisRun = 0;
         const newlyBroadcastedKeys = [];
@@ -305,7 +303,7 @@ export const handler = async () => {
             continue;
           }
 
-          const sym = deal.primaryDeal.currencySymbol || '$';
+          const sym = deal.primaryDeal.currencySymbol || (targetCurrency === 'BRL' ? 'R$' : '$');
           const fields = [
             {
               name: `${deal.primaryDeal.shopName} (Primary Offer)`,

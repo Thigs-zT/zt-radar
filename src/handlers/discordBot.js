@@ -149,6 +149,51 @@ export const handler = async (event) => {
     const userId = interaction.member?.user?.id || interaction.user?.id;
     const guildId = interaction.guild_id;
 
+    if (name === 'currency') {
+      const choiceOption = options?.find((opt) => opt.name === 'choice');
+      const selectedCurrency = choiceOption?.value || 'USD';
+
+      try {
+        await docClient.send(
+          new PutCommand({
+            TableName: TABLE_NAME,
+            Item: {
+              PK: `USER#${userId}`,
+              SK: 'CONFIG',
+              preferred_currency: selectedCurrency,
+              updated_at: new Date().toISOString(),
+            },
+          })
+        );
+
+        const sym = selectedCurrency === 'BRL' ? 'R$' : '$';
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
+            data: {
+              flags: MESSAGE_FLAGS.EPHEMERAL,
+              content: `Your preferred wishlist currency has been set to **${selectedCurrency} (${sym})**! Private deal notifications will be formatted accordingly.`,
+            },
+          }),
+        };
+      } catch (error) {
+        console.error('Error updating user currency preference:', error);
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
+            data: {
+              flags: MESSAGE_FLAGS.EPHEMERAL,
+              content: 'Failed to update preferred currency. Please try again.',
+            },
+          }),
+        };
+      }
+    }
+
     if (name === 'radar-status') {
       try {
         const scanResult = await docClient.send(
@@ -173,9 +218,10 @@ export const handler = async (event) => {
           guildConfig = guildQueryResult.Items?.[0] || null;
         }
 
+        const serverCurrency = guildConfig?.currency || 'USD';
         const serverStatusDesc = guildId
           ? guildConfig
-            ? `Configured channel: <#${guildConfig.alert_channel_id}>\nFilter: Min Discount ${guildConfig.min_discount}% | Min Rating ${guildConfig.min_rating}/100\nFree Only: ${guildConfig.free_only ? 'Enabled' : 'Disabled'}`
+            ? `Configured channel: <#${guildConfig.alert_channel_id}>\nCurrency: **${serverCurrency}** (${serverCurrency === 'BRL' ? 'R$' : '$'})\nFilter: Min Discount ${guildConfig.min_discount}% | Min Rating ${guildConfig.min_rating}/100\nFree Only: ${guildConfig.free_only ? 'Enabled' : 'Disabled'}`
             : 'No alert channel configured for this server yet. Use `/config-channel` to set one up!'
           : 'Direct Message session. Server-wide broadcast settings not applicable.';
 
@@ -191,12 +237,12 @@ export const handler = async (event) => {
             },
             {
               name: 'Pricing Engine',
-              value: 'Regional Pricing Active (Steam BRL + USD Fallback) • IsThereAnyDeal & CheapShark',
+              value: 'Dual-Currency Engine: Default USD ($) with Official Steam BRL (R$) Regional Lookup.',
               inline: false,
             },
             {
               name: 'Database Records',
-              value: `Tracking **${scanResult.Count || 0}** total items across active wishlists and server configurations.`,
+              value: `Tracking **${scanResult.Count || 0}** total items across active wishlists and configurations.`,
               inline: false,
             },
             {
@@ -246,7 +292,12 @@ export const handler = async (event) => {
         fields: [
           {
             name: '/wishlist add <game> [target_price]',
-            value: 'Monitor a game with live autocomplete. Optionally set a target price in BRL (e.g. `50.00`).',
+            value: 'Monitor a game with live autocomplete. Optionally set a target price.',
+            inline: false,
+          },
+          {
+            name: '/currency <choice>',
+            value: 'Set your preferred currency for private wishlist alerts: USD ($) or BRL (R$).',
             inline: false,
           },
           {
@@ -265,8 +316,8 @@ export const handler = async (event) => {
             inline: false,
           },
           {
-            name: '/config-channel <channel> [free_only] [min_discount] [min_rating] [include_third_party]',
-            value: 'Admin command to configure curated Steam/Epic deal announcements on this server.',
+            name: '/config-channel <channel> [currency] [free_only] [min_discount] [min_rating]',
+            value: 'Admin command to configure curated deal broadcasts (Supports USD or BRL currency).',
             inline: false,
           },
           {
@@ -314,12 +365,14 @@ export const handler = async (event) => {
       }
 
       const channelOption = options?.find((opt) => opt.name === 'channel');
+      const currencyOption = options?.find((opt) => opt.name === 'currency');
       const minDiscountOption = options?.find((opt) => opt.name === 'min_discount');
       const freeOnlyOption = options?.find((opt) => opt.name === 'free_only');
       const minRatingOption = options?.find((opt) => opt.name === 'min_rating');
       const thirdPartyOption = options?.find((opt) => opt.name === 'include_third_party');
 
       const channelId = channelOption?.value;
+      const currency = currencyOption?.value || 'USD';
       const minDiscount = minDiscountOption ? Number(minDiscountOption.value) : 70;
       const freeOnly = freeOnlyOption ? Boolean(freeOnlyOption.value) : false;
       const minRating = minRatingOption ? Number(minRatingOption.value) : 80;
@@ -348,6 +401,7 @@ export const handler = async (event) => {
               SK: 'CONFIG',
               guild_id: guildId,
               alert_channel_id: channelId,
+              currency,
               min_discount: minDiscount,
               free_only: freeOnly,
               min_rating: minRating,
@@ -361,8 +415,8 @@ export const handler = async (event) => {
 
         const storeScope = includeThirdParty ? 'All Authorized Stores' : 'Steam & Epic Games Store Only';
         const filterSummary = freeOnly
-          ? `Filter: **100% Free Games Only** (${storeScope})`
-          : `Filters: **>= ${minDiscount}% Off** | **Min Rating: ${minRating}/100** | **${storeScope}**`;
+          ? `Filter: **100% Free Games Only** (${storeScope} | Currency: **${currency}**)`
+          : `Filters: **>= ${minDiscount}% Off** | **Min Rating: ${minRating}/100** | Currency: **${currency}** | **${storeScope}**`;
 
         return {
           statusCode: 200,
@@ -541,6 +595,37 @@ export const handler = async (event) => {
         const normalizedTitle = gameTitle.toLowerCase().trim();
 
         try {
+          // Check if user has currency config, otherwise initialize default USD
+          const userConfigResult = await docClient.send(
+            new QueryCommand({
+              TableName: TABLE_NAME,
+              KeyConditionExpression: 'PK = :pk AND SK = :sk',
+              ExpressionAttributeValues: {
+                ':pk': `USER#${userId}`,
+                ':sk': 'CONFIG',
+              },
+            })
+          );
+
+          let userCurrency = userConfigResult.Items?.[0]?.preferred_currency;
+          let firstTimeNotice = '';
+
+          if (!userCurrency) {
+            userCurrency = 'USD';
+            await docClient.send(
+              new PutCommand({
+                TableName: TABLE_NAME,
+                Item: {
+                  PK: `USER#${userId}`,
+                  SK: 'CONFIG',
+                  preferred_currency: 'USD',
+                  created_at: new Date().toISOString(),
+                },
+              })
+            );
+            firstTimeNotice = '\n*Tip: Currency set to **USD ($)** by default. Use `/currency` anytime to switch to **BRL (R$)**!*';
+          }
+
           await docClient.send(
             new PutCommand({
               TableName: TABLE_NAME,
@@ -559,7 +644,9 @@ export const handler = async (event) => {
             })
           );
 
-          const priceInfo = targetPrice ? ` Target Price: R$ ${targetPrice.toFixed(2)}.` : '';
+          const sym = userCurrency === 'BRL' ? 'R$' : '$';
+          const priceInfo = targetPrice ? ` Target Price: ${sym} ${targetPrice.toFixed(2)}.` : '';
+
           return {
             statusCode: 200,
             headers: { 'Content-Type': 'application/json' },
@@ -567,7 +654,7 @@ export const handler = async (event) => {
               type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
               data: {
                 flags: MESSAGE_FLAGS.EPHEMERAL,
-                content: `Added **${gameTitle}** to your monitoring wishlist!${priceInfo}`,
+                content: `Added **${gameTitle}** to your monitoring wishlist!${priceInfo}${firstTimeNotice}`,
               },
             }),
           };
@@ -639,16 +726,28 @@ export const handler = async (event) => {
 
       if (subCommandName === 'list') {
         try {
-          const queryResult = await docClient.send(
-            new QueryCommand({
-              TableName: TABLE_NAME,
-              KeyConditionExpression: 'PK = :pk AND begins_with(SK, :skPrefix)',
-              ExpressionAttributeValues: {
-                ':pk': `USER#${userId}`,
-                ':skPrefix': 'GAME#',
-              },
-            })
-          );
+          const [queryResult, userConfigResult] = await Promise.all([
+            docClient.send(
+              new QueryCommand({
+                TableName: TABLE_NAME,
+                KeyConditionExpression: 'PK = :pk AND begins_with(SK, :skPrefix)',
+                ExpressionAttributeValues: {
+                  ':pk': `USER#${userId}`,
+                  ':skPrefix': 'GAME#',
+                },
+              })
+            ),
+            docClient.send(
+              new QueryCommand({
+                TableName: TABLE_NAME,
+                KeyConditionExpression: 'PK = :pk AND SK = :sk',
+                ExpressionAttributeValues: {
+                  ':pk': `USER#${userId}`,
+                  ':sk': 'CONFIG',
+                },
+              })
+            ),
+          ]);
 
           const items = queryResult.Items || [];
           if (items.length === 0) {
@@ -665,9 +764,12 @@ export const handler = async (event) => {
             };
           }
 
+          const userCurrency = userConfigResult.Items?.[0]?.preferred_currency || 'USD';
+          const sym = userCurrency === 'BRL' ? 'R$' : '$';
+
           const formattedList = items
             .map((item, index) => {
-              const target = item.target_price ? ` (Target: R$ ${Number(item.target_price).toFixed(2)})` : '';
+              const target = item.target_price ? ` (Target: ${sym} ${Number(item.target_price).toFixed(2)})` : '';
               return `${index + 1}. **${item.game_title}**${target}`;
             })
             .join('\n');
@@ -679,7 +781,7 @@ export const handler = async (event) => {
               type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
               data: {
                 flags: MESSAGE_FLAGS.EPHEMERAL,
-                content: `**Your Monitored Games (${items.length}):**\n\n${formattedList}`,
+                content: `**Your Monitored Games (${items.length}) [Currency: ${userCurrency} (${sym})]:**\n\n${formattedList}`,
               },
             }),
           };

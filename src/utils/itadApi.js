@@ -144,12 +144,13 @@ export async function searchGamesForAutocomplete(query) {
   }
 }
 
-export async function getGameDealInfo(gameId) {
+export async function getGameDealInfo(gameId, preferredCurrency = 'USD') {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 4000);
 
   try {
-    if (ITAD_API_KEY) {
+    // If preferred currency is BRL and ITAD is configured, check BRL pricing first
+    if (preferredCurrency === 'BRL' && ITAD_API_KEY) {
       const priceUrl = `${ITAD_BASE_URL}/games/prices/v3?key=${ITAD_API_KEY}&country=BR`;
       const historyUrl = `${ITAD_BASE_URL}/games/historylow/v1?key=${ITAD_API_KEY}&country=BR`;
       const infoUrl = `${ITAD_BASE_URL}/games/info/v2?key=${ITAD_API_KEY}&id=${gameId}`;
@@ -249,7 +250,7 @@ export async function getGameDealInfo(gameId) {
       }
     }
 
-    // Fallback: CheapShark API (USD)
+    // Default USD Lookup (CheapShark API)
     const csUrl = `${CHEAPSHARK_BASE_URL}/games?id=${gameId}`;
     const csRes = await fetch(csUrl, {
       headers: { 'User-Agent': USER_AGENT },
@@ -375,7 +376,7 @@ async function lookupBrlPriceForTitle(title) {
   }
 }
 
-export async function getMarketOverviewDeals(includeThirdParty = false) {
+export async function getMarketOverviewDeals(includeThirdParty = false, preferredCurrency = 'USD') {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 5000);
 
@@ -426,8 +427,8 @@ export async function getMarketOverviewDeals(includeThirdParty = false) {
                   regularPrice: item.deal?.regular?.amount ?? 0,
                   cutPercent: 100,
                   url: item.deal?.url,
-                  currency: 'BRL',
-                  currencySymbol: 'R$',
+                  currency: preferredCurrency === 'BRL' ? 'BRL' : 'USD',
+                  currencySymbol: preferredCurrency === 'BRL' ? 'R$' : '$',
                 },
                 cheaperAlternative: null,
               });
@@ -439,7 +440,7 @@ export async function getMarketOverviewDeals(includeThirdParty = false) {
       }
     }
 
-    // 2. Fetch Acclaimed Games from CheapShark
+    // 2. Fetch Acclaimed Games from CheapShark (Default USD)
     try {
       const csUrl = `${CHEAPSHARK_BASE_URL}/deals?storeID=1&pageSize=50&sortBy=Deal%20Rating&desc=0`;
       const csRes = await fetch(csUrl, {
@@ -487,7 +488,6 @@ export async function getMarketOverviewDeals(includeThirdParty = false) {
           if (seenTitles.has(normalizedTitle)) continue;
           seenTitles.add(normalizedTitle);
 
-          // Attempt BRL Regional Price Enrichment
           let salePrice = parseFloat(d.salePrice);
           let regularPrice = normalPrice;
           let cutPercent = savings;
@@ -495,14 +495,17 @@ export async function getMarketOverviewDeals(includeThirdParty = false) {
           let currencySymbol = '$';
           let dealUrl = `https://www.cheapshark.com/redirect?dealID=${d.dealID}`;
 
-          const brlData = await lookupBrlPriceForTitle(d.title);
-          if (brlData && brlData.salePrice !== undefined) {
-            salePrice = brlData.salePrice;
-            regularPrice = brlData.regularPrice;
-            cutPercent = brlData.cutPercent;
-            currency = 'BRL';
-            currencySymbol = 'R$';
-            if (brlData.url) dealUrl = brlData.url;
+          // Only perform BRL regional lookup if explicitly requested by configuration
+          if (preferredCurrency === 'BRL') {
+            const brlData = await lookupBrlPriceForTitle(d.title);
+            if (brlData && brlData.salePrice !== undefined) {
+              salePrice = brlData.salePrice;
+              regularPrice = brlData.regularPrice;
+              cutPercent = brlData.cutPercent;
+              currency = 'BRL';
+              currencySymbol = 'R$';
+              if (brlData.url) dealUrl = brlData.url;
+            }
           }
 
           discountedDeals.push({

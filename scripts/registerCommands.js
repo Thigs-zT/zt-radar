@@ -28,7 +28,7 @@ const commands = [
           },
           {
             name: 'target_price',
-            description: 'Target price in BRL (e.g. 50.00)',
+            description: 'Target price (in your preferred currency, e.g. 15.00 or 50.00)',
             type: 10, // NUMBER
             required: false,
           },
@@ -61,6 +61,22 @@ const commands = [
     ],
   },
   {
+    name: 'currency',
+    description: 'Set your preferred currency for personal wishlist alerts',
+    options: [
+      {
+        name: 'choice',
+        description: 'Choose between US Dollars (USD) or Brazilian Reais (BRL)',
+        type: 3, // STRING
+        required: true,
+        choices: [
+          { name: 'USD ($) - US Dollars (Default)', value: 'USD' },
+          { name: 'BRL (R$) - Brazilian Reais', value: 'BRL' },
+        ],
+      },
+    ],
+  },
+  {
     name: 'config-channel',
     description: 'Configure server channel for curated Steam/Epic deal announcements',
     default_member_permissions: '32', // MANAGE_GUILD
@@ -71,6 +87,16 @@ const commands = [
         type: 7, // CHANNEL
         channel_types: [0], // GUILD_TEXT
         required: true,
+      },
+      {
+        name: 'currency',
+        description: 'Preferred currency for deal prices (default: USD)',
+        type: 3, // STRING
+        required: false,
+        choices: [
+          { name: 'USD ($) - US Dollars (Default)', value: 'USD' },
+          { name: 'BRL (R$) - Brazilian Reais', value: 'BRL' },
+        ],
       },
       {
         name: 'free_only',
