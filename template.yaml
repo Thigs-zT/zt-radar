@@ -8,16 +8,9 @@ Globals:
   Function:
     Timeout: 10
     MemorySize: 256
-    Runtime: nodejs20.x
+    Runtime: nodejs22.x
     Architectures:
-      - x86_64
-    Environment:
-      Variables:
-        TABLE_NAME: !Ref DealsTable
-        DISCORD_PUBLIC_KEY: !Ref DiscordPublicKey
-        DISCORD_BOT_TOKEN: !Ref DiscordBotToken
-        DISCORD_APP_ID: !Ref DiscordAppId
-        ITAD_API_KEY: !Ref ItadApiKey
+      - arm64
 
 Parameters:
   DiscordPublicKey:
@@ -69,6 +62,12 @@ Resources:
     Properties:
       CodeUri: .
       Handler: src/handlers/discordBot.handler
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref DealsTable
+          DISCORD_PUBLIC_KEY: !Ref DiscordPublicKey
+          DISCORD_APP_ID: !Ref DiscordAppId
+          ITAD_API_KEY: !Ref ItadApiKey
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref DealsTable
@@ -87,6 +86,11 @@ Resources:
       CodeUri: .
       Handler: src/handlers/dealScanner.handler
       Timeout: 30
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref DealsTable
+          DISCORD_BOT_TOKEN: !Ref DiscordBotToken
+          ITAD_API_KEY: !Ref ItadApiKey
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref DealsTable
