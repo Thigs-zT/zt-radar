@@ -9,7 +9,11 @@ import {
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
 import { searchGamesForAutocomplete, getGameDealInfo } from '../utils/itadApi.js';
-import { checkPlatformStatuses, getSteamTrendingGames } from '../utils/platformStatus.js';
+import {
+  checkPlatformStatuses,
+  getSteamTrendingGames,
+  getSteamMostPlayedGames,
+} from '../utils/platformStatus.js';
 
 const ddbClient = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(ddbClient);
@@ -236,6 +240,60 @@ export const handler = async (event) => {
       }
     }
 
+    // Command: /steam-most-played
+    if (name === 'steam-most-played') {
+      try {
+        const mostPlayed = await getSteamMostPlayedGames();
+
+        if (mostPlayed.length === 0) {
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(
+              createEphemeralEmbed('Charts Error', 'Could not retrieve Steam most played charts.', PALETTE.DANGER)
+            ),
+          };
+        }
+
+        const lines = mostPlayed.map((g) => {
+          const playersFormatted = g.currentPlayers.toLocaleString('en-US');
+          const peakText = g.peakToday ? ` • 24h Peak: \`${g.peakToday.toLocaleString('en-US')}\`` : '';
+          return `❖ **#${g.rank} ${g.name}**\n  └─ **\`${playersFormatted}\`** active players now${peakText}`;
+        });
+
+        const embed = {
+          title: 'zT Radar ❖ Steam Most Played Games (Top 10 Global)',
+          description: `Live official Valve rankings by current online players:\n\n${lines.join('\n\n')}`,
+          color: PALETTE.BRAND,
+          footer: {
+            text: 'Official Valve ISteamChartsService Telemetry • Matches SteamDB',
+          },
+          timestamp: new Date().toISOString(),
+        };
+
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
+            data: {
+              flags: MESSAGE_FLAGS.EPHEMERAL,
+              embeds: [embed],
+            },
+          }),
+        };
+      } catch (err) {
+        console.error('Error fetching steam most played:', err);
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(
+            createEphemeralEmbed('Charts Error', 'Could not retrieve live Steam player rankings.', PALETTE.DANGER)
+          ),
+        };
+      }
+    }
+
     // Command: /steam-trending
     if (name === 'steam-trending') {
       try {
@@ -251,24 +309,20 @@ export const handler = async (event) => {
           };
         }
 
-        const lines = trending.map((game, i) => {
+        const lines = trending.map((game) => {
           const playersText = game.currentPlayers
-            ? `\`${game.currentPlayers.toLocaleString('en-US')}\` concurrent players`
-            : 'Player telemetry loading...';
+            ? `\`${game.currentPlayers.toLocaleString('en-US')}\` players now`
+            : 'Volume calculating...';
 
-          const priceText = game.finalPrice === '0.00' || !game.finalPrice
-            ? 'Free to Play'
-            : `$ ${game.finalPrice}${game.discounted ? ` (-${game.discountPercent}%)` : ''}`;
-
-          return `❖ **${i + 1}. ${game.name}**\n  └─ ${playersText} • Store: **${priceText}**`;
+          return `❖ **#${game.rank} ${game.name}**\n  └─ ${playersText} • Store: **${game.priceText}**`;
         });
 
         const embed = {
-          title: 'zT Radar ❖ Steam Trending & Most-Played',
-          description: `Live top 5 games by global popularity on Steam:\n\n${lines.join('\n\n')}`,
+          title: 'zT Radar ❖ Steam Trending & Surging (Top 10)',
+          description: `Titles currently experiencing surging sales & demand on the Steam Store:\n\n${lines.join('\n\n')}`,
           color: PALETTE.BRAND,
           footer: {
-            text: 'Steam Charts & Web API Data • Real-Time Valve Statistics',
+            text: 'Steam Storefront Surge Charts • Dynamic Market Velocity',
           },
           timestamp: new Date().toISOString(),
         };
@@ -610,8 +664,10 @@ export const handler = async (event) => {
             value: [
               '▸ `/compare <game>`',
               '  └─ Real-time price check comparing Steam, Epic, Nuuvem and GOG with historical low.',
+              '▸ `/steam-most-played`',
+              '  └─ Official live top 10 most-played games on Steam by concurrent players.',
               '▸ `/steam-trending`',
-              '  └─ Display live top 5 games on Steam with active concurrent player volume.',
+              '  └─ Display live top 10 surging games on the Steam Storefront.',
               '▸ `/platform-status`',
               '  └─ Real-time operational availability and latency across Steam, Epic, PSN, and Xbox.',
             ].join('\n'),

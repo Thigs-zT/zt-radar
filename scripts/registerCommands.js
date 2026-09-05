@@ -25,7 +25,11 @@ const commands = [
   },
   {
     name: 'steam-trending',
-    description: 'Display top trending titles on Steam with active concurrent player counts',
+    description: 'Display top 10 trending and surging titles on the Steam Storefront',
+  },
+  {
+    name: 'steam-most-played',
+    description: 'Display official top 10 most-played games on Steam by live concurrent player count',
   },
   {
     name: 'platform-status',
@@ -174,7 +178,7 @@ const commands = [
 async function registerCommands() {
   const url = `https://discord.com/api/v10/applications/${APPLICATION_ID}/commands`;
 
-  console.log('Registering complete command suite with Discord...');
+  console.log('Registering updated command suite with Discord...');
 
   try {
     const response = await fetch(url, {
