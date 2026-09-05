@@ -202,7 +202,6 @@ export const handler = async (event) => {
           ? allItems.find((i) => i.PK === `GUILD#${guildId}` && i.SK === 'CONFIG')
           : null;
 
-        // Calculate Top 5 most monitored titles across the community
         const titleCounts = new Map();
         for (const item of wishlistItems) {
           const title = item.game_title || 'Unknown Title';
@@ -455,27 +454,33 @@ export const handler = async (event) => {
       }
     }
 
-    // Command: /compare <game>
+    // Command: /compare <game> (with Enhanced Historical Low Analysis)
     if (name === 'compare') {
       const gameOption = options?.find((opt) => opt.name === 'game');
       const rawGameValue = gameOption?.value;
 
-      if (!rawGameValue || !rawGameValue.includes('|')) {
+      if (!rawGameValue) {
         return {
           statusCode: 200,
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(
             createEphemeralEmbed(
               'Selection Required',
-              'Please select a game directly from the live autocomplete suggestions dropdown.',
+              'Please enter or select a game directly from the live autocomplete suggestions dropdown.',
               PALETTE.WARNING
             )
           ),
         };
       }
 
-      const [externalGameId, ...titleParts] = rawGameValue.split('|');
-      const gameTitle = titleParts.join('|');
+      let externalGameId = rawGameValue;
+      let gameTitle = rawGameValue;
+
+      if (rawGameValue.includes('|')) {
+        const [id, ...titleParts] = rawGameValue.split('|');
+        externalGameId = id;
+        gameTitle = titleParts.join('|');
+      }
 
       try {
         const userConfigResult = await docClient.send(
@@ -490,7 +495,7 @@ export const handler = async (event) => {
         );
 
         const preferredCurrency = userConfigResult.Items?.[0]?.preferred_currency || 'USD';
-        const dealInfo = await getGameDealInfo(externalGameId, preferredCurrency);
+        const dealInfo = await getGameDealInfo(externalGameId, preferredCurrency, gameTitle);
 
         if (!dealInfo || !dealInfo.primaryDeal) {
           return {
@@ -537,10 +542,16 @@ export const handler = async (event) => {
           });
         }
 
+        // Crystal Clear All-Time Low (ATL) Metric
         if (dealInfo.allTimeLowPrice !== null) {
-          const atlStatus = dealInfo.isAllTimeLow
-            ? `**${sym} ${dealInfo.allTimeLowPrice.toFixed(2)}** (★ MATCHING ALL-TIME LOW!)`
-            : `**${sym} ${dealInfo.allTimeLowPrice.toFixed(2)}**`;
+          const diffFromAtl = bestOffer.salePrice - dealInfo.allTimeLowPrice;
+          let atlStatus = '';
+
+          if (dealInfo.isAllTimeLow || diffFromAtl <= 0.05) {
+            atlStatus = `🔥 **${sym} ${dealInfo.allTimeLowPrice.toFixed(2)}**\n└─ **MATCHES LOWEST PRICE EVER!**`;
+          } else {
+            atlStatus = `📊 **${sym} ${dealInfo.allTimeLowPrice.toFixed(2)}**\n└─ Current price is ${sym} ${diffFromAtl.toFixed(2)} above record low.`;
+          }
 
           fields.push({
             name: 'Historical Low (ATL)',
@@ -551,8 +562,8 @@ export const handler = async (event) => {
 
         if (dealInfo.reviewScore) {
           fields.push({
-            name: 'Community Score',
-            value: `**${dealInfo.reviewScore}/100** approval`,
+            name: 'Community Approval',
+            value: `▸ **${dealInfo.reviewScore}/100** score`,
             inline: true,
           });
         }
@@ -589,7 +600,7 @@ export const handler = async (event) => {
 
         const embed = {
           title: `zT Radar ❖ Price Comparison: ${dealInfo.title}`,
-          description: `Live price analysis in **${preferredCurrency} (${sym})**.`,
+          description: `Live price comparison in **${preferredCurrency} (${sym})**.`,
           color: dealInfo.isAllTimeLow ? PALETTE.SUCCESS : PALETTE.BRAND,
           fields,
           footer: {
@@ -1064,7 +1075,7 @@ export const handler = async (event) => {
         const rawGameValue = gameOption?.value;
         const targetPrice = targetPriceOption ? parseFloat(targetPriceOption.value) : null;
 
-        if (!rawGameValue || !rawGameValue.includes('|')) {
+        if (!rawGameValue) {
           return {
             statusCode: 200,
             headers: { 'Content-Type': 'application/json' },
@@ -1078,8 +1089,15 @@ export const handler = async (event) => {
           };
         }
 
-        const [externalGameId, ...titleParts] = rawGameValue.split('|');
-        const gameTitle = titleParts.join('|');
+        let externalGameId = rawGameValue;
+        let gameTitle = rawGameValue;
+
+        if (rawGameValue.includes('|')) {
+          const [id, ...titleParts] = rawGameValue.split('|');
+          externalGameId = id;
+          gameTitle = titleParts.join('|');
+        }
+
         const normalizedTitle = gameTitle.toLowerCase().trim();
 
         try {

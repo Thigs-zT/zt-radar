@@ -8,6 +8,13 @@ const docClient = DynamoDBDocumentClient.from(ddbClient);
 const TABLE_NAME = process.env.TABLE_NAME;
 const BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
 
+const ALERT_PALETTE = {
+  FREE_TO_KEEP: 0x57F287,    // Emerald Green
+  FREE_PLAY_DAYS: 0x9B59B6,  // Amethyst Purple
+  CURATED_DEAL: 0x5865F2,    // Blurple
+  ALL_TIME_LOW: 0xFEE75C,    // Gold Amber
+};
+
 function createStoreButtons(deal) {
   const buttons = [];
 
@@ -159,7 +166,7 @@ export const handler = async () => {
     if (wishlistItems.length > 0) {
       for (const item of wishlistItems) {
         const preferredCurrency = userCurrencyMap.get(item.user_id) || 'USD';
-        const deal = await getGameDealInfo(item.external_game_id, preferredCurrency);
+        const deal = await getGameDealInfo(item.external_game_id, preferredCurrency, item.game_title);
         if (!deal) continue;
 
         const effectivePrice = deal.cheaperAlternative?.salePrice ?? deal.primaryDeal?.salePrice ?? 0;
@@ -168,19 +175,27 @@ export const handler = async () => {
 
         let shouldAlert = false;
         let alertReason = '';
+        let embedColor = ALERT_PALETTE.CURATED_DEAL;
 
-        if (item.alert_free && effectivePrice === 0) {
+        if (deal.dealType === 'FREE_TO_KEEP' || (item.alert_free && effectivePrice === 0)) {
           shouldAlert = true;
-          alertReason = 'PROMOTIONAL GIVEAWAY DETECTED (100% FREE)';
-        } else if (item.target_price && effectivePrice <= Number(item.target_price)) {
+          alertReason = '100% FREE TO KEEP (Permanent Ownership)';
+          embedColor = ALERT_PALETTE.FREE_TO_KEEP;
+        } else if (deal.dealType === 'FREE_PLAY_DAYS') {
           shouldAlert = true;
-          alertReason = `TARGET PRICE REACHED (≤ ${sym} ${Number(item.target_price).toFixed(2)})`;
+          alertReason = 'FREE PLAY EVENT (Play For Free This Weekend)';
+          embedColor = ALERT_PALETTE.FREE_PLAY_DAYS;
         } else if (deal.isAllTimeLow && item.alert_all_time_low) {
           shouldAlert = true;
           alertReason = 'HISTORICAL ALL-TIME LOW PRICE HIT';
+          embedColor = ALERT_PALETTE.ALL_TIME_LOW;
+        } else if (item.target_price && effectivePrice <= Number(item.target_price)) {
+          shouldAlert = true;
+          alertReason = `TARGET PRICE REACHED (≤ ${sym} ${Number(item.target_price).toFixed(2)})`;
+          embedColor = ALERT_PALETTE.ALL_TIME_LOW;
         } else if (item.alert_steep_discount && effectiveCut >= 70) {
           shouldAlert = true;
-          alertReason = `MAJOR SALE: -${effectiveCut}% DISCOUNT`;
+          alertReason = `MAJOR PROMOTION: -${effectiveCut}% OFF`;
         }
 
         const lastPrice = item.last_notified_price !== undefined ? Number(item.last_notified_price) : null;
@@ -207,13 +222,13 @@ export const handler = async () => {
           const diffPricing = [
             '```diff',
             `- Regular Price: ${primarySym} ${deal.primaryDeal.regularPrice.toFixed(2)}`,
-            `+ Sale Price:    ${primarySym} ${deal.primaryDeal.salePrice.toFixed(2)} (-${deal.primaryDeal.cutPercent}%)`,
+            `+ Promotion:     ${primarySym} ${deal.primaryDeal.salePrice.toFixed(2)} (-${deal.primaryDeal.cutPercent}%)`,
             '```',
           ].join('\n');
 
           const fields = [
             {
-              name: `Store Offer ❖ ${deal.primaryDeal.shopName}`,
+              name: `Storefront Offer ❖ ${deal.primaryDeal.shopName}`,
               value: diffPricing,
               inline: false,
             },
@@ -222,16 +237,27 @@ export const handler = async () => {
           if (deal.cheaperAlternative) {
             const altSym = deal.cheaperAlternative.currencySymbol || primarySym;
             fields.push({
-              name: `Alternative Retailer ❖ ${deal.cheaperAlternative.shopName}`,
+              name: `Cheaper at ${deal.cheaperAlternative.shopName}!`,
               value: `▸ Price: **${altSym} ${deal.cheaperAlternative.salePrice.toFixed(2)}** (-${deal.cheaperAlternative.cutPercent}%)`,
               inline: false,
             });
           }
 
+          if (deal.allTimeLowPrice !== null) {
+            const atlText = deal.isAllTimeLow
+              ? `**${primarySym} ${deal.allTimeLowPrice.toFixed(2)}** (★ Matches ATL)`
+              : `**${primarySym} ${deal.allTimeLowPrice.toFixed(2)}**`;
+            fields.push({
+              name: 'Historical Low',
+              value: atlText,
+              inline: true,
+            });
+          }
+
           if (deal.reviewScore) {
             fields.push({
-              name: 'Community Evaluation',
-              value: `▸ Score: **${deal.reviewScore}/100** approval rating`,
+              name: 'Community Score',
+              value: `▸ **${deal.reviewScore}/100** approval`,
               inline: true,
             });
           }
@@ -239,7 +265,7 @@ export const handler = async () => {
           const embed = {
             title: `zT Radar ❖ Wishlist Alert: ${item.game_title}`,
             description: `**${alertReason}**`,
-            color: 0x57F287,
+            color: embedColor,
             fields,
             footer: {
               text: 'zT Radar • Direct Wishlist Dispatch',
@@ -297,7 +323,9 @@ export const handler = async () => {
 
           const isFree = deal.primaryDeal?.salePrice === 0;
           const cut = deal.primaryDeal?.cutPercent ?? 0;
-          const uniqueDealKey = `${deal.gameId}_${deal.primaryDeal.salePrice}`;
+          const isFreeWeekend = deal.dealType === 'FREE_PLAY_DAYS';
+          const isFreeToKeep = deal.dealType === 'FREE_TO_KEEP';
+          const uniqueDealKey = `${deal.gameId}_${deal.primaryDeal.salePrice}_${deal.dealType}`;
 
           if (broadcastedHistory.includes(uniqueDealKey) || newlyBroadcastedKeys.includes(uniqueDealKey)) {
             continue;
@@ -311,19 +339,36 @@ export const handler = async () => {
           }
 
           const sym = deal.primaryDeal.currencySymbol || (targetCurrency === 'BRL' ? 'R$' : '$');
-          const diffPricing = isFree
-            ? [
-                '```diff',
-                `- Regular Price: ${sym} ${deal.primaryDeal.regularPrice.toFixed(2)}`,
-                '+ Promotional:   FREE OF CHARGE (-100%)',
-                '```',
-              ].join('\n')
-            : [
-                '```diff',
-                `- Regular Price: ${sym} ${deal.primaryDeal.regularPrice.toFixed(2)}`,
-                `+ Sale Price:    ${sym} ${deal.primaryDeal.salePrice.toFixed(2)} (-${deal.primaryDeal.cutPercent}%)`,
-                '```',
-              ].join('\n');
+
+          let embedColor = ALERT_PALETTE.CURATED_DEAL;
+          let bannerHeadline = `High-value promotion detected (**-${cut}%**)!`;
+
+          let diffPricing = [
+            '```diff',
+            `- Regular Price: ${sym} ${deal.primaryDeal.regularPrice.toFixed(2)}`,
+            `+ Sale Price:    ${sym} ${deal.primaryDeal.salePrice.toFixed(2)} (-${deal.primaryDeal.cutPercent}%)`,
+            '```',
+          ].join('\n');
+
+          if (isFreeToKeep) {
+            embedColor = ALERT_PALETTE.FREE_TO_KEEP;
+            bannerHeadline = 'Claim this game for **FREE** to keep permanently in your library!';
+            diffPricing = [
+              '```diff',
+              `- Regular Price: ${sym} ${deal.primaryDeal.regularPrice.toFixed(2)}`,
+              '+ Promotional:   100% FREE TO KEEP (Permanent Ownership)',
+              '```',
+            ].join('\n');
+          } else if (isFreeWeekend) {
+            embedColor = ALERT_PALETTE.FREE_PLAY_DAYS;
+            bannerHeadline = 'Limited-time **Free Weekend / Play For Free** event active!';
+            diffPricing = [
+              '```diff',
+              `- Regular Price: ${sym} ${deal.primaryDeal.regularPrice.toFixed(2)}`,
+              '+ Temporary:     FREE PLAY EVENT (Active Weekend Access)',
+              '```',
+            ].join('\n');
+          }
 
           const fields = [
             {
@@ -343,10 +388,8 @@ export const handler = async () => {
 
           const embed = {
             title: `zT Radar ❖ ${deal.title}`,
-            description: isFree
-              ? 'Promotional giveaway active for a limited time.'
-              : `High-value promotion detected on verified storefront.`,
-            color: isFree ? 0x57F287 : 0x5865F2,
+            description: bannerHeadline,
+            color: embedColor,
             fields,
             footer: {
               text: `zT Radar • Curated Deal Broadcast (${targetCurrency})`,
