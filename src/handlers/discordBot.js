@@ -8,7 +8,7 @@ import {
   ScanCommand,
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
-import { searchGamesForAutocomplete } from '../utils/itadApi.js';
+import { searchGamesForAutocomplete, getGameDealInfo } from '../utils/itadApi.js';
 
 const ddbClient = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(ddbClient);
@@ -97,15 +97,18 @@ export const handler = async (event) => {
     const { name, options } = interaction.data;
     const userId = interaction.member?.user?.id || interaction.user?.id;
 
-    if (name === 'wishlist') {
+    if (name === 'compare' || name === 'wishlist') {
       const subCommand = options?.[0];
       const subCommandName = subCommand?.name;
-      const focusedOption = subCommand?.options?.find((opt) => opt.focused);
+      const focusedOption =
+        name === 'compare'
+          ? options?.find((opt) => opt.focused)
+          : subCommand?.options?.find((opt) => opt.focused);
 
       if (focusedOption && focusedOption.name === 'game') {
         const query = focusedOption.value?.trim() || '';
 
-        if (subCommandName === 'remove') {
+        if (name === 'wishlist' && subCommandName === 'remove') {
           try {
             const queryResult = await docClient.send(
               new QueryCommand({
@@ -179,6 +182,182 @@ export const handler = async (event) => {
     const userId = interaction.member?.user?.id || interaction.user?.id;
     const guildId = interaction.guild_id;
 
+    // Command: /compare <game>
+    if (name === 'compare') {
+      const gameOption = options?.find((opt) => opt.name === 'game');
+      const rawGameValue = gameOption?.value;
+
+      if (!rawGameValue || !rawGameValue.includes('|')) {
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(
+            createEphemeralEmbed(
+              'Selection Required',
+              'Please select a game directly from the live autocomplete suggestions dropdown.',
+              PALETTE.WARNING
+            )
+          ),
+        };
+      }
+
+      const [externalGameId, ...titleParts] = rawGameValue.split('|');
+      const gameTitle = titleParts.join('|');
+
+      try {
+        // Query user's preferred currency
+        const userConfigResult = await docClient.send(
+          new QueryCommand({
+            TableName: TABLE_NAME,
+            KeyConditionExpression: 'PK = :pk AND SK = :sk',
+            ExpressionAttributeValues: {
+              ':pk': `USER#${userId}`,
+              ':sk': 'CONFIG',
+            },
+          })
+        );
+
+        const preferredCurrency = userConfigResult.Items?.[0]?.preferred_currency || 'USD';
+        const dealInfo = await getGameDealInfo(externalGameId, preferredCurrency);
+
+        if (!dealInfo || !dealInfo.primaryDeal) {
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(
+              createEphemeralEmbed(
+                'Price Data Unavailable',
+                `Could not retrieve active storefront prices for **${gameTitle}**. The title may not be currently cataloged or available on monitored PC stores.`,
+                PALETTE.WARNING
+              )
+            ),
+          };
+        }
+
+        const sym = dealInfo.primaryDeal.currencySymbol || (preferredCurrency === 'BRL' ? 'R$' : '$');
+        const bestOffer = dealInfo.cheaperAlternative || dealInfo.primaryDeal;
+
+        const diffBlock = [
+          '```diff',
+          `- Regular Price: ${sym} ${dealInfo.primaryDeal.regularPrice.toFixed(2)}`,
+          `+ Current Best:  ${sym} ${bestOffer.salePrice.toFixed(2)} (-${bestOffer.cutPercent}%) at ${bestOffer.shopName}`,
+          '```',
+        ].join('\n');
+
+        const fields = [
+          {
+            name: 'Price Overview',
+            value: diffBlock,
+            inline: false,
+          },
+        ];
+
+        // Store comparison breakdown
+        if (dealInfo.storeBreakdown && Object.keys(dealInfo.storeBreakdown).length > 0) {
+          const breakdownList = Object.values(dealInfo.storeBreakdown).map((s) => {
+            const cutTxt = s.cutPercent > 0 ? ` (-${s.cutPercent}%)` : '';
+            return `▸ **${s.shopName}**: ${sym} ${s.salePrice.toFixed(2)}${cutTxt}`;
+          });
+
+          fields.push({
+            name: 'Storefront Availability',
+            value: breakdownList.join('\n'),
+            inline: false,
+          });
+        }
+
+        // All-Time Low record
+        if (dealInfo.allTimeLowPrice !== null) {
+          const atlStatus = dealInfo.isAllTimeLow
+            ? `**${sym} ${dealInfo.allTimeLowPrice.toFixed(2)}** (★ MATCHING ALL-TIME LOW!)`
+            : `**${sym} ${dealInfo.allTimeLowPrice.toFixed(2)}**`;
+
+          fields.push({
+            name: 'Historical Low (ATL)',
+            value: atlStatus,
+            inline: true,
+          });
+        }
+
+        // Review score
+        if (dealInfo.reviewScore) {
+          fields.push({
+            name: 'Community Score',
+            value: `**${dealInfo.reviewScore}/100** approval`,
+            inline: true,
+          });
+        }
+
+        // Build interactive Link Buttons
+        const buttons = [];
+        if (bestOffer.url) {
+          buttons.push({
+            type: 2,
+            style: 5,
+            label: `Buy on ${bestOffer.shopName}`,
+            url: bestOffer.url,
+          });
+        }
+
+        if (dealInfo.primaryDeal.url && dealInfo.primaryDeal.url !== bestOffer.url) {
+          buttons.push({
+            type: 2,
+            style: 5,
+            label: `Steam Store`,
+            url: dealInfo.primaryDeal.url,
+          });
+        }
+
+        if (dealInfo.steamAppId) {
+          buttons.push({
+            type: 2,
+            style: 5,
+            label: 'SteamDB Entry',
+            url: `https://steamdb.info/app/${dealInfo.steamAppId}/`,
+          });
+        }
+
+        const components = buttons.length > 0 ? [{ type: 1, components: buttons.slice(0, 5) }] : [];
+
+        const embed = {
+          title: `zT Radar ❖ Price Comparison: ${dealInfo.title}`,
+          description: `Live price analysis in **${preferredCurrency} (${sym})**.`,
+          color: dealInfo.isAllTimeLow ? PALETTE.SUCCESS : PALETTE.BRAND,
+          fields,
+          footer: {
+            text: `Currency: ${preferredCurrency} • Monitored across Steam, Epic, Nuuvem & GOG`,
+          },
+          timestamp: new Date().toISOString(),
+        };
+
+        if (dealInfo.imageUrl) {
+          embed.image = { url: dealInfo.imageUrl };
+        }
+
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
+            data: {
+              flags: MESSAGE_FLAGS.EPHEMERAL,
+              embeds: [embed],
+              components,
+            },
+          }),
+        };
+      } catch (compareError) {
+        console.error('Error executing /compare command:', compareError);
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(
+            createEphemeralEmbed('Comparison Error', 'An unexpected error occurred while analyzing prices.', PALETTE.DANGER)
+          ),
+        };
+      }
+    }
+
     if (name === 'currency') {
       const choiceOption = options?.find((opt) => opt.name === 'choice');
       const selectedCurrency = choiceOption?.value || 'USD';
@@ -203,7 +382,7 @@ export const handler = async (event) => {
           body: JSON.stringify(
             createEphemeralEmbed(
               'Preferred Currency Updated',
-              `Your private notification currency is now set to **${selectedCurrency} (${sym})**.\nAll direct wishlist alerts will prioritize this regional format.`,
+              `Your private notification currency is now set to **${selectedCurrency} (${sym})**.\nAll direct wishlist alerts and comparisons will prioritize this regional format.`,
               PALETTE.SUCCESS
             )
           ),
@@ -314,6 +493,14 @@ export const handler = async (event) => {
         color: PALETTE.BRAND,
         fields: [
           {
+            name: 'Instant Market Intelligence',
+            value: [
+              '▸ `/compare <game>`',
+              '  └─ Real-time price check comparing Steam, Epic, Nuuvem and GOG with historical low.',
+            ].join('\n'),
+            inline: false,
+          },
+          {
             name: 'Personal Wishlist Management',
             value: [
               '▸ `/wishlist add <game> [target_price]`',
@@ -400,7 +587,6 @@ export const handler = async (event) => {
       }
 
       try {
-        // Fetch existing config to preserve any experimental overrides if set previously
         const existingConfig = await docClient.send(
           new QueryCommand({
             TableName: TABLE_NAME,

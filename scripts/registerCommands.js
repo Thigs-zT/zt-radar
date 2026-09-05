@@ -11,6 +11,19 @@ if (!APPLICATION_ID || !BOT_TOKEN) {
 
 const commands = [
   {
+    name: 'compare',
+    description: 'Compare current deals and historical low prices across verified stores',
+    options: [
+      {
+        name: 'game',
+        description: 'Game name to compare prices',
+        type: 3, // STRING
+        required: true,
+        autocomplete: true,
+      },
+    ],
+  },
+  {
     name: 'wishlist',
     description: 'Manage your monitored game deal wishlist',
     options: [
@@ -153,7 +166,7 @@ const commands = [
 async function registerCommands() {
   const url = `https://discord.com/api/v10/applications/${APPLICATION_ID}/commands`;
 
-  console.log('Registering refined slash commands with Discord...');
+  console.log('Registering slash commands including /compare with Discord...');
 
   try {
     const response = await fetch(url, {
