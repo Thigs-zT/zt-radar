@@ -113,6 +113,18 @@ export const handler = async (event) => {
       if (focusedOption && focusedOption.name === 'game') {
         const query = focusedOption.value?.trim() || '';
 
+        // Only search when the user actually begins typing (empty query returns empty choices)
+        if (query.length === 0) {
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              type: RESPONSE_TYPES.APPLICATION_COMMAND_AUTOCOMPLETE_RESULT,
+              data: { choices: [] },
+            }),
+          };
+        }
+
         if (name === 'wishlist' && subCommandName === 'remove') {
           try {
             const queryResult = await docClient.send(
@@ -163,7 +175,7 @@ export const handler = async (event) => {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               type: RESPONSE_TYPES.APPLICATION_COMMAND_AUTOCOMPLETE_RESULT,
-              data: { choices: suggestions.slice(0, 25) },
+              data: { choices: suggestions },
             }),
           };
         } catch (error) {
@@ -187,7 +199,7 @@ export const handler = async (event) => {
     const userId = interaction.member?.user?.id || interaction.user?.id;
     const guildId = interaction.guild_id;
 
-    // Command: /radar-status (with Anonymous Aggregated Community Telemetry)
+    // Command: /radar-status
     if (name === 'radar-status') {
       try {
         const scanResult = await docClient.send(
@@ -454,7 +466,7 @@ export const handler = async (event) => {
       }
     }
 
-    // Command: /compare <game> (with Enhanced Historical Low Analysis)
+    // Command: /compare <game>
     if (name === 'compare') {
       const gameOption = options?.find((opt) => opt.name === 'game');
       const rawGameValue = gameOption?.value;
@@ -466,7 +478,7 @@ export const handler = async (event) => {
           body: JSON.stringify(
             createEphemeralEmbed(
               'Selection Required',
-              'Please enter or select a game directly from the live autocomplete suggestions dropdown.',
+              'Please type a game name and choose from the live suggestions dropdown.',
               PALETTE.WARNING
             )
           ),
@@ -504,7 +516,7 @@ export const handler = async (event) => {
             body: JSON.stringify(
               createEphemeralEmbed(
                 'Price Data Unavailable',
-                `Could not retrieve active storefront prices for **${gameTitle}**. The title may not be currently cataloged or available on monitored PC stores.`,
+                `Could not retrieve active storefront prices for **${gameTitle}**. The title may not be cataloged or is currently unavailable on authorized PC stores.`,
                 PALETTE.WARNING
               )
             ),
@@ -542,7 +554,6 @@ export const handler = async (event) => {
           });
         }
 
-        // Crystal Clear All-Time Low (ATL) Metric
         if (dealInfo.allTimeLowPrice !== null) {
           const diffFromAtl = bestOffer.salePrice - dealInfo.allTimeLowPrice;
           let atlStatus = '';
@@ -568,6 +579,7 @@ export const handler = async (event) => {
           });
         }
 
+        // Strictly nominal buttons with our 4 approved stores
         const buttons = [];
         if (bestOffer.url) {
           buttons.push({
@@ -582,7 +594,7 @@ export const handler = async (event) => {
           buttons.push({
             type: 2,
             style: 5,
-            label: `Steam Store`,
+            label: `Buy on ${dealInfo.primaryDeal.shopName}`,
             url: dealInfo.primaryDeal.url,
           });
         }
@@ -591,7 +603,7 @@ export const handler = async (event) => {
           buttons.push({
             type: 2,
             style: 5,
-            label: 'SteamDB Entry',
+            label: 'SteamDB',
             url: `https://steamdb.info/app/${dealInfo.steamAppId}/`,
           });
         }
@@ -604,7 +616,7 @@ export const handler = async (event) => {
           color: dealInfo.isAllTimeLow ? PALETTE.SUCCESS : PALETTE.BRAND,
           fields,
           footer: {
-            text: `Currency: ${preferredCurrency} • Monitored across Steam, Epic, Nuuvem & GOG`,
+            text: `Currency: ${preferredCurrency} • Authorized: Steam, Epic, Nuuvem, GOG`,
           },
           timestamp: new Date().toISOString(),
         };
@@ -1082,7 +1094,7 @@ export const handler = async (event) => {
             body: JSON.stringify(
               createEphemeralEmbed(
                 'Selection Required',
-                'Please select a game directly from the live autocomplete suggestions dropdown.',
+                'Please select a game directly from the live suggestions dropdown.',
                 PALETTE.WARNING
               )
             ),
@@ -1273,6 +1285,7 @@ export const handler = async (event) => {
           const sym = userCurrency === 'BRL' ? 'R$' : '$';
 
           const formattedList = items
+            .sort((a, b) => a.game_title.localeCompare(b.game_title))
             .map((item, index) => {
               const target = item.target_price
                 ? `\n  └─ Target Price: **${sym} ${Number(item.target_price).toFixed(2)}**`
