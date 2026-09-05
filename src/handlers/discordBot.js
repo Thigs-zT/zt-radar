@@ -6,6 +6,7 @@ import {
   DeleteCommand,
   QueryCommand,
   ScanCommand,
+  UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
 import { searchGamesForAutocomplete } from '../utils/itadApi.js';
 
@@ -25,13 +26,12 @@ const MESSAGE_FLAGS = {
   EPHEMERAL: 64,
 };
 
-// 24-bit Decimal Color Codes (Hex equivalent)
 const PALETTE = {
-  BRAND: 0x5865F2,   // Blurple
-  SUCCESS: 0x57F287, // Emerald
-  WARNING: 0xFEE75C, // Amber
-  DANGER: 0xED4245,  // Crimson
-  NEUTRAL: 0x2B2D31, // Slate Dark
+  BRAND: 0x5865F2,
+  SUCCESS: 0x57F287,
+  WARNING: 0xFEE75C,
+  DANGER: 0xED4245,
+  NEUTRAL: 0x2B2D31,
 };
 
 function createEphemeralEmbed(title, description, color = PALETTE.BRAND, fields = []) {
@@ -245,9 +245,10 @@ export const handler = async (event) => {
         }
 
         const serverCurrency = guildConfig?.currency || 'USD';
+        const thirdPartyStatus = guildConfig?.include_third_party ? 'Enabled (Nuuvem & GOG)' : 'Disabled (Steam & Epic Only)';
         const serverSummary = guildId
           ? guildConfig
-            ? `▸ Channel: <#${guildConfig.alert_channel_id}>\n▸ Currency: **${serverCurrency}** (${serverCurrency === 'BRL' ? 'R$' : '$'})\n▸ Thresholds: **≥ ${guildConfig.min_discount}% off** | **≥ ${guildConfig.min_rating}/100 score**\n▸ Mode: **${guildConfig.free_only ? 'Free Promotions Only' : 'Full Curated Radar'}**`
+            ? `▸ Channel: <#${guildConfig.alert_channel_id}>\n▸ Currency: **${serverCurrency}** (${serverCurrency === 'BRL' ? 'R$' : '$'})\n▸ Store Coverage: **${thirdPartyStatus}**\n▸ Thresholds: **≥ ${guildConfig.min_discount || 70}% off** | **≥ ${guildConfig.min_rating || 80}/100 score**\n▸ Mode: **${guildConfig.free_only ? 'Free Promotions Only' : 'Full Curated Radar'}**`
             : 'No alert channel active for this guild. Use `/config-channel` to configure.'
           : 'Direct Message session. Guild-level configurations do not apply.';
 
@@ -263,7 +264,7 @@ export const handler = async (event) => {
             },
             {
               name: 'Storage & Pricing Engines',
-              value: '```yaml\nDatabase: Amazon DynamoDB (Single-Table)\nRegional Lookup: IsThereAnyDeal (BRL) & CheapShark (USD)\nCurated Barrier: Metacritic/Steam Quality Filter Active\n```',
+              value: '```yaml\nDatabase: Amazon DynamoDB (Single-Table)\nRegional Pricing: Steam BRL (ITAD) + Global USD (CheapShark)\nStores: Steam, Epic Games Store, Nuuvem, GOG\nQuality Barrier: Heuristic Review & Metacritic Filter Active\n```',
               inline: false,
             },
             {
@@ -337,8 +338,10 @@ export const handler = async (event) => {
           {
             name: 'Server Broadcast Administration',
             value: [
-              '▸ `/config-channel <channel> [currency] [free_only] [min_discount] [min_rating]`',
+              '▸ `/config-channel <channel> [currency] [include_third_party] [free_only]`',
               '  └─ Route curated deals into a designated server channel.',
+              '▸ `/config-channel-experimental [min_discount] [min_rating]`',
+              '  └─ [Admin] Override default heuristic discount/score thresholds.',
               '▸ `/config-channel-remove`',
               '  └─ Deactivate automatic broadcasts for this server.',
               '▸ `/radar-status`',
@@ -378,17 +381,13 @@ export const handler = async (event) => {
 
       const channelOption = options?.find((opt) => opt.name === 'channel');
       const currencyOption = options?.find((opt) => opt.name === 'currency');
-      const minDiscountOption = options?.find((opt) => opt.name === 'min_discount');
-      const freeOnlyOption = options?.find((opt) => opt.name === 'free_only');
-      const minRatingOption = options?.find((opt) => opt.name === 'min_rating');
       const thirdPartyOption = options?.find((opt) => opt.name === 'include_third_party');
+      const freeOnlyOption = options?.find((opt) => opt.name === 'free_only');
 
       const channelId = channelOption?.value;
       const currency = currencyOption?.value || 'USD';
-      const minDiscount = minDiscountOption ? Number(minDiscountOption.value) : 70;
-      const freeOnly = freeOnlyOption ? Boolean(freeOnlyOption.value) : false;
-      const minRating = minRatingOption ? Number(minRatingOption.value) : 80;
       const includeThirdParty = thirdPartyOption ? Boolean(thirdPartyOption.value) : false;
+      const freeOnly = freeOnlyOption ? Boolean(freeOnlyOption.value) : false;
 
       if (!channelId) {
         return {
@@ -401,6 +400,22 @@ export const handler = async (event) => {
       }
 
       try {
+        // Fetch existing config to preserve any experimental overrides if set previously
+        const existingConfig = await docClient.send(
+          new QueryCommand({
+            TableName: TABLE_NAME,
+            KeyConditionExpression: 'PK = :pk AND SK = :sk',
+            ExpressionAttributeValues: {
+              ':pk': `GUILD#${guildId}`,
+              ':sk': 'CONFIG',
+            },
+          })
+        );
+
+        const current = existingConfig.Items?.[0] || {};
+        const minDiscount = current.min_discount || 70;
+        const minRating = current.min_rating || 80;
+
         await docClient.send(
           new PutCommand({
             TableName: TABLE_NAME,
@@ -410,27 +425,27 @@ export const handler = async (event) => {
               guild_id: guildId,
               alert_channel_id: channelId,
               currency,
-              min_discount: minDiscount,
-              free_only: freeOnly,
-              min_rating: minRating,
               include_third_party: includeThirdParty,
-              last_broadcasted_deals: [],
+              free_only: freeOnly,
+              min_discount: minDiscount,
+              min_rating: minRating,
+              last_broadcasted_deals: current.last_broadcasted_deals || [],
               updated_by: userId,
               updated_at: new Date().toISOString(),
             },
           })
         );
 
-        const storeScope = includeThirdParty ? 'All Authorized Stores' : 'Steam & Epic Games Store';
+        const storeScope = includeThirdParty ? 'Steam, Epic, Nuuvem & GOG' : 'Steam & Epic Games Store';
         const fields = [
           { name: 'Target Channel', value: `<#${channelId}>`, inline: true },
           { name: 'Currency', value: `**${currency}** (${currency === 'BRL' ? 'R$' : '$'})`, inline: true },
           { name: 'Store Coverage', value: storeScope, inline: true },
           {
-            name: 'Filtering Criteria',
+            name: 'Broadcast Mode',
             value: freeOnly
-              ? '▸ Mode: **100% Free Games Only**'
-              : `▸ Minimum Discount: **≥ ${minDiscount}%**\n▸ Minimum Review Rating: **≥ ${minRating}/100**`,
+              ? '▸ **100% Free Giveaways Only**'
+              : `▸ Standard Quality Radar (≥ ${minDiscount}% off | Score ≥ ${minRating}/100)`,
             inline: false,
           },
         ];
@@ -453,7 +468,109 @@ export const handler = async (event) => {
           statusCode: 200,
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(
-            createEphemeralEmbed('Configuration Error', 'Failed to register the alert channel. Please try again.', PALETTE.DANGER)
+            createEphemeralEmbed('Configuration Error', 'Failed to register alert channel. Please try again.', PALETTE.DANGER)
+          ),
+        };
+      }
+    }
+
+    if (name === 'config-channel-experimental') {
+      if (!guildId) {
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(
+            createEphemeralEmbed('Scope Restriction', 'This command can only be executed within a Discord server.', PALETTE.WARNING)
+          ),
+        };
+      }
+
+      const minDiscountOption = options?.find((opt) => opt.name === 'min_discount');
+      const minRatingOption = options?.find((opt) => opt.name === 'min_rating');
+
+      if (!minDiscountOption && !minRatingOption) {
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(
+            createEphemeralEmbed(
+              'Parameters Required',
+              'Please provide at least one threshold parameter (`min_discount` or `min_rating`) to override.',
+              PALETTE.WARNING
+            )
+          ),
+        };
+      }
+
+      try {
+        const existingConfig = await docClient.send(
+          new QueryCommand({
+            TableName: TABLE_NAME,
+            KeyConditionExpression: 'PK = :pk AND SK = :sk',
+            ExpressionAttributeValues: {
+              ':pk': `GUILD#${guildId}`,
+              ':sk': 'CONFIG',
+            },
+          })
+        );
+
+        if (!existingConfig.Items || existingConfig.Items.length === 0) {
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(
+              createEphemeralEmbed(
+                'Setup Required First',
+                'No alert channel has been configured for this server yet. Run `/config-channel` first before applying overrides.',
+                PALETTE.WARNING
+              )
+            ),
+          };
+        }
+
+        const newDiscount = minDiscountOption ? Number(minDiscountOption.value) : existingConfig.Items[0].min_discount || 70;
+        const newRating = minRatingOption ? Number(minRatingOption.value) : existingConfig.Items[0].min_rating || 80;
+
+        await docClient.send(
+          new UpdateCommand({
+            TableName: TABLE_NAME,
+            Key: {
+              PK: `GUILD#${guildId}`,
+              SK: 'CONFIG',
+            },
+            UpdateExpression: 'SET min_discount = :disc, min_rating = :rat, updated_at = :now',
+            ExpressionAttributeValues: {
+              ':disc': newDiscount,
+              ':rat': newRating,
+              ':now': new Date().toISOString(),
+            },
+          })
+        );
+
+        const fields = [
+          { name: 'Custom Min Discount', value: `**≥ ${newDiscount}%**`, inline: true },
+          { name: 'Custom Min Rating', value: `**≥ ${newRating}/100**`, inline: true },
+        ];
+
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(
+            createEphemeralEmbed(
+              'Experimental Thresholds Applied',
+              'Standard quality heuristics have been overridden for this server. Deal frequency may vary significantly based on these settings.',
+              PALETTE.WARNING,
+              fields
+            )
+          ),
+        };
+      } catch (error) {
+        console.error('Error applying experimental guild config:', error);
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(
+            createEphemeralEmbed('Update Failed', 'Could not apply experimental thresholds. Please try again.', PALETTE.DANGER)
           ),
         };
       }

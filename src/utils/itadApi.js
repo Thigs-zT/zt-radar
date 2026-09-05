@@ -4,17 +4,11 @@ const CHEAPSHARK_BASE_URL = 'https://www.cheapshark.com/api/1.0';
 
 const USER_AGENT = 'zT-Radar-Bot/1.0 (https://github.com/zt-radar)';
 
+// Strictly authorized storefront directory: Steam, Epic Games Store, GOG, and Nuuvem
 const STORE_DIRECTORY = {
   '1': 'Steam',
-  '2': 'GamersGate',
-  '3': 'GreenManGaming',
   '7': 'GOG',
-  '8': 'Origin / EA',
-  '11': 'Humble Store',
-  '13': 'Uplay / Ubisoft',
-  '15': 'Fanatical',
   '25': 'Epic Games Store',
-  '31': 'Blizzard Battle.net',
   '35': 'Nuuvem',
   steam: 'Steam',
   gog: 'GOG',
@@ -22,12 +16,6 @@ const STORE_DIRECTORY = {
   'epic game store': 'Epic Games Store',
   'epic games': 'Epic Games Store',
   nuuvem: 'Nuuvem',
-  humblestore: 'Humble Store',
-  greenmangaming: 'GreenManGaming',
-  origin: 'EA App',
-  uplay: 'Ubisoft Connect',
-  gamersgate: 'GamersGate',
-  fanatical: 'Fanatical',
 };
 
 const NON_GAME_PATTERNS = [
@@ -56,7 +44,7 @@ const NON_GAME_PATTERNS = [
 export function resolveStoreName(rawStore) {
   if (!rawStore) return 'Authorized Store';
   const key = String(rawStore).toLowerCase().trim();
-  return STORE_DIRECTORY[key] || STORE_DIRECTORY[rawStore] || rawStore;
+  return STORE_DIRECTORY[key] || STORE_DIRECTORY[rawStore] || 'Authorized Store';
 }
 
 export function isCuratedGame(title, storeName, imageUrl, includeThirdParty = false) {
@@ -69,9 +57,14 @@ export function isCuratedGame(title, storeName, imageUrl, includeThirdParty = fa
   }
 
   const normalizedStore = storeName.toLowerCase();
-  const isSteamOrEpic = normalizedStore.includes('steam') || normalizedStore.includes('epic');
+  const isPrimary = normalizedStore.includes('steam') || normalizedStore.includes('epic');
+  const isAuthorizedThirdParty = normalizedStore.includes('gog') || normalizedStore.includes('nuuvem');
 
-  if (!includeThirdParty && !isSteamOrEpic) {
+  if (!includeThirdParty && !isPrimary) {
+    return false;
+  }
+
+  if (includeThirdParty && !isPrimary && !isAuthorizedThirdParty) {
     return false;
   }
 
@@ -149,7 +142,6 @@ export async function getGameDealInfo(gameId, preferredCurrency = 'USD') {
   const timeoutId = setTimeout(() => controller.abort(), 4000);
 
   try {
-    // If preferred currency is BRL and ITAD is configured, check BRL pricing first
     if (preferredCurrency === 'BRL' && ITAD_API_KEY) {
       const priceUrl = `${ITAD_BASE_URL}/games/prices/v3?key=${ITAD_API_KEY}&country=BR`;
       const historyUrl = `${ITAD_BASE_URL}/games/historylow/v1?key=${ITAD_API_KEY}&country=BR`;
@@ -193,11 +185,24 @@ export async function getGameDealInfo(gameId, preferredCurrency = 'USD') {
         const steamAppId = infoData?.appid || infoData?.steam_appid || null;
 
         if (gamePrices.length > 0) {
-          const steamOffer = gamePrices.find(
+          // Filter strictly to Steam, Epic, GOG, Nuuvem
+          const validOffers = gamePrices.filter((deal) => {
+            const shopName = deal.shop?.name?.toLowerCase() || '';
+            return (
+              shopName.includes('steam') ||
+              shopName.includes('epic') ||
+              shopName.includes('nuuvem') ||
+              shopName.includes('gog')
+            );
+          });
+
+          const offersToUse = validOffers.length > 0 ? validOffers : gamePrices;
+
+          const steamOffer = offersToUse.find(
             (deal) => deal.shop?.name?.toLowerCase().includes('steam') || deal.shop?.id === 61
           );
 
-          const sortedDeals = [...gamePrices].sort((a, b) => a.price.amount - b.price.amount);
+          const sortedDeals = [...offersToUse].sort((a, b) => a.price.amount - b.price.amount);
           const cheapestOffer = sortedDeals[0];
 
           const primaryRaw = steamOffer || cheapestOffer;
@@ -259,12 +264,19 @@ export async function getGameDealInfo(gameId, preferredCurrency = 'USD') {
 
     if (csRes.ok) {
       const csData = await csRes.json();
-      const deals = csData.deals || [];
-      if (deals.length > 0) {
-        const steamDeal = deals.find((d) => d.storeID === '1');
-        const cheapestDeal = deals.reduce(
+      const rawDeals = csData.deals || [];
+
+      // Filter strictly to Steam (1), GOG (7), Epic (25)
+      const allowedStoreIDs = new Set(['1', '7', '25']);
+      const deals = rawDeals.filter((d) => allowedStoreIDs.has(d.storeID));
+
+      const workingDeals = deals.length > 0 ? deals : rawDeals;
+
+      if (workingDeals.length > 0) {
+        const steamDeal = workingDeals.find((d) => d.storeID === '1');
+        const cheapestDeal = workingDeals.reduce(
           (prev, curr) => (parseFloat(curr.price) < parseFloat(prev.price) ? curr : prev),
-          deals[0]
+          workingDeals[0]
         );
 
         const primaryRaw = steamDeal || cheapestDeal;
@@ -326,10 +338,7 @@ export async function getGameDealInfo(gameId, preferredCurrency = 'USD') {
   }
 }
 
-/**
- * Attempts to look up the official Steam Brazil (BRL) price from ITAD for a given title.
- */
-async function lookupBrlPriceForTitle(title) {
+async function lookupBrlPriceForTitle(title, includeThirdParty = false) {
   if (!ITAD_API_KEY || !title) return null;
 
   try {
@@ -357,20 +366,32 @@ async function lookupBrlPriceForTitle(title) {
     const priceData = await priceRes.json();
     const deals = priceData?.[0]?.deals || [];
 
-    const steamDeal = deals.find(
+    // Filter deals based on third-party preference (Nuuvem / GOG)
+    const validDeals = deals.filter((deal) => {
+      const name = deal.shop?.name?.toLowerCase() || '';
+      if (name.includes('steam') || name.includes('epic')) return true;
+      if (includeThirdParty && (name.includes('nuuvem') || name.includes('gog'))) return true;
+      return false;
+    });
+
+    if (validDeals.length === 0) return null;
+
+    const steamDeal = validDeals.find(
       (deal) => deal.shop?.name?.toLowerCase().includes('steam') || deal.shop?.id === 61
     );
 
-    if (steamDeal) {
-      return {
-        salePrice: steamDeal.price.amount,
-        regularPrice: steamDeal.regular.amount,
-        cutPercent: steamDeal.cut,
-        url: steamDeal.url,
-      };
-    }
+    const sortedByPrice = [...validDeals].sort((a, b) => a.price.amount - b.price.amount);
+    const chosenDeal = sortedByPrice[0];
 
-    return null;
+    const primaryDeal = steamDeal || chosenDeal;
+
+    return {
+      salePrice: primaryDeal.price.amount,
+      regularPrice: primaryDeal.regular.amount,
+      cutPercent: primaryDeal.cut,
+      url: primaryDeal.url,
+      shopName: resolveStoreName(primaryDeal.shop?.name),
+    };
   } catch {
     return null;
   }
@@ -388,7 +409,7 @@ export async function getMarketOverviewDeals(includeThirdParty = false, preferre
     // 1. Fetch 100% Free Game Promotions (Steam & Epic)
     if (ITAD_API_KEY) {
       try {
-        const storeFilter = includeThirdParty ? '' : '&shops=61,16';
+        const storeFilter = includeThirdParty ? '&shops=61,16,35' : '&shops=61,16';
         const itadFreeUrl = `${ITAD_BASE_URL}/deals/v2?key=${ITAD_API_KEY}&country=BR&limit=30&sort=-cut${storeFilter}`;
         const itadRes = await fetch(itadFreeUrl, {
           headers: { 'User-Agent': USER_AGENT },
@@ -440,7 +461,7 @@ export async function getMarketOverviewDeals(includeThirdParty = false, preferre
       }
     }
 
-    // 2. Fetch Acclaimed Games from CheapShark (Default USD)
+    // 2. Fetch Acclaimed Games from CheapShark (Rigid Quality Barrier)
     try {
       const csUrl = `${CHEAPSHARK_BASE_URL}/deals?storeID=1&pageSize=50&sortBy=Deal%20Rating&desc=0`;
       const csRes = await fetch(csUrl, {
@@ -494,10 +515,10 @@ export async function getMarketOverviewDeals(includeThirdParty = false, preferre
           let currency = 'USD';
           let currencySymbol = '$';
           let dealUrl = `https://www.cheapshark.com/redirect?dealID=${d.dealID}`;
+          let finalShopName = shopName;
 
-          // Only perform BRL regional lookup if explicitly requested by configuration
           if (preferredCurrency === 'BRL') {
-            const brlData = await lookupBrlPriceForTitle(d.title);
+            const brlData = await lookupBrlPriceForTitle(d.title, includeThirdParty);
             if (brlData && brlData.salePrice !== undefined) {
               salePrice = brlData.salePrice;
               regularPrice = brlData.regularPrice;
@@ -505,6 +526,7 @@ export async function getMarketOverviewDeals(includeThirdParty = false, preferre
               currency = 'BRL';
               currencySymbol = 'R$';
               if (brlData.url) dealUrl = brlData.url;
+              if (brlData.shopName) finalShopName = brlData.shopName;
             }
           }
 
@@ -515,7 +537,7 @@ export async function getMarketOverviewDeals(includeThirdParty = false, preferre
             reviewScore: rating,
             steamAppId: d.steamAppID || null,
             primaryDeal: {
-              shopName,
+              shopName: finalShopName,
               salePrice,
               regularPrice,
               cutPercent,

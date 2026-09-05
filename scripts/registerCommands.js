@@ -28,7 +28,7 @@ const commands = [
           },
           {
             name: 'target_price',
-            description: 'Target price (in your preferred currency, e.g. 15.00 or 50.00)',
+            description: 'Target price in your preferred currency (e.g. 15.00 or 50.00)',
             type: 10, // NUMBER
             required: false,
           },
@@ -78,19 +78,19 @@ const commands = [
   },
   {
     name: 'config-channel',
-    description: 'Configure server channel for curated Steam/Epic deal announcements',
+    description: 'Configure server channel for curated Steam & Epic deal broadcasts',
     default_member_permissions: '32', // MANAGE_GUILD
     options: [
       {
         name: 'channel',
-        description: 'The text channel where alerts will be published',
+        description: 'The text channel where curated deal alerts will be published',
         type: 7, // CHANNEL
         channel_types: [0], // GUILD_TEXT
         required: true,
       },
       {
         name: 'currency',
-        description: 'Preferred currency for deal prices (default: USD)',
+        description: 'Preferred currency for broadcasted prices (default: USD)',
         type: 3, // STRING
         required: false,
         choices: [
@@ -99,14 +99,27 @@ const commands = [
         ],
       },
       {
-        name: 'free_only',
-        description: 'Only broadcast 100% free promotional games (default: false)',
+        name: 'include_third_party',
+        description: 'Compare prices with GOG and Nuuvem alongside Steam & Epic (default: false)',
         type: 5, // BOOLEAN
         required: false,
       },
       {
+        name: 'free_only',
+        description: 'Only broadcast 100% free promotional giveaways (default: false)',
+        type: 5, // BOOLEAN
+        required: false,
+      },
+    ],
+  },
+  {
+    name: 'config-channel-experimental',
+    description: '[Experimental] Override standard heuristic quality filters for server broadcasts',
+    default_member_permissions: '32', // MANAGE_GUILD
+    options: [
+      {
         name: 'min_discount',
-        description: '[Experimental] Custom minimum discount percentage (default: 70)',
+        description: 'Custom minimum discount percentage override (default: 70)',
         type: 4, // INTEGER
         min_value: 10,
         max_value: 100,
@@ -114,16 +127,10 @@ const commands = [
       },
       {
         name: 'min_rating',
-        description: '[Experimental] Custom minimum review score out of 100 (default: 80)',
+        description: 'Custom minimum review score out of 100 override (default: 80)',
         type: 4, // INTEGER
         min_value: 0,
         max_value: 100,
-        required: false,
-      },
-      {
-        name: 'include_third_party',
-        description: '[Experimental] Include third-party stores like Nuuvem/GOG (default: false)',
-        type: 5, // BOOLEAN
         required: false,
       },
     ],
@@ -146,7 +153,7 @@ const commands = [
 async function registerCommands() {
   const url = `https://discord.com/api/v10/applications/${APPLICATION_ID}/commands`;
 
-  console.log('Registering global slash commands with Discord...');
+  console.log('Registering refined slash commands with Discord...');
 
   try {
     const response = await fetch(url, {
