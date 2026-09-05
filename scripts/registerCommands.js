@@ -24,6 +24,32 @@ const commands = [
     ],
   },
   {
+    name: 'can-it-run',
+    description: 'Check official minimum and recommended PC hardware requirements for a game',
+    options: [
+      {
+        name: 'game',
+        description: 'Game name to check hardware specifications',
+        type: 3, // STRING
+        required: true,
+        autocomplete: true,
+      },
+    ],
+  },
+  {
+    name: 'game-news',
+    description: 'Display the latest official patch notes and announcements for a game',
+    options: [
+      {
+        name: 'game',
+        description: 'Game name to check recent updates',
+        type: 3, // STRING
+        required: true,
+        autocomplete: true,
+      },
+    ],
+  },
+  {
     name: 'steam-trending',
     description: 'Display top 10 trending and surging titles on the Steam Storefront',
   },
@@ -178,7 +204,7 @@ const commands = [
 async function registerCommands() {
   const url = `https://discord.com/api/v10/applications/${APPLICATION_ID}/commands`;
 
-  console.log('Registering updated command suite with Discord...');
+  console.log('Registering intelligence suite commands with Discord...');
 
   try {
     const response = await fetch(url, {

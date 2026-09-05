@@ -14,6 +14,7 @@ import {
   getSteamTrendingGames,
   getSteamMostPlayedGames,
 } from '../utils/platformStatus.js';
+import { fetchGameNews, fetchSystemRequirements } from '../utils/steamIntel.js';
 
 const ddbClient = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(ddbClient);
@@ -102,18 +103,20 @@ export const handler = async (event) => {
     const { name, options } = interaction.data;
     const userId = interaction.member?.user?.id || interaction.user?.id;
 
-    if (name === 'compare' || name === 'wishlist') {
+    const autocompleteCommands = ['compare', 'can-it-run', 'game-news', 'wishlist'];
+
+    if (autocompleteCommands.includes(name)) {
       const subCommand = options?.[0];
       const subCommandName = subCommand?.name;
       const focusedOption =
-        name === 'compare'
-          ? options?.find((opt) => opt.focused)
-          : subCommand?.options?.find((opt) => opt.focused);
+        name === 'wishlist'
+          ? subCommand?.options?.find((opt) => opt.focused)
+          : options?.find((opt) => opt.focused);
 
       if (focusedOption && focusedOption.name === 'game') {
         const query = focusedOption.value?.trim() || '';
 
-        // Only search when the user actually begins typing (empty query returns empty choices)
+        // Strict: only show choices when user starts typing
         if (query.length === 0) {
           return {
             statusCode: 200,
@@ -198,6 +201,218 @@ export const handler = async (event) => {
     const { name, options } = interaction.data;
     const userId = interaction.member?.user?.id || interaction.user?.id;
     const guildId = interaction.guild_id;
+
+    // Command: /can-it-run <game>
+    if (name === 'can-it-run') {
+      const gameOption = options?.find((opt) => opt.name === 'game');
+      const rawVal = gameOption?.value;
+
+      if (!rawVal) {
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(
+            createEphemeralEmbed('Selection Required', 'Please type and select a game from the autocomplete suggestions dropdown.', PALETTE.WARNING)
+          ),
+        };
+      }
+
+      let steamAppId = null;
+      let gameTitle = rawVal;
+
+      if (rawVal.includes('|')) {
+        const [idPart, ...titleParts] = rawVal.split('|');
+        gameTitle = titleParts.join('|');
+        if (idPart.startsWith('steam:')) {
+          steamAppId = idPart.replace('steam:', '').trim();
+        } else if (/^\d+$/.test(idPart)) {
+          steamAppId = idPart;
+        }
+      }
+
+      if (!steamAppId) {
+        // Look up deal info to resolve steamAppId
+        const deal = await getGameDealInfo(rawVal, 'USD', gameTitle);
+        steamAppId = deal?.steamAppId || null;
+      }
+
+      if (!steamAppId) {
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(
+            createEphemeralEmbed(
+              'Hardware Specs Unavailable',
+              `Could not identify the official Steam catalog entry for **${gameTitle}**. Specifications are only available for indexed Steam PC releases.`,
+              PALETTE.WARNING
+            )
+          ),
+        };
+      }
+
+      try {
+        const specs = await fetchSystemRequirements(steamAppId);
+
+        if (!specs) {
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(
+              createEphemeralEmbed('Specs Error', `Unable to query official hardware requirements for **${gameTitle}**.`, PALETTE.DANGER)
+            ),
+          };
+        }
+
+        const fields = [
+          {
+            name: 'Minimum Specifications',
+            value: `\`\`\`yaml\n${specs.minimum}\n\`\`\``,
+            inline: false,
+          },
+          {
+            name: 'Recommended Specifications',
+            value: `\`\`\`yaml\n${specs.recommended}\n\`\`\``,
+            inline: false,
+          },
+        ];
+
+        const embed = {
+          title: `zT Radar ❖ Hardware Benchmarks: ${specs.title}`,
+          description: 'Official developer-specified PC system requirements from Steam.',
+          color: PALETTE.BRAND,
+          fields,
+          footer: {
+            text: 'zT Radar • Steam Store Hardware Database',
+          },
+          timestamp: new Date().toISOString(),
+        };
+
+        if (specs.headerImage) {
+          embed.thumbnail = { url: specs.headerImage };
+        }
+
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
+            data: {
+              flags: MESSAGE_FLAGS.EPHEMERAL,
+              embeds: [embed],
+            },
+          }),
+        };
+      } catch (specErr) {
+        console.error('Error fetching hardware specs:', specErr);
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(
+            createEphemeralEmbed('Query Error', 'An unexpected error occurred while querying system requirements.', PALETTE.DANGER)
+          ),
+        };
+      }
+    }
+
+    // Command: /game-news <game>
+    if (name === 'game-news') {
+      const gameOption = options?.find((opt) => opt.name === 'game');
+      const rawVal = gameOption?.value;
+
+      if (!rawVal) {
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(
+            createEphemeralEmbed('Selection Required', 'Please type and select a game from the autocomplete suggestions dropdown.', PALETTE.WARNING)
+          ),
+        };
+      }
+
+      let steamAppId = null;
+      let gameTitle = rawVal;
+
+      if (rawVal.includes('|')) {
+        const [idPart, ...titleParts] = rawVal.split('|');
+        gameTitle = titleParts.join('|');
+        if (idPart.startsWith('steam:')) {
+          steamAppId = idPart.replace('steam:', '').trim();
+        } else if (/^\d+$/.test(idPart)) {
+          steamAppId = idPart;
+        }
+      }
+
+      if (!steamAppId) {
+        const deal = await getGameDealInfo(rawVal, 'USD', gameTitle);
+        steamAppId = deal?.steamAppId || null;
+      }
+
+      if (!steamAppId) {
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(
+            createEphemeralEmbed(
+              'Official News Unavailable',
+              `Could not identify the official Steam catalog entry for **${gameTitle}**. News broadcasts are only accessible for indexed Steam releases.`,
+              PALETTE.WARNING
+            )
+          ),
+        };
+      }
+
+      try {
+        const newsList = await fetchGameNews(steamAppId);
+
+        if (newsList.length === 0) {
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(
+              createEphemeralEmbed('News Dispatches', `No recent official announcements found for **${gameTitle}**.`, PALETTE.NEUTRAL)
+            ),
+          };
+        }
+
+        const fields = newsList.map((n) => ({
+          name: `❖ ${n.title} (${n.date})`,
+          value: `${n.snippet}\n[Read Full Announcement on Steam](${n.url})`,
+          inline: false,
+        }));
+
+        const embed = {
+          title: `zT Radar ❖ Patch Notes & News: ${gameTitle}`,
+          description: 'Latest official developer dispatches published on Valve Steam Community.',
+          color: PALETTE.BRAND,
+          fields,
+          footer: {
+            text: 'Valve ISteamNews Web API • Verified Developer Announcements',
+          },
+          timestamp: new Date().toISOString(),
+        };
+
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
+            data: {
+              flags: MESSAGE_FLAGS.EPHEMERAL,
+              embeds: [embed],
+            },
+          }),
+        };
+      } catch (newsErr) {
+        console.error('Error fetching game news:', newsErr);
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(
+            createEphemeralEmbed('Dispatch Error', 'Failed to retrieve official patch notes and news.', PALETTE.DANGER)
+          ),
+        };
+      }
+    }
 
     // Command: /radar-status
     if (name === 'radar-status') {
@@ -579,7 +794,6 @@ export const handler = async (event) => {
           });
         }
 
-        // Strictly nominal buttons with our 4 approved stores
         const buttons = [];
         if (bestOffer.url) {
           buttons.push({
@@ -693,14 +907,18 @@ export const handler = async (event) => {
     if (name === 'radar-help') {
       const helpEmbed = {
         title: 'zT Radar ❖ Command Directory',
-        description: 'Comprehensive guide to monitoring sales, setting price ceilings, and server deal broadcasting.',
+        description: 'Comprehensive guide to monitoring sales, setting price ceilings, and game intelligence.',
         color: PALETTE.BRAND,
         fields: [
           {
-            name: 'Instant Market Intelligence',
+            name: 'Game Intelligence & Hardware Suite',
             value: [
               '▸ `/compare <game>`',
               '  └─ Real-time price check comparing Steam, Epic, Nuuvem and GOG with historical low.',
+              '▸ `/can-it-run <game>`',
+              '  └─ Official minimum & recommended PC system specifications from Steam.',
+              '▸ `/game-news <game>`',
+              '  └─ Official developer dispatches, patch notes, and news updates.',
               '▸ `/steam-most-played`',
               '  └─ Official live top 10 most-played games on Steam by concurrent players.',
               '▸ `/steam-trending`',
@@ -1094,7 +1312,7 @@ export const handler = async (event) => {
             body: JSON.stringify(
               createEphemeralEmbed(
                 'Selection Required',
-                'Please select a game directly from the live suggestions dropdown.',
+                'Please select a game directly from the live autocomplete suggestions dropdown.',
                 PALETTE.WARNING
               )
             ),
@@ -1285,7 +1503,6 @@ export const handler = async (event) => {
           const sym = userCurrency === 'BRL' ? 'R$' : '$';
 
           const formattedList = items
-            .sort((a, b) => a.game_title.localeCompare(b.game_title))
             .map((item, index) => {
               const target = item.target_price
                 ? `\n  └─ Target Price: **${sym} ${Number(item.target_price).toFixed(2)}**`
