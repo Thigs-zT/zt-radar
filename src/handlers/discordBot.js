@@ -231,7 +231,6 @@ export const handler = async (event) => {
       }
 
       if (!steamAppId) {
-        // Look up deal info to resolve steamAppId
         const deal = await getGameDealInfo(rawVal, 'USD', gameTitle);
         steamAppId = deal?.steamAppId || null;
       }
@@ -1312,7 +1311,7 @@ export const handler = async (event) => {
             body: JSON.stringify(
               createEphemeralEmbed(
                 'Selection Required',
-                'Please select a game directly from the live autocomplete suggestions dropdown.',
+                'Please select a game directly from the live suggestions dropdown.',
                 PALETTE.WARNING
               )
             ),

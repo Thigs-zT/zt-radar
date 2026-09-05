@@ -99,7 +99,6 @@ export async function fetchSystemRequirements(appId) {
     const rawMin = pcReq.minimum ? cleanFormatting(pcReq.minimum) : 'Not specified by developer.';
     const rawRec = pcReq.recommended ? cleanFormatting(pcReq.recommended) : 'Not specified by developer.';
 
-    // Truncate defensively to respect Discord's 1024-character field limit
     const minSpecs = rawMin.length > 950 ? rawMin.substring(0, 947) + '...' : rawMin;
     const recSpecs = rawRec.length > 950 ? rawRec.substring(0, 947) + '...' : rawRec;
 

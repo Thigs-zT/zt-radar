@@ -204,7 +204,7 @@ const commands = [
 async function registerCommands() {
   const url = `https://discord.com/api/v10/applications/${APPLICATION_ID}/commands`;
 
-  console.log('Registering intelligence suite commands with Discord...');
+  console.log('Registering official consolidated suite with Discord...');
 
   try {
     const response = await fetch(url, {
