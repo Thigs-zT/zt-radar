@@ -187,6 +187,107 @@ export const handler = async (event) => {
     const userId = interaction.member?.user?.id || interaction.user?.id;
     const guildId = interaction.guild_id;
 
+    // Command: /radar-status (with Anonymous Aggregated Community Telemetry)
+    if (name === 'radar-status') {
+      try {
+        const scanResult = await docClient.send(
+          new ScanCommand({
+            TableName: TABLE_NAME,
+          })
+        );
+
+        const allItems = scanResult.Items || [];
+        const wishlistItems = allItems.filter((i) => i.SK?.startsWith('GAME#'));
+        const guildConfig = guildId
+          ? allItems.find((i) => i.PK === `GUILD#${guildId}` && i.SK === 'CONFIG')
+          : null;
+
+        // Calculate Top 5 most monitored titles across the community
+        const titleCounts = new Map();
+        for (const item of wishlistItems) {
+          const title = item.game_title || 'Unknown Title';
+          titleCounts.set(title, (titleCounts.get(title) || 0) + 1);
+        }
+
+        const sortedTitles = [...titleCounts.entries()]
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 5);
+
+        let communityTelemetry = 'No titles monitored by the community yet.';
+        if (sortedTitles.length > 0) {
+          communityTelemetry = sortedTitles
+            .map(([title, count], idx) => `▸ **#${idx + 1} ${title}** — \`${count}\` tracker${count > 1 ? 's' : ''}`)
+            .join('\n');
+        }
+
+        const serverCurrency = guildConfig?.currency || 'USD';
+        const thirdPartyStatus = guildConfig?.include_third_party ? 'Enabled (Nuuvem & GOG)' : 'Disabled (Steam & Epic Only)';
+        const serverSummary = guildId
+          ? guildConfig
+            ? `▸ Channel: <#${guildConfig.alert_channel_id}>\n▸ Currency: **${serverCurrency}** (${serverCurrency === 'BRL' ? 'R$' : '$'})\n▸ Store Coverage: **${thirdPartyStatus}**\n▸ Thresholds: **≥ ${guildConfig.min_discount || 70}% off** | **≥ ${guildConfig.min_rating || 80}/100 score**\n▸ Mode: **${guildConfig.free_only ? 'Free Promotions Only' : 'Full Curated Radar'}**`
+            : 'No alert channel active for this guild. Use `/config-channel` to configure.'
+          : 'Direct Message session. Guild-level configurations do not apply.';
+
+        const statusEmbed = {
+          title: 'zT Radar ❖ System Telemetry & Community Intelligence',
+          description: 'High-precision game deal tracking engine hosted on AWS Serverless infrastructure.',
+          color: PALETTE.BRAND,
+          fields: [
+            {
+              name: 'Compute & Runtime Architecture',
+              value: '```yaml\nRuntime: Node.js 22.x LTS\nArchitecture: AWS Graviton (arm64)\nLatency: Sub-second (Cold: ~300ms)\n```',
+              inline: false,
+            },
+            {
+              name: 'Database & Registry Metrics',
+              value: `▸ Total Database Items: **${allItems.length}**\n▸ Active User Wishlists: **${wishlistItems.length} titles** tracked`,
+              inline: true,
+            },
+            {
+              name: 'Guild Context',
+              value: `▸ Target Guild: **${guildId || 'Direct Message'}**`,
+              inline: true,
+            },
+            {
+              name: 'Community Top 5 Most-Wished Titles (Anonymous)',
+              value: communityTelemetry,
+              inline: false,
+            },
+            {
+              name: 'Guild Broadcast Scope',
+              value: serverSummary,
+              inline: false,
+            },
+          ],
+          footer: {
+            text: 'zT Radar • Operational & Production-Ready',
+          },
+          timestamp: new Date().toISOString(),
+        };
+
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
+            data: {
+              flags: MESSAGE_FLAGS.EPHEMERAL,
+              embeds: [statusEmbed],
+            },
+          }),
+        };
+      } catch (statusError) {
+        console.error('Error fetching radar status:', statusError);
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(
+            createEphemeralEmbed('Telemetry Error', 'Could not query runtime telemetry metrics.', PALETTE.DANGER)
+          ),
+        };
+      }
+    }
+
     // Command: /platform-status
     if (name === 'platform-status') {
       try {
@@ -566,93 +667,6 @@ export const handler = async (event) => {
       }
     }
 
-    if (name === 'radar-status') {
-      try {
-        const scanResult = await docClient.send(
-          new ScanCommand({
-            TableName: TABLE_NAME,
-            Select: 'COUNT',
-          })
-        );
-
-        let guildConfig = null;
-        if (guildId) {
-          const guildQueryResult = await docClient.send(
-            new QueryCommand({
-              TableName: TABLE_NAME,
-              KeyConditionExpression: 'PK = :pk AND SK = :sk',
-              ExpressionAttributeValues: {
-                ':pk': `GUILD#${guildId}`,
-                ':sk': 'CONFIG',
-              },
-            })
-          );
-          guildConfig = guildQueryResult.Items?.[0] || null;
-        }
-
-        const serverCurrency = guildConfig?.currency || 'USD';
-        const thirdPartyStatus = guildConfig?.include_third_party ? 'Enabled (Nuuvem & GOG)' : 'Disabled (Steam & Epic Only)';
-        const serverSummary = guildId
-          ? guildConfig
-            ? `▸ Channel: <#${guildConfig.alert_channel_id}>\n▸ Currency: **${serverCurrency}** (${serverCurrency === 'BRL' ? 'R$' : '$'})\n▸ Store Coverage: **${thirdPartyStatus}**\n▸ Thresholds: **≥ ${guildConfig.min_discount || 70}% off** | **≥ ${guildConfig.min_rating || 80}/100 score**\n▸ Mode: **${guildConfig.free_only ? 'Free Promotions Only' : 'Full Curated Radar'}**`
-            : 'No alert channel active for this guild. Use `/config-channel` to configure.'
-          : 'Direct Message session. Guild-level configurations do not apply.';
-
-        const statusEmbed = {
-          title: 'zT Radar ❖ System Telemetry',
-          description: 'High-precision game deal tracking engine hosted on AWS Serverless infrastructure.',
-          color: PALETTE.BRAND,
-          fields: [
-            {
-              name: 'Compute & Runtime',
-              value: '```yaml\nRuntime: Node.js 22.x LTS\nArchitecture: AWS Graviton (arm64)\nLatency: Sub-second (Cold: ~300ms)\n```',
-              inline: false,
-            },
-            {
-              name: 'Storage & Pricing Engines',
-              value: '```yaml\nDatabase: Amazon DynamoDB (Single-Table)\nRegional Pricing: Steam BRL (ITAD) + Global USD (CheapShark)\nStores: Steam, Epic Games Store, Nuuvem, GOG\nQuality Barrier: Heuristic Review & Metacritic Filter Active\n```',
-              inline: false,
-            },
-            {
-              name: 'Telemetric Data',
-              value: `▸ Active Database Records: **${scanResult.Count || 0}**\n▸ Target Guild Context: **${guildId || 'Direct Message'}**`,
-              inline: false,
-            },
-            {
-              name: 'Guild Broadcast Scope',
-              value: serverSummary,
-              inline: false,
-            },
-          ],
-          footer: {
-            text: 'zT Radar • Operational & Healthy',
-          },
-          timestamp: new Date().toISOString(),
-        };
-
-        return {
-          statusCode: 200,
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
-            data: {
-              flags: MESSAGE_FLAGS.EPHEMERAL,
-              embeds: [statusEmbed],
-            },
-          }),
-        };
-      } catch (statusError) {
-        console.error('Error fetching radar status:', statusError);
-        return {
-          statusCode: 200,
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(
-            createEphemeralEmbed('Telemetry Error', 'Could not query runtime telemetry metrics.', PALETTE.DANGER)
-          ),
-        };
-      }
-    }
-
     if (name === 'radar-help') {
       const helpEmbed = {
         title: 'zT Radar ❖ Command Directory',
@@ -705,7 +719,7 @@ export const handler = async (event) => {
               '▸ `/config-channel-remove`',
               '  └─ Deactivate automatic broadcasts for this server.',
               '▸ `/radar-status`',
-              '  └─ Inquire system metrics, engine version, and active guild parameters.',
+              '  └─ Inquire system metrics, community wishlist top 5, and guild parameters.',
             ].join('\n'),
             inline: false,
           },
