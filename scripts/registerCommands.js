@@ -24,6 +24,14 @@ const commands = [
     ],
   },
   {
+    name: 'steam-trending',
+    description: 'Display top trending titles on Steam with active concurrent player counts',
+  },
+  {
+    name: 'platform-status',
+    description: 'Check live operational availability and latency across major gaming networks',
+  },
+  {
     name: 'wishlist',
     description: 'Manage your monitored game deal wishlist',
     options: [
@@ -166,7 +174,7 @@ const commands = [
 async function registerCommands() {
   const url = `https://discord.com/api/v10/applications/${APPLICATION_ID}/commands`;
 
-  console.log('Registering slash commands including /compare with Discord...');
+  console.log('Registering complete command suite with Discord...');
 
   try {
     const response = await fetch(url, {

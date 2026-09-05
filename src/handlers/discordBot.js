@@ -9,6 +9,7 @@ import {
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
 import { searchGamesForAutocomplete, getGameDealInfo } from '../utils/itadApi.js';
+import { checkPlatformStatuses, getSteamTrendingGames } from '../utils/platformStatus.js';
 
 const ddbClient = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(ddbClient);
@@ -182,6 +183,123 @@ export const handler = async (event) => {
     const userId = interaction.member?.user?.id || interaction.user?.id;
     const guildId = interaction.guild_id;
 
+    // Command: /platform-status
+    if (name === 'platform-status') {
+      try {
+        const statuses = await checkPlatformStatuses();
+
+        const formatLine = (item) => {
+          let indicator = '● ONLINE';
+          if (item.status === 'DEGRADED') indicator = '▲ DEGRADED';
+          if (item.status === 'OUTAGE' || item.status === 'OFFLINE') indicator = '✖ OFFLINE';
+          return `▸ **${item.name}**\n  └─ Status: \`${indicator}\` • Latency: \`${item.latencyMs}ms\``;
+        };
+
+        const statusLines = Object.values(statuses).map(formatLine).join('\n\n');
+        const hasOutage = Object.values(statuses).some((s) => s.status === 'OFFLINE' || s.status === 'OUTAGE');
+        const hasDegraded = Object.values(statuses).some((s) => s.status === 'DEGRADED');
+
+        let embedColor = PALETTE.SUCCESS;
+        if (hasDegraded) embedColor = PALETTE.WARNING;
+        if (hasOutage) embedColor = PALETTE.DANGER;
+
+        const embed = {
+          title: 'zT Radar ❖ Gaming Platforms Status Monitor',
+          description: statusLines,
+          color: embedColor,
+          footer: {
+            text: 'Live HTTP & Statuspage Probe • Refreshed on Demand',
+          },
+          timestamp: new Date().toISOString(),
+        };
+
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
+            data: {
+              flags: MESSAGE_FLAGS.EPHEMERAL,
+              embeds: [embed],
+            },
+          }),
+        };
+      } catch (err) {
+        console.error('Error checking platform statuses:', err);
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(
+            createEphemeralEmbed('Monitor Error', 'Unable to probe platform statuses at this time.', PALETTE.DANGER)
+          ),
+        };
+      }
+    }
+
+    // Command: /steam-trending
+    if (name === 'steam-trending') {
+      try {
+        const trending = await getSteamTrendingGames();
+
+        if (trending.length === 0) {
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(
+              createEphemeralEmbed('Steam Telemetry', 'Unable to fetch current Steam charts. Please try again shortly.', PALETTE.WARNING)
+            ),
+          };
+        }
+
+        const lines = trending.map((game, i) => {
+          const playersText = game.currentPlayers
+            ? `\`${game.currentPlayers.toLocaleString('en-US')}\` concurrent players`
+            : 'Player telemetry loading...';
+
+          const priceText = game.finalPrice === '0.00' || !game.finalPrice
+            ? 'Free to Play'
+            : `$ ${game.finalPrice}${game.discounted ? ` (-${game.discountPercent}%)` : ''}`;
+
+          return `❖ **${i + 1}. ${game.name}**\n  └─ ${playersText} • Store: **${priceText}**`;
+        });
+
+        const embed = {
+          title: 'zT Radar ❖ Steam Trending & Most-Played',
+          description: `Live top 5 games by global popularity on Steam:\n\n${lines.join('\n\n')}`,
+          color: PALETTE.BRAND,
+          footer: {
+            text: 'Steam Charts & Web API Data • Real-Time Valve Statistics',
+          },
+          timestamp: new Date().toISOString(),
+        };
+
+        if (trending[0]?.headerImage) {
+          embed.thumbnail = { url: trending[0].headerImage };
+        }
+
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
+            data: {
+              flags: MESSAGE_FLAGS.EPHEMERAL,
+              embeds: [embed],
+            },
+          }),
+        };
+      } catch (err) {
+        console.error('Error fetching steam trending:', err);
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(
+            createEphemeralEmbed('Charts Error', 'Could not retrieve live Steam statistics.', PALETTE.DANGER)
+          ),
+        };
+      }
+    }
+
     // Command: /compare <game>
     if (name === 'compare') {
       const gameOption = options?.find((opt) => opt.name === 'game');
@@ -205,7 +323,6 @@ export const handler = async (event) => {
       const gameTitle = titleParts.join('|');
 
       try {
-        // Query user's preferred currency
         const userConfigResult = await docClient.send(
           new QueryCommand({
             TableName: TABLE_NAME,
@@ -252,7 +369,6 @@ export const handler = async (event) => {
           },
         ];
 
-        // Store comparison breakdown
         if (dealInfo.storeBreakdown && Object.keys(dealInfo.storeBreakdown).length > 0) {
           const breakdownList = Object.values(dealInfo.storeBreakdown).map((s) => {
             const cutTxt = s.cutPercent > 0 ? ` (-${s.cutPercent}%)` : '';
@@ -266,7 +382,6 @@ export const handler = async (event) => {
           });
         }
 
-        // All-Time Low record
         if (dealInfo.allTimeLowPrice !== null) {
           const atlStatus = dealInfo.isAllTimeLow
             ? `**${sym} ${dealInfo.allTimeLowPrice.toFixed(2)}** (★ MATCHING ALL-TIME LOW!)`
@@ -279,7 +394,6 @@ export const handler = async (event) => {
           });
         }
 
-        // Review score
         if (dealInfo.reviewScore) {
           fields.push({
             name: 'Community Score',
@@ -288,7 +402,6 @@ export const handler = async (event) => {
           });
         }
 
-        // Build interactive Link Buttons
         const buttons = [];
         if (bestOffer.url) {
           buttons.push({
@@ -497,6 +610,10 @@ export const handler = async (event) => {
             value: [
               '▸ `/compare <game>`',
               '  └─ Real-time price check comparing Steam, Epic, Nuuvem and GOG with historical low.',
+              '▸ `/steam-trending`',
+              '  └─ Display live top 5 games on Steam with active concurrent player volume.',
+              '▸ `/platform-status`',
+              '  └─ Real-time operational availability and latency across Steam, Epic, PSN, and Xbox.',
             ].join('\n'),
             inline: false,
           },
