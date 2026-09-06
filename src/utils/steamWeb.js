@@ -310,7 +310,7 @@ export async function fetchSteamWishlist(steamId64, apiKey = process.env.STEAM_A
           'x-webapi-key': apiKey,
         },
       },
-      4000
+      2500
     );
 
     if (!res.ok) {
@@ -364,54 +364,187 @@ export async function fetchSteamWishlist(steamId64, apiKey = process.env.STEAM_A
   }
 }
 
+// Verified Steam AppID to Name registry for top institutional titles
+const APP_DIRECTORY = {
+  730: 'Counter-Strike 2',
+  570: 'Dota 2',
+  578080: 'PUBG: BATTLEGROUNDS',
+  252490: 'Rust',
+  1172470: 'Apex Legends',
+  271590: 'Grand Theft Auto V',
+  1086940: "Baldur's Gate 3",
+  1245620: 'ELDEN RING',
+  230410: 'Warframe',
+  440: 'Team Fortress 2',
+  346110: 'ARK: Survival Evolved',
+  289070: "Sid Meier's Civilization VI",
+  105600: 'Terraria',
+  413150: 'Stardew Valley',
+  1145360: 'Hades',
+  1091500: 'Cyberpunk 2077',
+  1623730: 'Palworld',
+  2183900: 'Warhammer 40,000: Space Marine 2',
+  550: 'Left 4 Dead 2',
+  620: 'Portal 2',
+  292030: 'The Witcher 3: Wild Hunt',
+  1174180: 'Red Dead Redemption 2',
+  892970: 'Valheim',
+  218620: 'PAYDAY 2',
+  4000: "Garry's Mod",
+  227300: 'Euro Truck Simulator 2',
+  275850: "No Man's Sky",
+  431960: 'Wallpaper Engine',
+  242760: 'The Forest',
+  394360: 'Hearts of Iron IV',
+  322330: "Don't Starve Together",
+  281990: 'Stellaris',
+  41700: 'S.T.A.L.K.E.R.: Call of Pripyat',
+  221100: 'DayZ',
+  294100: 'RimWorld',
+  255710: 'Cities: Skylines',
+  306130: 'The Elder Scrolls Online',
+  203770: 'Crusader Kings II',
+  219740: "Don't Starve",
+  2050650: 'Resident Evil 4',
+  1817070: "Marvel's Spider-Man Remastered",
+  1817190: "Marvel's Spider-Man: Miles Morales",
+  236850: 'Europa Universalis IV',
+  374320: 'DARK SOULS™ III',
+  582010: 'MONSTER HUNTER: WORLD',
+  252950: 'Rocket League',
+  381210: 'Dead by Daylight',
+  1203220: 'NARAKA: BLADEPOINT',
+  1938090: 'Call of Duty®',
+  2358720: 'Black Myth: Wukong',
+  1840080: 'HELLDIVERS™ 2',
+  1172620: 'Sea of Thieves',
+  945360: 'Among Us',
+  1794680: 'Vampire Survivors',
+  646570: 'Slay the Spire',
+  883710: 'Resident Evil 2',
+  1151640: 'Horizon Zero Dawn™',
+  1593500: 'God of War',
+  1888930: 'Armored Core VI Fires of Rubicon',
+  2246340: 'Monster Hunter Wilds',
+  1222670: 'The Sims™ 4',
+  489830: 'The Elder Scrolls V: Skyrim Special Edition',
+  359550: 'Tom Clancy\'s Rainbow Six® Siege',
+  108600: 'Project Zomboid',
+  1675200: 'Tiny Glade',
+  264710: 'Subnautica',
+  2399830: 'ARK: Survival Ascended',
+  2073850: 'THE FINALS',
+  2195250: 'EA SPORTS FC™ 24',
+  2669320: 'EA SPORTS FC™ 25',
+  1568590: 'Manor Lords',
+  2379780: 'Balatro',
+  2420110: 'Horizon Forbidden West™ Complete Edition',
+  960090: 'Bloons TD 6',
+  1446780: 'MONSTER HUNTER RISE',
+  1238810: 'Battlefield™ 2042',
+  1238840: 'Battlefield™ V',
+  1238860: 'Battlefield™ 1',
+  1235140: 'Yakuza: Like a Dragon',
+  1364780: 'Street Fighter™ 6',
+  1774580: 'STAR WARS Jedi: Survivor™',
+  1151340: 'Fallout 76',
+  377160: 'Fallout 4',
+  22320: 'Fallout 3',
+  22380: 'Fallout: New Vegas',
+  1449850: 'Yu-Gi-Oh! Master Duel',
+  990080: 'Hogwarts Legacy',
+  1282100: 'Remnant II',
+  1426210: 'It Takes Two',
+  1326470: 'Sons Of The Forest',
+  2124440: 'S.T.A.L.K.E.R. 2: Heart of Chornobyl',
+  1966720: 'Lethal Company',
+  2215430: 'Ghost of Tsushima DIRECTOR\'S CUT',
+  1240440: 'Halo Infinite',
+  976730: 'Halo: The Master Chief Collection',
+  526870: 'Satisfactory',
+  427520: 'Factorio',
+  1158310: 'Crusader Kings III',
+  367520: 'Hollow Knight',
+  1030300: 'Hollow Knight: Silksong',
+  24780: 'SimCity 4 Deluxe',
+  200510: 'XCOM: Enemy Unknown',
+  268500: 'XCOM 2',
+  1063730: 'New World',
+};
+
 /**
- * Resolves Steam AppIDs to game titles via the Steam Store appdetails API.
+ * Resolves Steam AppIDs to game titles via memory directory and bounded Steam appdetails API.
  * Uses bounded concurrency and defensive timeouts to comply with Discord limits.
  *
  * @param {string[]} appIds - Array of numeric Steam AppIDs
- * @param {number} [timeoutMs=2000] - Total timeout budget for resolution
+ * @param {number} [timeoutMs=1200] - Total timeout budget for resolution (capped at 1200ms)
  * @returns {Promise<Map<string, string>>} Map of appId -> game title
  */
-export async function resolveSteamAppTitles(appIds, timeoutMs = 2000) {
+export async function resolveSteamAppTitles(appIds, timeoutMs = 1200) {
   const titleMap = new Map();
   if (!appIds || appIds.length === 0) {
     return titleMap;
   }
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-
-  const BATCH_SIZE = 15;
-  try {
-    for (let i = 0; i < appIds.length; i += BATCH_SIZE) {
-      if (controller.signal.aborted) break;
-
-      const chunk = appIds.slice(i, i + BATCH_SIZE);
-      await Promise.all(
-        chunk.map(async (appId) => {
-          try {
-            const url = `https://store.steampowered.com/api/appdetails?appids=${appId}&filters=basic`;
-            const res = await fetch(url, {
-              headers: { 'User-Agent': USER_AGENT },
-              signal: controller.signal,
-            });
-            if (res.ok) {
-              const data = await res.json();
-              const name = data?.[appId]?.data?.name;
-              if (name) {
-                titleMap.set(String(appId), name);
-              }
-            }
-          } catch {
-            // Individual fetch failed or timed out; fallback will be used
-          }
-        })
-      );
+  // 1. Resolve known titles instantly from memory (0ms)
+  const unmapped = [];
+  for (const appId of appIds) {
+    const stringId = String(appId);
+    if (APP_DIRECTORY[stringId]) {
+      const name = APP_DIRECTORY[stringId];
+      titleMap.set(stringId, name);
+      titleMap.set(Number(stringId), name);
+    } else {
+      unmapped.push(stringId);
     }
+  }
+
+  if (unmapped.length === 0) {
+    return titleMap;
+  }
+
+  // 2. Fetch up to 20 unmapped titles concurrently with strict timeout (<= 1200ms)
+  const toFetch = unmapped.slice(0, 20);
+  const controller = new AbortController();
+  const effectiveTimeout = Math.min(timeoutMs, 1200);
+  const timer = setTimeout(() => controller.abort(), effectiveTimeout);
+
+  try {
+    await Promise.all(
+      toFetch.map(async (appId) => {
+        try {
+          const url = `https://store.steampowered.com/api/appdetails?appids=${appId}&filters=basic`;
+          const res = await fetch(url, {
+            headers: { 'User-Agent': USER_AGENT },
+            signal: controller.signal,
+          });
+          if (res.ok) {
+            const data = await res.json();
+            const name = data?.[appId]?.data?.name;
+            if (name) {
+              titleMap.set(appId, name);
+              titleMap.set(Number(appId), name);
+            }
+          }
+        } catch {
+          // Individual fetch failed or timed out; fallback will be used
+        }
+      })
+    );
   } catch {
     // Timeout or abort
   } finally {
     clearTimeout(timer);
+  }
+
+  // 3. Immediately fall back to 'Steam App #${appId}' for all remaining unmapped titles without blocking
+  for (const appId of appIds) {
+    const stringId = String(appId);
+    if (!titleMap.has(stringId)) {
+      const fallbackTitle = `Steam App #${stringId}`;
+      titleMap.set(stringId, fallbackTitle);
+      titleMap.set(Number(stringId), fallbackTitle);
+    }
   }
 
   return titleMap;

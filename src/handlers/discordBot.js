@@ -34,6 +34,7 @@ const STEAM_API_KEY = process.env.STEAM_API_KEY;
 const RESPONSE_TYPES = {
   PONG: 1,
   CHANNEL_MESSAGE_WITH_SOURCE: 4,
+  UPDATE_MESSAGE: 7,
   APPLICATION_COMMAND_AUTOCOMPLETE_RESULT: 8,
 };
 
@@ -72,6 +73,79 @@ function createEphemeralEmbed(title, description, color = PALETTE.BRAND, fields 
   };
 }
 
+/**
+ * Constructs paginated embed and action row components for /wishlist list.
+ *
+ * @param {Array} items - Monitored game items from DynamoDB
+ * @param {Object|null} userConfig - User configuration item from DynamoDB
+ * @param {number} requestedPage - Target page number (1-indexed)
+ * @returns {{ embeds: Array, components: Array }}
+ */
+function buildWishlistPagePayload(items, userConfig, requestedPage = 1) {
+  const totalItems = items.length;
+  const ITEMS_PER_PAGE = 10;
+  const totalPages = Math.max(1, Math.ceil(totalItems / ITEMS_PER_PAGE));
+  const page = Math.min(Math.max(1, requestedPage), totalPages);
+
+  const sortedItems = [...items].sort((a, b) =>
+    (a.game_title || '').localeCompare(b.game_title || '', undefined, { sensitivity: 'base' })
+  );
+
+  const startIndex = (page - 1) * ITEMS_PER_PAGE;
+  const pageItems = sortedItems.slice(startIndex, startIndex + ITEMS_PER_PAGE);
+
+  const userCurrency = userConfig?.preferred_currency || 'USD';
+  const sym = userCurrency === 'BRL' ? 'R$' : '$';
+
+  const formattedList = pageItems
+    .map((item) => {
+      const target = item.target_price
+        ? `\n  └─ Target Price: **${sym} ${Number(item.target_price).toFixed(2)}**`
+        : item.min_discount
+          ? `\n  └─ Threshold: **≥ -${item.min_discount}% off**${item.min_rating ? ` (Score ≥ ${item.min_rating})` : ''}`
+          : '\n  └─ Target Price: **Any promotional drop**';
+      return `❖ **${item.game_title}**${target}`;
+    })
+    .join('\n\n');
+
+  const listEmbed = {
+    title: `Personal Radar Registry ❖ ${totalItems} Active`,
+    description: formattedList,
+    color: PALETTE.BRAND,
+    footer: {
+      text: `Page ${page} of ${totalPages} ❖ ${totalItems} tracked titles (Display Currency: ${userCurrency})`,
+    },
+    timestamp: new Date().toISOString(),
+  };
+
+  const components = [
+    {
+      type: 1, // Action Row
+      components: [
+        {
+          type: 2, // Button
+          style: 2, // Secondary
+          label: '◀ Prev',
+          custom_id: `wl_page:${page - 1}`,
+          disabled: page === 1,
+        },
+        {
+          type: 2, // Button
+          style: 2, // Secondary
+          label: 'Next ▶',
+          custom_id: `wl_page:${page + 1}`,
+          disabled: page === totalPages,
+        },
+      ],
+    },
+  ];
+
+  return {
+    embeds: [listEmbed],
+    components,
+  };
+}
+
 export const handler = async (event) => {
   const signature = event.headers['x-signature-ed25519'] || event.headers['X-Signature-Ed25519'];
   const timestamp = event.headers['x-signature-timestamp'] || event.headers['X-Signature-Timestamp'];
@@ -107,6 +181,74 @@ export const handler = async (event) => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ type: RESPONSE_TYPES.PONG }),
     };
+  }
+
+  // Message Component Interaction (Type 3) - e.g. Pagination Buttons
+  if (interaction.type === 3) {
+    const customId = interaction.data?.custom_id || '';
+    const userId = interaction.member?.user?.id || interaction.user?.id;
+
+    if (customId.startsWith('wl_page:')) {
+      const targetPage = parseInt(customId.split(':')[1], 10) || 1;
+
+      try {
+        const [queryResult, userConfigResult] = await Promise.all([
+          docClient.send(
+            new QueryCommand({
+              TableName: TABLE_NAME,
+              KeyConditionExpression: 'PK = :pk AND begins_with(SK, :skPrefix)',
+              ExpressionAttributeValues: {
+                ':pk': `USER#${userId}`,
+                ':skPrefix': 'GAME#',
+              },
+            })
+          ),
+          docClient.send(
+            new QueryCommand({
+              TableName: TABLE_NAME,
+              KeyConditionExpression: 'PK = :pk AND SK = :sk',
+              ExpressionAttributeValues: {
+                ':pk': `USER#${userId}`,
+                ':sk': 'CONFIG',
+              },
+            })
+          ),
+        ]);
+
+        const items = queryResult.Items || [];
+        const userConfig = userConfigResult.Items?.[0] || null;
+        const pageData = buildWishlistPagePayload(items, userConfig, targetPage);
+
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: RESPONSE_TYPES.UPDATE_MESSAGE,
+            data: {
+              ...pageData,
+            },
+          }),
+        };
+      } catch (error) {
+        console.error('Error handling wishlist pagination button:', error);
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: RESPONSE_TYPES.UPDATE_MESSAGE,
+            data: {
+              embeds: [
+                {
+                  title: 'Pagination Error',
+                  description: 'Unable to load the requested page. Please run `/wishlist list` again.',
+                  color: PALETTE.DANGER,
+                },
+              ],
+            },
+          }),
+        };
+      }
+    }
   }
 
   // Autocomplete Handling (Type 4)
@@ -780,13 +922,16 @@ export const handler = async (event) => {
         }
 
         if (dealInfo.allTimeLowPrice !== null) {
+          const isRealAtl = dealInfo.isAllTimeLow && bestOffer.cutPercent > 0 && bestOffer.salePrice < bestOffer.regularPrice;
           const diffFromAtl = bestOffer.salePrice - dealInfo.allTimeLowPrice;
           let atlStatus = '';
 
-          if (dealInfo.isAllTimeLow || diffFromAtl <= 0.05) {
-            atlStatus = `🔥 **${sym} ${dealInfo.allTimeLowPrice.toFixed(2)}**\n└─ **MATCHES LOWEST PRICE EVER!**`;
+          if (isRealAtl) {
+            atlStatus = `▸ **${sym} ${dealInfo.allTimeLowPrice.toFixed(2)}**\n└─ **MATCHES LOWEST PRICE EVER!**`;
+          } else if (diffFromAtl > 0) {
+            atlStatus = `▸ **${sym} ${dealInfo.allTimeLowPrice.toFixed(2)}**\n└─ Current price is ${sym} ${diffFromAtl.toFixed(2)} above record low.`;
           } else {
-            atlStatus = `📊 **${sym} ${dealInfo.allTimeLowPrice.toFixed(2)}**\n└─ Current price is ${sym} ${diffFromAtl.toFixed(2)} above record low.`;
+            atlStatus = `▸ **${sym} ${dealInfo.allTimeLowPrice.toFixed(2)}**\n└─ Standard retail price.`;
           }
 
           fields.push({
@@ -837,7 +982,7 @@ export const handler = async (event) => {
         const embed = {
           title: `zT Radar ❖ Price Comparison: ${dealInfo.title}`,
           description: `Live price comparison in **${preferredCurrency} (${sym})**.`,
-          color: dealInfo.isAllTimeLow ? PALETTE.SUCCESS : PALETTE.BRAND,
+          color: (dealInfo.isAllTimeLow && bestOffer.cutPercent > 0 && bestOffer.salePrice < bestOffer.regularPrice) ? PALETTE.SUCCESS : PALETTE.BRAND,
           fields,
           footer: {
             text: `Currency: ${preferredCurrency} • Authorized: Steam, Epic, Nuuvem, GOG`,
@@ -952,8 +1097,8 @@ export const handler = async (event) => {
               '  └─ Display all tracked games with targets and currency settings.',
               '▸ `/wishlist clear`',
               '  └─ Wipe your entire personal monitoring list at once.',
-              '▸ `/wishlist sync-steam [target]`',
-              '  └─ Bulk-import your public Steam wishlist into zT Radar tracking.',
+              '▸ `/wishlist sync-steam [target] [min_discount] [min_rating]`',
+              '  └─ Bulk-import your public Steam wishlist with configurable discount & rating thresholds.',
             ].join('\n'),
             inline: false,
           },
@@ -1811,6 +1956,84 @@ export const handler = async (event) => {
         }
       }
 
+      if (subCommandName === 'clear') {
+        try {
+          const queryResult = await docClient.send(
+            new QueryCommand({
+              TableName: TABLE_NAME,
+              KeyConditionExpression: 'PK = :pk AND begins_with(SK, :skPrefix)',
+              ExpressionAttributeValues: {
+                ':pk': `USER#${userId}`,
+                ':skPrefix': 'GAME#',
+              },
+            })
+          );
+
+          const items = queryResult.Items || [];
+
+          if (items.length === 0) {
+            return {
+              statusCode: 200,
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(
+                createEphemeralEmbed(
+                  'Wishlist Already Empty',
+                  'You have no monitored titles in your wishlist to remove.',
+                  PALETTE.NEUTRAL
+                )
+              ),
+            };
+          }
+
+          // Batch delete items in parallel chunks of 25 using BatchWriteCommand
+          const BATCH_SIZE = 25;
+          const deleteChunks = [];
+          for (let i = 0; i < items.length; i += BATCH_SIZE) {
+            deleteChunks.push(items.slice(i, i + BATCH_SIZE));
+          }
+
+          await Promise.all(
+            deleteChunks.map((chunk) =>
+              docClient.send(
+                new BatchWriteCommand({
+                  RequestItems: {
+                    [TABLE_NAME]: chunk.map((item) => ({
+                      DeleteRequest: {
+                        Key: {
+                          PK: item.PK,
+                          SK: item.SK,
+                        },
+                      },
+                    })),
+                  },
+                })
+              )
+            )
+          );
+
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(
+              createEphemeralEmbed(
+                'Wishlist Cleared ❖',
+                `Successfully removed **${items.length}** tracked title${items.length === 1 ? '' : 's'} from your monitored wishlist.`,
+                PALETTE.SUCCESS
+              )
+            ),
+          };
+        } catch (error) {
+          console.error('Error clearing wishlist items:', error);
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(
+              createEphemeralEmbed('Clear Error', 'Failed to wipe your monitored wishlist.', PALETTE.DANGER)
+            ),
+          };
+        }
+      }
+
       if (subCommandName === 'list') {
         try {
           const [queryResult, userConfigResult] = await Promise.all([
@@ -1851,27 +2074,8 @@ export const handler = async (event) => {
             };
           }
 
-          const userCurrency = userConfigResult.Items?.[0]?.preferred_currency || 'USD';
-          const sym = userCurrency === 'BRL' ? 'R$' : '$';
-
-          const formattedList = items
-            .map((item, index) => {
-              const target = item.target_price
-                ? `\n  └─ Target Price: **${sym} ${Number(item.target_price).toFixed(2)}**`
-                : '\n  └─ Target Price: **Any promotional drop**';
-              return `❖ **${item.game_title}**${target}`;
-            })
-            .join('\n\n');
-
-          const listEmbed = {
-            title: `Personal Radar Registry ❖ ${items.length} Active`,
-            description: formattedList,
-            color: PALETTE.BRAND,
-            footer: {
-              text: `Display Currency: ${userCurrency} (${sym}) • Use /currency to toggle`,
-            },
-            timestamp: new Date().toISOString(),
-          };
+          const userConfig = userConfigResult.Items?.[0] || null;
+          const pageData = buildWishlistPagePayload(items, userConfig, 1);
 
           return {
             statusCode: 200,
@@ -1880,7 +2084,7 @@ export const handler = async (event) => {
               type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
               data: {
                 flags: MESSAGE_FLAGS.EPHEMERAL,
-                embeds: [listEmbed],
+                ...pageData,
               },
             }),
           };
@@ -1899,6 +2103,12 @@ export const handler = async (event) => {
       if (subCommandName === 'sync-steam') {
         const targetOption = subCommand?.options?.find((opt) => opt.name === 'target');
         const rawTarget = targetOption?.value?.trim() || null;
+
+        const minDiscountOption = subCommand?.options?.find((opt) => opt.name === 'min_discount');
+        const minRatingOption = subCommand?.options?.find((opt) => opt.name === 'min_rating');
+
+        const userMinDiscount = minDiscountOption?.value !== undefined ? Math.max(10, Math.min(100, Number(minDiscountOption.value))) : 70;
+        const userMinRating = minRatingOption?.value !== undefined ? Math.max(0, Math.min(100, Number(minRatingOption.value))) : null;
 
         try {
           let steamId = null;
@@ -2046,16 +2256,16 @@ export const handler = async (event) => {
             }
           }
 
-          // Resolve game titles for untracked items via Steam Store appdetails API
+          // Resolve game titles for untracked items via memory directory and bounded Steam appdetails API
           const untrackedAppIds = untrackedItems.map((entry) => entry.appId);
-          const titleMap = await resolveSteamAppTitles(untrackedAppIds, 2000);
+          const titleMap = await resolveSteamAppTitles(untrackedAppIds, 1200);
 
           const now = new Date().toISOString();
           const itemsToInsert = [];
           const seenSKs = new Set();
 
           for (const entry of untrackedItems) {
-            const title = titleMap.get(entry.appId) || `App #${entry.appId}`;
+            const title = titleMap.get(entry.appId) || `Steam App #${entry.appId}`;
             const normalizedTitle = title.toLowerCase().trim();
             const sk = `GAME#${normalizedTitle}`;
 
@@ -2073,33 +2283,46 @@ export const handler = async (event) => {
             }
           }
 
-          // Persist items in chunks of 25 using BatchWriteCommand
+          // Persist items in parallel chunks of 25 using BatchWriteCommand
           const BATCH_SIZE = 25;
+          const writeChunks = [];
           for (let i = 0; i < itemsToInsert.length; i += BATCH_SIZE) {
-            const chunk = itemsToInsert.slice(i, i + BATCH_SIZE);
-            await docClient.send(
-              new BatchWriteCommand({
-                RequestItems: {
-                  [TABLE_NAME]: chunk.map((item) => ({
-                    PutRequest: {
-                      Item: {
+            writeChunks.push(itemsToInsert.slice(i, i + BATCH_SIZE));
+          }
+
+          await Promise.all(
+            writeChunks.map((chunk) =>
+              docClient.send(
+                new BatchWriteCommand({
+                  RequestItems: {
+                    [TABLE_NAME]: chunk.map((item) => {
+                      const putItem = {
                         PK: `USER#${userId}`,
                         SK: item.sk,
                         game_title: item.title,
                         external_game_id: `steam:${item.appId}`,
                         target_price: null,
+                        min_discount: userMinDiscount,
                         alert_all_time_low: true,
                         alert_free: true,
                         alert_steep_discount: true,
                         user_id: userId,
                         created_at: now,
-                      },
-                    },
-                  })),
-                },
-              })
-            );
-          }
+                      };
+                      if (userMinRating !== null) {
+                        putItem.min_rating = userMinRating;
+                      }
+                      return {
+                        PutRequest: {
+                          Item: putItem,
+                        },
+                      };
+                    }),
+                  },
+                })
+              )
+            )
+          );
 
           const importedCount = itemsToInsert.length;
           const importedTitles = itemsToInsert.slice(0, 10).map((e) => e.title);
@@ -2109,7 +2332,12 @@ export const handler = async (event) => {
             `▸ Total Steam wishlist entries processed: **${targetItems.length}**${wasCapped ? ` (of ${totalWishlistCount} total)` : ''}`,
             `▸ Newly imported to radar: **${importedCount}**`,
             `▸ Existing tracked items preserved: **${preservedCount}**`,
+            `▸ Minimum discount threshold: **≥ -${userMinDiscount}% off**`,
           ];
+
+          if (userMinRating !== null) {
+            summaryLines.push(`▸ Minimum review score: **≥ ${userMinRating}/100**`);
+          }
 
           if (wasCapped) {
             summaryLines.push('▸ Note: Synced top 100 most recently added wishlist titles.');
@@ -2138,8 +2366,8 @@ export const handler = async (event) => {
           const syncEmbed = {
             title: 'Steam Wishlist Sync Complete ❖',
             description: wasCapped
-              ? 'Successfully synchronized top 100 most recently added wishlist titles into the zT Radar tracking registry.\nAll imported titles will trigger alerts on price drops, historical lows, and free promotions.'
-              : 'Successfully synchronized your Steam wishlist into the zT Radar tracking registry.\nAll imported titles will trigger alerts on price drops, historical lows, and free promotions.',
+              ? `Successfully synchronized top 100 most recently added wishlist titles into the zT Radar tracking registry.\nImported titles will trigger alerts when promotions reach at least -${userMinDiscount}% off or on 100% free giveaways.`
+              : `Successfully synchronized your Steam wishlist into the zT Radar tracking registry.\nImported titles will trigger alerts when promotions reach at least -${userMinDiscount}% off or on 100% free giveaways.`,
             color: importedCount > 0 ? PALETTE.SUCCESS : PALETTE.NEUTRAL,
             fields: summaryFields,
             footer: {

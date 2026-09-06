@@ -371,9 +371,18 @@ export async function getGameDealInfo(rawGameIdentifier, preferredCurrency = 'US
         }
       : null;
 
-    const isAllTimeLow =
-      historyLow !== null &&
-      (primaryDeal.salePrice <= historyLow || (cheaperAlternative && cheaperAlternative.salePrice <= historyLow));
+    const primaryIsAtl =
+      primaryDeal.cutPercent > 0 &&
+      primaryDeal.salePrice < primaryDeal.regularPrice &&
+      primaryDeal.salePrice <= historyLow;
+
+    const cheaperIsAtl =
+      Boolean(cheaperAlternative) &&
+      cheaperAlternative.cutPercent > 0 &&
+      cheaperAlternative.salePrice < cheaperAlternative.regularPrice &&
+      cheaperAlternative.salePrice <= historyLow;
+
+    const isAllTimeLow = historyLow !== null && (primaryIsAtl || cheaperIsAtl);
 
     const isFree = primaryDeal.salePrice === 0 || (cheaperAlternative && cheaperAlternative.salePrice === 0);
 

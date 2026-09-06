@@ -164,20 +164,41 @@ export const handler = async () => {
 
     // 1. Process Individual Wishlists (DMs)
     if (wishlistItems.length > 0) {
+      const userDmCountMap = new Map();
+      const MAX_DM_PER_USER = 3;
+
       for (const item of wishlistItems) {
-        const preferredCurrency = userCurrencyMap.get(item.user_id) || 'USD';
+        const userId = item.user_id || item.PK?.replace('USER#', '');
+        const currentDmCount = userDmCountMap.get(userId) || 0;
+        if (currentDmCount >= MAX_DM_PER_USER) {
+          continue;
+        }
+
+        const preferredCurrency = userCurrencyMap.get(userId) || 'USD';
         const deal = await getGameDealInfo(item.external_game_id, preferredCurrency, item.game_title);
         if (!deal) continue;
 
         const effectivePrice = deal.cheaperAlternative?.salePrice ?? deal.primaryDeal?.salePrice ?? 0;
         const effectiveCut = deal.cheaperAlternative?.cutPercent ?? deal.primaryDeal?.cutPercent ?? 0;
+        const regularPrice = deal.cheaperAlternative?.regularPrice ?? deal.primaryDeal?.regularPrice ?? 0;
         const sym = deal.primaryDeal?.currencySymbol || (preferredCurrency === 'BRL' ? 'R$' : '$');
+
+        // Enforce that promotional alerts strictly require an active discount
+        const hasActiveDiscount = effectiveCut > 0 && effectivePrice < regularPrice;
+
+        const minDiscount = item.min_discount ?? 70;
+        const minRating = item.min_rating ?? null;
+
+        // Skip title if it fails the user's minimum review score requirement
+        if (minRating !== null && deal.reviewScore !== null && deal.reviewScore !== undefined && deal.reviewScore < minRating) {
+          continue;
+        }
 
         let shouldAlert = false;
         let alertReason = '';
         let embedColor = ALERT_PALETTE.CURATED_DEAL;
 
-        if (deal.dealType === 'FREE_TO_KEEP' || (item.alert_free && effectivePrice === 0)) {
+        if (deal.dealType === 'FREE_TO_KEEP' || (item.alert_free && effectivePrice === 0 && (effectiveCut > 0 || regularPrice > 0))) {
           shouldAlert = true;
           alertReason = '100% FREE TO KEEP (Permanent Ownership)';
           embedColor = ALERT_PALETTE.FREE_TO_KEEP;
@@ -185,17 +206,20 @@ export const handler = async () => {
           shouldAlert = true;
           alertReason = 'FREE PLAY EVENT (Play For Free This Weekend)';
           embedColor = ALERT_PALETTE.FREE_PLAY_DAYS;
-        } else if (deal.isAllTimeLow && item.alert_all_time_low) {
-          shouldAlert = true;
-          alertReason = 'HISTORICAL ALL-TIME LOW PRICE HIT';
-          embedColor = ALERT_PALETTE.ALL_TIME_LOW;
-        } else if (item.target_price && effectivePrice <= Number(item.target_price)) {
+        } else if (hasActiveDiscount && item.target_price && effectivePrice <= Number(item.target_price)) {
           shouldAlert = true;
           alertReason = `TARGET PRICE REACHED (≤ ${sym} ${Number(item.target_price).toFixed(2)})`;
           embedColor = ALERT_PALETTE.ALL_TIME_LOW;
-        } else if (item.alert_steep_discount && effectiveCut >= 70) {
-          shouldAlert = true;
-          alertReason = `MAJOR PROMOTION: -${effectiveCut}% OFF`;
+        } else if (hasActiveDiscount && effectiveCut >= minDiscount) {
+          if (deal.isAllTimeLow && item.alert_all_time_low) {
+            shouldAlert = true;
+            alertReason = `HISTORICAL ALL-TIME LOW PRICE HIT (-${effectiveCut}% OFF)`;
+            embedColor = ALERT_PALETTE.ALL_TIME_LOW;
+          } else if (item.alert_steep_discount) {
+            shouldAlert = true;
+            alertReason = `MAJOR PROMOTION: -${effectiveCut}% OFF`;
+            embedColor = ALERT_PALETTE.CURATED_DEAL;
+          }
         }
 
         const lastPrice = item.last_notified_price !== undefined ? Number(item.last_notified_price) : null;
@@ -216,7 +240,7 @@ export const handler = async () => {
         }
 
         if (shouldAlert && isNewLowerPrice) {
-          console.log(`DM Alert triggered for user ${item.user_id} on ${item.game_title}: ${alertReason}`);
+          console.log(`DM Alert triggered for user ${userId} on ${item.game_title}: ${alertReason}`);
 
           const primarySym = deal.primaryDeal.currencySymbol || sym;
           const diffPricing = [
@@ -244,7 +268,7 @@ export const handler = async () => {
           }
 
           if (deal.allTimeLowPrice !== null) {
-            const atlText = deal.isAllTimeLow
+            const atlText = (deal.isAllTimeLow && hasActiveDiscount)
               ? `**${primarySym} ${deal.allTimeLowPrice.toFixed(2)}** (★ Matches ATL)`
               : `**${primarySym} ${deal.allTimeLowPrice.toFixed(2)}**`;
             fields.push({
@@ -278,9 +302,10 @@ export const handler = async () => {
           }
 
           const components = createStoreButtons(deal);
-          const sent = await sendDiscordDm(item.user_id, embed, components);
+          const sent = await sendDiscordDm(userId, embed, components);
 
           if (sent) {
+            userDmCountMap.set(userId, currentDmCount + 1);
             try {
               await docClient.send(
                 new UpdateCommand({

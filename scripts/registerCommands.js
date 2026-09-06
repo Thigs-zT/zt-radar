@@ -120,6 +120,22 @@ const commands = [
             type: 3, // STRING
             required: false,
           },
+          {
+            name: 'min_discount',
+            description: 'Minimum discount percentage required to trigger alerts (default: 70)',
+            type: 4, // INTEGER
+            min_value: 10,
+            max_value: 100,
+            required: false,
+          },
+          {
+            name: 'min_rating',
+            description: 'Minimum Steam review score out of 100 required to trigger alerts',
+            type: 4, // INTEGER
+            min_value: 0,
+            max_value: 100,
+            required: false,
+          },
         ],
       },
     ],
