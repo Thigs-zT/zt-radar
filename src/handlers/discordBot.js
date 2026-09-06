@@ -15,12 +15,18 @@ import {
   getSteamMostPlayedGames,
 } from '../utils/platformStatus.js';
 import { fetchGameNews, fetchSystemRequirements } from '../utils/steamIntel.js';
+import {
+  resolveSteamId,
+  getPlayerSummary,
+  getCompletePlayerProfile,
+} from '../utils/steamWeb.js';
 
 const ddbClient = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(ddbClient);
 
 const TABLE_NAME = process.env.TABLE_NAME;
 const PUBLIC_KEY = process.env.DISCORD_PUBLIC_KEY;
+const STEAM_API_KEY = process.env.STEAM_API_KEY;
 
 const RESPONSE_TYPES = {
   PONG: 1,
@@ -38,6 +44,8 @@ const PALETTE = {
   WARNING: 0xFEE75C,
   DANGER: 0xED4245,
   NEUTRAL: 0x2B2D31,
+  STEAM: 0x1B2838,
+  STEAM_ACCENT: 0x66C0F4,
 };
 
 function createEphemeralEmbed(title, description, color = PALETTE.BRAND, fields = []) {
@@ -868,13 +876,16 @@ export const handler = async (event) => {
 
       try {
         await docClient.send(
-          new PutCommand({
+          new UpdateCommand({
             TableName: TABLE_NAME,
-            Item: {
+            Key: {
               PK: `USER#${userId}`,
               SK: 'CONFIG',
-              preferred_currency: selectedCurrency,
-              updated_at: new Date().toISOString(),
+            },
+            UpdateExpression: 'SET preferred_currency = :curr, updated_at = :now',
+            ExpressionAttributeValues: {
+              ':curr': selectedCurrency,
+              ':now': new Date().toISOString(),
             },
           })
         );
@@ -950,6 +961,16 @@ export const handler = async (event) => {
             inline: false,
           },
           {
+            name: 'Steam Intelligence & Account Linking',
+            value: [
+              '▸ `/steam-link <target>`',
+              '  └─ Link your Steam profile (by SteamID64, profile link, or custom vanity URL).',
+              '▸ `/steam-profile [user] [target]`',
+              '  └─ Comprehensive profile intelligence, VAC/ban records, and library statistics.',
+            ].join('\n'),
+            inline: false,
+          },
+          {
             name: 'Server Broadcast Administration',
             value: [
               '▸ `/config-channel <channel> [currency] [include_third_party] [free_only]`',
@@ -980,6 +1001,333 @@ export const handler = async (event) => {
           },
         }),
       };
+    }
+
+    // Command: /steam-link <target>
+    if (name === 'steam-link') {
+      const targetOption = options?.find((opt) => opt.name === 'target');
+      const rawTarget = targetOption?.value?.trim();
+
+      if (!STEAM_API_KEY) {
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(
+            createEphemeralEmbed(
+              'Steam Integration Offline',
+              'The Valve Steam Web API Key is not configured on this instance. Please contact the bot administrator.',
+              PALETTE.WARNING
+            )
+          ),
+        };
+      }
+
+      if (!rawTarget) {
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(
+            createEphemeralEmbed(
+              'Input Required',
+              'Please provide your SteamID64, full profile URL, or custom vanity URL.',
+              PALETTE.WARNING
+            )
+          ),
+        };
+      }
+
+      try {
+        const steamId = await resolveSteamId(rawTarget, STEAM_API_KEY);
+
+        if (!steamId) {
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(
+              createEphemeralEmbed(
+                'Steam Resolution Failed',
+                `Could not resolve Steam profile for: \`${rawTarget}\`.\n\nPlease verify your input:\n▸ 17-digit numeric **SteamID64** (e.g. \`76561198000000000\`)\n▸ Profile URL (\`https://steamcommunity.com/profiles/...\` or \`/id/...\`)\n▸ Custom vanity URL or alias`,
+                PALETTE.WARNING
+              )
+            ),
+          };
+        }
+
+        const summary = await getPlayerSummary(steamId, STEAM_API_KEY);
+        if (!summary) {
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(
+              createEphemeralEmbed(
+                'Steam Profile Inaccessible',
+                `Resolved SteamID64 \`${steamId}\`, but could not retrieve profile data from Steam. The profile may be non-existent or temporarily inaccessible.`,
+                PALETTE.WARNING
+              )
+            ),
+          };
+        }
+
+        await docClient.send(
+          new UpdateCommand({
+            TableName: TABLE_NAME,
+            Key: {
+              PK: `USER#${userId}`,
+              SK: 'CONFIG',
+            },
+            UpdateExpression: 'SET steam_id = :sid, steam_persona_name = :sname, steam_avatar_url = :savatar, updated_at = :now',
+            ExpressionAttributeValues: {
+              ':sid': steamId,
+              ':sname': summary.personaName,
+              ':savatar': summary.avatarUrl || '',
+              ':now': new Date().toISOString(),
+            },
+          })
+        );
+
+        const linkEmbed = {
+          title: 'Steam Account Linked ❖ Verification Successful',
+          description: `Successfully linked your Discord account to Steam profile **${summary.personaName}**.`,
+          color: PALETTE.SUCCESS,
+          thumbnail: summary.avatarUrl ? { url: summary.avatarUrl } : undefined,
+          fields: [
+            {
+              name: 'Profile Identity',
+              value: [
+                `▸ Persona: **${summary.personaName}**`,
+                `▸ SteamID64: \`${steamId}\``,
+                `▸ Status: **${summary.personaStateLabel}**${summary.currentlyPlaying ? ` (Playing: *${summary.currentlyPlaying}*)` : ''}`,
+                `▸ Profile Link: [View on Steam](${summary.profileUrl})`,
+              ].join('\n'),
+              inline: false,
+            },
+          ],
+          footer: {
+            text: 'zT Radar • Steam Ecosystem Intelligence',
+          },
+          timestamp: new Date().toISOString(),
+        };
+
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
+            data: {
+              flags: MESSAGE_FLAGS.EPHEMERAL,
+              embeds: [linkEmbed],
+            },
+          }),
+        };
+      } catch (error) {
+        console.error('Error linking Steam account:', error);
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(
+            createEphemeralEmbed('Operation Failed', 'Unable to link Steam profile. Please try again.', PALETTE.DANGER)
+          ),
+        };
+      }
+    }
+
+    // Command: /steam-profile [user] [target]
+    if (name === 'steam-profile') {
+      const userOption = options?.find((opt) => opt.name === 'user');
+      const targetOption = options?.find((opt) => opt.name === 'target');
+
+      if (!STEAM_API_KEY) {
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(
+            createEphemeralEmbed(
+              'Steam Integration Offline',
+              'The Valve Steam Web API Key is not configured on this instance. Please contact the bot administrator.',
+              PALETTE.WARNING
+            )
+          ),
+        };
+      }
+
+      let targetSteamIdentifier = null;
+      let targetDiscordUserId = null;
+
+      if (targetOption?.value) {
+        targetSteamIdentifier = targetOption.value.trim();
+      } else if (userOption?.value) {
+        targetDiscordUserId = userOption.value;
+      } else {
+        targetDiscordUserId = userId;
+      }
+
+      try {
+        if (targetDiscordUserId) {
+          const userConfigResult = await docClient.send(
+            new QueryCommand({
+              TableName: TABLE_NAME,
+              KeyConditionExpression: 'PK = :pk AND SK = :sk',
+              ExpressionAttributeValues: {
+                ':pk': `USER#${targetDiscordUserId}`,
+                ':sk': 'CONFIG',
+              },
+            })
+          );
+
+          const linkedSteamId = userConfigResult.Items?.[0]?.steam_id;
+
+          if (!linkedSteamId) {
+            const isSelf = targetDiscordUserId === userId;
+            const msg = isSelf
+              ? 'You have not linked your Steam account yet.\n\nUse `/steam-link <target>` to link your profile, or supply a target directly via `/steam-profile target:<id/url>`.'
+              : `<@${targetDiscordUserId}> has not linked their Steam account to zT Radar yet.`;
+
+            return {
+              statusCode: 200,
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(
+                createEphemeralEmbed('Steam Account Not Linked', msg, PALETTE.NEUTRAL)
+              ),
+            };
+          }
+
+          targetSteamIdentifier = linkedSteamId;
+        }
+
+        const profileData = await getCompletePlayerProfile(targetSteamIdentifier, STEAM_API_KEY);
+
+        if (!profileData.success) {
+          if (profileData.error === 'RESOLVE_FAILED') {
+            return {
+              statusCode: 200,
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(
+                createEphemeralEmbed(
+                  'Steam Resolution Failed',
+                  `Could not resolve Steam profile for: \`${targetSteamIdentifier}\`.\n\nPlease verify your input:\n▸ 17-digit numeric **SteamID64**\n▸ Profile URL (\`https://steamcommunity.com/id/...\`)\n▸ Custom vanity URL or alias`,
+                  PALETTE.WARNING
+                )
+              ),
+            };
+          }
+
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(
+              createEphemeralEmbed(
+                'Steam Profile Not Found',
+                `Unable to retrieve Steam data for \`${targetSteamIdentifier}\`. Profile may be non-existent or inaccessible.`,
+                PALETTE.WARNING
+              )
+            ),
+          };
+        }
+
+        const { summary, bans, games, steamId } = profileData;
+
+        // Build Fields
+        const statusDetails = summary.currentlyPlaying
+          ? `${summary.personaStateLabel}\n  └─ Playing: **${summary.currentlyPlaying}**`
+          : summary.personaStateLabel;
+
+        const profileFields = [
+          {
+            name: 'Profile Identity & Status',
+            value: [
+              `▸ Persona: **${summary.personaName}**`,
+              `▸ Status: **${statusDetails}**`,
+              `▸ SteamID64: \`${steamId}\``,
+              `▸ Created: **${summary.timeCreated || 'Private'}**`,
+              `▸ Country: **${summary.countryCode ? summary.countryCode.toUpperCase() : 'Undisclosed'}**`,
+            ].join('\n'),
+            inline: false,
+          },
+        ];
+
+        // Bans & Security Record
+        if (bans) {
+          const vacStatus = bans.vacBanned
+            ? `Banned (${bans.vacBansCount} VAC bans recorded)`
+            : 'In Good Standing';
+          const communityStatus = bans.communityBanned ? 'Banned' : 'In Good Standing';
+          const gameBansStatus = bans.gameBansCount > 0 ? `${bans.gameBansCount} Recorded` : 'None';
+          const economyStatus = bans.economyBan === 'none' ? 'Normal' : bans.economyBan;
+
+          profileFields.push({
+            name: 'Security & Platform Standing',
+            value: [
+              `▸ VAC Ban Status: **${vacStatus}**`,
+              `▸ Community Standing: **${communityStatus}**`,
+              `▸ Game Bans: **${gameBansStatus}**`,
+              `▸ Economy Standing: **${economyStatus}**`,
+            ].join('\n'),
+            inline: false,
+          });
+        }
+
+        // Library & Playtime Metrics
+        if (games) {
+          if (games.isPrivate) {
+            profileFields.push({
+              name: 'Library & Playtime Metrics',
+              value: '▸ Library Details: **Private**\n  └─ Game inventory and playtimes are hidden by user privacy settings.',
+              inline: false,
+            });
+          } else {
+            const gamesLines = [
+              `▸ Total Games Owned: **${games.gameCount}**`,
+              `▸ Total Playtime Recorded: **${games.totalPlaytimeHours} hrs**`,
+            ];
+
+            if (games.topGames && games.topGames.length > 0) {
+              gamesLines.push('▸ Most Played Titles:');
+              games.topGames.forEach((g) => {
+                gamesLines.push(`  └─ **${g.name}**: ${g.playtimeHours} hrs`);
+              });
+            }
+
+            profileFields.push({
+              name: 'Library & Playtime Metrics',
+              value: gamesLines.join('\n'),
+              inline: false,
+            });
+          }
+        }
+
+        const profileEmbed = {
+          title: `Steam Profile Intelligence ❖ ${summary.personaName}`,
+          description: `Direct Steam platform dossier for [${summary.personaName}](${summary.profileUrl}).`,
+          color: PALETTE.STEAM_ACCENT,
+          thumbnail: summary.avatarUrl ? { url: summary.avatarUrl } : undefined,
+          fields: profileFields,
+          footer: {
+            text: 'zT Radar • Steam Intelligence Engine',
+          },
+          timestamp: new Date().toISOString(),
+        };
+
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
+            data: {
+              flags: MESSAGE_FLAGS.EPHEMERAL,
+              embeds: [profileEmbed],
+            },
+          }),
+        };
+      } catch (error) {
+        console.error('Error fetching Steam profile:', error);
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(
+            createEphemeralEmbed('Operation Failed', 'Unable to retrieve Steam profile intelligence.', PALETTE.DANGER)
+          ),
+        };
+      }
     }
 
     if (name === 'config-channel') {

@@ -199,6 +199,36 @@ const commands = [
     name: 'radar-help',
     description: 'Display detailed guide on how to use zT Radar commands and deal alerts',
   },
+  {
+    name: 'steam-link',
+    description: 'Link your Steam account to zT Radar for quick profile checks and wishlist sync',
+    options: [
+      {
+        name: 'target',
+        description: 'Your SteamID64, profile URL, or custom vanity URL',
+        type: 3, // STRING
+        required: true,
+      },
+    ],
+  },
+  {
+    name: 'steam-profile',
+    description: 'Inspect comprehensive Steam profile intelligence, ban records, and library statistics',
+    options: [
+      {
+        name: 'user',
+        description: 'Discord user to inspect linked Steam profile',
+        type: 6, // USER
+        required: false,
+      },
+      {
+        name: 'target',
+        description: 'SteamID64, profile URL, or custom vanity URL to inspect directly',
+        type: 3, // STRING
+        required: false,
+      },
+    ],
+  },
 ];
 
 async function registerCommands() {

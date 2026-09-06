@@ -3,3 +3,6 @@ node_modules/
 .aws-sam/
 samconfig.toml
 response.json
+AGENTS.md
+.agents/
+.agent/
