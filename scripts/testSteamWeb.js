@@ -7,6 +7,8 @@ import {
   getPlayerBans,
   getPlayerOwnedGames,
   getCompletePlayerProfile,
+  fetchSteamWishlist,
+  resolveSteamAppTitles,
 } from '../src/utils/steamWeb.js';
 
 async function runTests() {
@@ -24,6 +26,11 @@ async function runTests() {
 
   const emptyResult = await resolveSteamId('', null);
   console.log(`Empty Input Resolution: ${emptyResult === null ? 'PASS' : 'FAIL'} (${emptyResult})`);
+
+  // Test 1b: Static wishlist function contract (no API key, no network)
+  console.log('\n[Test 1b] Testing fetchSteamWishlist contract with invalid input:');
+  const nullWishlist = await fetchSteamWishlist(null);
+  console.log(`Null SteamID returns failure: ${!nullWishlist.success && nullWishlist.error === 'INVALID_ID' ? 'PASS' : 'FAIL'}`);
 
   // Test 2: Live API resolution tests (requires STEAM_API_KEY)
   const apiKey = process.env.STEAM_API_KEY;
@@ -74,6 +81,24 @@ async function runTests() {
   console.log('Testing full orchestration via getCompletePlayerProfile...');
   const fullProfile = await getCompletePlayerProfile('https://steamcommunity.com/id/gabelogannewell', apiKey);
   console.log(`Full Profile Orchestration: ${fullProfile.success ? 'PASS' : 'FAIL'}`);
+
+  // Test 2.6: Fetch public Steam wishlist
+  console.log(`Fetching public Steam wishlist for SteamID ${targetId}...`);
+  const wishlist = await fetchSteamWishlist(targetId, apiKey);
+  if (wishlist.success) {
+    console.log(`Steam Wishlist Fetch: PASS (${wishlist.items.length} items retrieved)`);
+    if (wishlist.items.length > 0) {
+      console.log(`  Top item: (AppID: ${wishlist.items[0].appId}, dateAdded: ${wishlist.items[0].dateAdded})`);
+    }
+  } else {
+    console.log(`Steam Wishlist Fetch: result=${wishlist.error} (profile may have private wishlist — not a test failure)`);
+  }
+
+  // Test 2.7: Resolve Steam App titles
+  console.log('Testing title resolution via resolveSteamAppTitles...');
+  const titleMap = await resolveSteamAppTitles(['1086940', '730'], 3000);
+  const bg3Title = titleMap.get('1086940');
+  console.log(`Title Resolution: ${bg3Title ? 'PASS' : 'FAIL'} ("${bg3Title || 'Unknown'}")`);
 
   console.log('\nIntegration test suite completed successfully.');
 }

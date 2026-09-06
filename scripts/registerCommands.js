@@ -109,6 +109,19 @@ const commands = [
         description: 'List all games currently on your monitored wishlist',
         type: 1, // SUB_COMMAND
       },
+      {
+        name: 'sync-steam',
+        description: 'Import and synchronize your public Steam wishlist games into zT Radar tracking',
+        type: 1, // SUB_COMMAND
+        options: [
+          {
+            name: 'target',
+            description: 'Optional SteamID64 or custom vanity URL override (defaults to your linked account)',
+            type: 3, // STRING
+            required: false,
+          },
+        ],
+      },
     ],
   },
   {

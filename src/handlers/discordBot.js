@@ -7,6 +7,7 @@ import {
   QueryCommand,
   ScanCommand,
   UpdateCommand,
+  BatchWriteCommand,
 } from '@aws-sdk/lib-dynamodb';
 import { searchGamesForAutocomplete, getGameDealInfo } from '../utils/itadApi.js';
 import {
@@ -19,6 +20,8 @@ import {
   resolveSteamId,
   getPlayerSummary,
   getCompletePlayerProfile,
+  fetchSteamWishlist,
+  resolveSteamAppTitles,
 } from '../utils/steamWeb.js';
 
 const ddbClient = new DynamoDBClient({});
@@ -949,6 +952,8 @@ export const handler = async (event) => {
               '  └─ Display all tracked games with targets and currency settings.',
               '▸ `/wishlist clear`',
               '  └─ Wipe your entire personal monitoring list at once.',
+              '▸ `/wishlist sync-steam [target]`',
+              '  └─ Bulk-import your public Steam wishlist into zT Radar tracking.',
             ].join('\n'),
             inline: false,
           },
@@ -1886,6 +1891,281 @@ export const handler = async (event) => {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(
               createEphemeralEmbed('Query Error', 'Unable to retrieve your monitored titles.', PALETTE.DANGER)
+            ),
+          };
+        }
+      }
+
+      if (subCommandName === 'sync-steam') {
+        const targetOption = subCommand?.options?.find((opt) => opt.name === 'target');
+        const rawTarget = targetOption?.value?.trim() || null;
+
+        try {
+          let steamId = null;
+
+          if (rawTarget) {
+            // Direct target provided — resolve immediately (no Steam API key required for URL/ID parsing)
+            steamId = await resolveSteamId(rawTarget, STEAM_API_KEY);
+
+            if (!steamId) {
+              return {
+                statusCode: 200,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(
+                  createEphemeralEmbed(
+                    'Steam Resolution Failed',
+                    `Could not resolve Steam profile for: \`${rawTarget}\`.\n\nAccepted formats:\n▸ 17-digit numeric **SteamID64**\n▸ Full profile URL (\`https://steamcommunity.com/profiles/...\` or \`/id/...\`)\n▸ Custom vanity alias`,
+                    PALETTE.WARNING
+                  )
+                ),
+              };
+            }
+          } else {
+            // No target — attempt to use the caller's linked Steam account
+            const userConfigResult = await docClient.send(
+              new QueryCommand({
+                TableName: TABLE_NAME,
+                KeyConditionExpression: 'PK = :pk AND SK = :sk',
+                ExpressionAttributeValues: {
+                  ':pk': `USER#${userId}`,
+                  ':sk': 'CONFIG',
+                },
+              })
+            );
+
+            steamId = userConfigResult.Items?.[0]?.steam_id || null;
+
+            if (!steamId) {
+              return {
+                statusCode: 200,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(
+                  createEphemeralEmbed(
+                    'Steam Account Not Linked',
+                    'You have not linked your Steam account yet.\n\nUse `/steam-link <target>` to link your profile, or provide a Steam ID directly:\n▸ `/wishlist sync-steam target:<SteamID64 or vanity URL>`',
+                    PALETTE.NEUTRAL
+                  )
+                ),
+              };
+            }
+          }
+
+          // Fetch wishlist using official Valve Steam Web API
+          const wishlistResult = await fetchSteamWishlist(steamId, STEAM_API_KEY);
+
+          if (!wishlistResult.success) {
+            if (wishlistResult.error === 'CONFIG_REQUIRED') {
+              return {
+                statusCode: 200,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(
+                  createEphemeralEmbed(
+                    'Configuration Required',
+                    'A valid Valve `STEAM_API_KEY` is required on the server to execute Steam Wishlist synchronization.',
+                    PALETTE.WARNING
+                  )
+                ),
+              };
+            }
+
+            const isPrivate = wishlistResult.error === 'PRIVATE_OR_NOT_FOUND';
+            const msg = isPrivate
+              ? [
+                  'The Steam wishlist for this profile is **private or inaccessible**.',
+                  '',
+                  'To enable wishlist synchronization:',
+                  '▸ Open **Steam** and navigate to your **Profile**.',
+                  '▸ Go to **Edit Profile** ❖ **Privacy Settings**.',
+                  '▸ Set **Game Details** to **Public** and **Wishlist** to **Public**.',
+                  '▸ Re-run `/wishlist sync-steam` after saving.',
+                ].join('\n')
+              : 'Failed to retrieve Steam wishlist data. The Steam Web API may be temporarily unavailable. Please try again shortly.';
+
+            return {
+              statusCode: 200,
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(
+                createEphemeralEmbed(
+                  isPrivate ? 'Wishlist Access Denied' : 'Wishlist Retrieval Failed',
+                  msg,
+                  PALETTE.WARNING
+                )
+              ),
+            };
+          }
+
+          const wishlistItems = wishlistResult.items || [];
+
+          if (wishlistItems.length === 0) {
+            return {
+              statusCode: 200,
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(
+                createEphemeralEmbed(
+                  'Steam Wishlist Empty',
+                  `The Steam wishlist for this profile (SteamID64: \`${steamId}\`) contains no items to import.`,
+                  PALETTE.NEUTRAL
+                )
+              ),
+            };
+          }
+
+          // Safeguard against massive wishlists: cap to top 100 most recently added titles
+          const totalWishlistCount = wishlistItems.length;
+          const wasCapped = totalWishlistCount > 100;
+          const targetItems = wishlistItems.slice(0, 100);
+
+          // Query existing tracked items to preserve custom target_price values
+          const existingResult = await docClient.send(
+            new QueryCommand({
+              TableName: TABLE_NAME,
+              KeyConditionExpression: 'PK = :pk AND begins_with(SK, :skPrefix)',
+              ExpressionAttributeValues: {
+                ':pk': `USER#${userId}`,
+                ':skPrefix': 'GAME#',
+              },
+            })
+          );
+
+          const existingKeys = new Set(
+            (existingResult.Items || []).map((item) => item.SK)
+          );
+          const existingExternalIds = new Set(
+            (existingResult.Items || []).map((item) => item.external_game_id).filter(Boolean)
+          );
+
+          // Identify entries not already tracked by external_game_id
+          const untrackedItems = [];
+          let preservedCount = 0;
+
+          for (const entry of targetItems) {
+            if (existingExternalIds.has(`steam:${entry.appId}`)) {
+              preservedCount++;
+            } else {
+              untrackedItems.push(entry);
+            }
+          }
+
+          // Resolve game titles for untracked items via Steam Store appdetails API
+          const untrackedAppIds = untrackedItems.map((entry) => entry.appId);
+          const titleMap = await resolveSteamAppTitles(untrackedAppIds, 2000);
+
+          const now = new Date().toISOString();
+          const itemsToInsert = [];
+          const seenSKs = new Set();
+
+          for (const entry of untrackedItems) {
+            const title = titleMap.get(entry.appId) || `App #${entry.appId}`;
+            const normalizedTitle = title.toLowerCase().trim();
+            const sk = `GAME#${normalizedTitle}`;
+
+            if (existingKeys.has(sk)) {
+              // Existing tracked item: preserve its target_price and settings — skip overwrite
+              preservedCount++;
+            } else if (!seenSKs.has(sk)) {
+              // Deduplicate across the batch to satisfy DynamoDB BatchWrite item uniqueness
+              seenSKs.add(sk);
+              itemsToInsert.push({
+                appId: entry.appId,
+                title,
+                sk,
+              });
+            }
+          }
+
+          // Persist items in chunks of 25 using BatchWriteCommand
+          const BATCH_SIZE = 25;
+          for (let i = 0; i < itemsToInsert.length; i += BATCH_SIZE) {
+            const chunk = itemsToInsert.slice(i, i + BATCH_SIZE);
+            await docClient.send(
+              new BatchWriteCommand({
+                RequestItems: {
+                  [TABLE_NAME]: chunk.map((item) => ({
+                    PutRequest: {
+                      Item: {
+                        PK: `USER#${userId}`,
+                        SK: item.sk,
+                        game_title: item.title,
+                        external_game_id: `steam:${item.appId}`,
+                        target_price: null,
+                        alert_all_time_low: true,
+                        alert_free: true,
+                        alert_steep_discount: true,
+                        user_id: userId,
+                        created_at: now,
+                      },
+                    },
+                  })),
+                },
+              })
+            );
+          }
+
+          const importedCount = itemsToInsert.length;
+          const importedTitles = itemsToInsert.slice(0, 10).map((e) => e.title);
+
+          // Build summary embed fields
+          const summaryLines = [
+            `▸ Total Steam wishlist entries processed: **${targetItems.length}**${wasCapped ? ` (of ${totalWishlistCount} total)` : ''}`,
+            `▸ Newly imported to radar: **${importedCount}**`,
+            `▸ Existing tracked items preserved: **${preservedCount}**`,
+          ];
+
+          if (wasCapped) {
+            summaryLines.push('▸ Note: Synced top 100 most recently added wishlist titles.');
+          }
+
+          const summaryFields = [
+            {
+              name: 'Sync Summary',
+              value: summaryLines.join('\n'),
+              inline: false,
+            },
+          ];
+
+          if (importedTitles.length > 0) {
+            const previewLines = importedTitles.map((t) => `  └─ ${t}`);
+            if (importedCount > importedTitles.length) {
+              previewLines.push(`  └─ ...and ${importedCount - importedTitles.length} more`);
+            }
+            summaryFields.push({
+              name: 'Imported Titles (Preview)',
+              value: ['▸ First batch added:'].concat(previewLines).join('\n'),
+              inline: false,
+            });
+          }
+
+          const syncEmbed = {
+            title: 'Steam Wishlist Sync Complete ❖',
+            description: wasCapped
+              ? 'Successfully synchronized top 100 most recently added wishlist titles into the zT Radar tracking registry.\nAll imported titles will trigger alerts on price drops, historical lows, and free promotions.'
+              : 'Successfully synchronized your Steam wishlist into the zT Radar tracking registry.\nAll imported titles will trigger alerts on price drops, historical lows, and free promotions.',
+            color: importedCount > 0 ? PALETTE.SUCCESS : PALETTE.NEUTRAL,
+            fields: summaryFields,
+            footer: {
+              text: 'zT Radar • Steam Wishlist Intelligence',
+            },
+            timestamp: now,
+          };
+
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
+              data: {
+                flags: MESSAGE_FLAGS.EPHEMERAL,
+                embeds: [syncEmbed],
+              },
+            }),
+          };
+        } catch (error) {
+          console.error('Error executing wishlist sync-steam:', error);
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(
+              createEphemeralEmbed('Sync Failed', 'Unable to complete Steam wishlist synchronization. Please try again.', PALETTE.DANGER)
             ),
           };
         }

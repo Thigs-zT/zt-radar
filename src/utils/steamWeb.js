@@ -282,3 +282,137 @@ export async function getCompletePlayerProfile(rawTarget, apiKey) {
     games,
   };
 }
+
+/**
+ * Fetches the public Steam wishlist for a given SteamID64 using the official
+ * Valve Steam Web API (IWishlistService/GetWishlist/v1).
+ *
+ * @param {string} steamId64 - 17-digit numeric SteamID
+ * @param {string} [apiKey] - Valve Steam Web API Key
+ * @returns {Promise<{ success: boolean, error?: string, items?: Array }>}
+ */
+export async function fetchSteamWishlist(steamId64, apiKey = process.env.STEAM_API_KEY) {
+  if (!steamId64) {
+    return { success: false, error: 'INVALID_ID' };
+  }
+
+  if (!apiKey) {
+    return { success: false, error: 'CONFIG_REQUIRED' };
+  }
+
+  const url = `https://api.steampowered.com/IWishlistService/GetWishlist/v1/?steamid=${steamId64}`;
+
+  try {
+    const res = await fetchWithTimeout(
+      url,
+      {
+        headers: {
+          'x-webapi-key': apiKey,
+        },
+      },
+      4000
+    );
+
+    if (!res.ok) {
+      if (res.status === 401 || res.status === 403) {
+        return { success: false, error: 'CONFIG_REQUIRED' };
+      }
+      return { success: false, error: 'FETCH_ERROR' };
+    }
+
+    let data;
+    try {
+      data = await res.json();
+    } catch {
+      return { success: false, error: 'FETCH_ERROR' };
+    }
+
+    const rawItems = data?.response?.items;
+
+    if (!rawItems || rawItems.length === 0) {
+      // Verify if the profile itself is private or friends-only
+      try {
+        const summary = await getPlayerSummary(steamId64, apiKey);
+        if (summary && summary.communityVisibilityState !== 3) {
+          return { success: false, error: 'PRIVATE_OR_NOT_FOUND' };
+        }
+      } catch {
+        // Fallback to error check
+      }
+
+      // Valve returns { response: {} } (undefined items) when wishlist privacy is private
+      if (!rawItems) {
+        return { success: false, error: 'PRIVATE_OR_NOT_FOUND' };
+      }
+
+      return { success: true, items: [] };
+    }
+
+    // Sort wishlist items by date_added descending (most recently added games first)
+    const sortedItems = rawItems
+      .map((item) => ({
+        appId: String(item.appid ?? item.appId),
+        priority: Number(item.priority || 0),
+        dateAdded: Number(item.date_added || 0),
+      }))
+      .sort((a, b) => b.dateAdded - a.dateAdded);
+
+    return { success: true, items: sortedItems };
+  } catch (err) {
+    console.error(`Error fetching Steam wishlist for SteamID ${steamId64}:`, err.message || err);
+    return { success: false, error: 'FETCH_ERROR' };
+  }
+}
+
+/**
+ * Resolves Steam AppIDs to game titles via the Steam Store appdetails API.
+ * Uses bounded concurrency and defensive timeouts to comply with Discord limits.
+ *
+ * @param {string[]} appIds - Array of numeric Steam AppIDs
+ * @param {number} [timeoutMs=2000] - Total timeout budget for resolution
+ * @returns {Promise<Map<string, string>>} Map of appId -> game title
+ */
+export async function resolveSteamAppTitles(appIds, timeoutMs = 2000) {
+  const titleMap = new Map();
+  if (!appIds || appIds.length === 0) {
+    return titleMap;
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  const BATCH_SIZE = 15;
+  try {
+    for (let i = 0; i < appIds.length; i += BATCH_SIZE) {
+      if (controller.signal.aborted) break;
+
+      const chunk = appIds.slice(i, i + BATCH_SIZE);
+      await Promise.all(
+        chunk.map(async (appId) => {
+          try {
+            const url = `https://store.steampowered.com/api/appdetails?appids=${appId}&filters=basic`;
+            const res = await fetch(url, {
+              headers: { 'User-Agent': USER_AGENT },
+              signal: controller.signal,
+            });
+            if (res.ok) {
+              const data = await res.json();
+              const name = data?.[appId]?.data?.name;
+              if (name) {
+                titleMap.set(String(appId), name);
+              }
+            }
+          } catch {
+            // Individual fetch failed or timed out; fallback will be used
+          }
+        })
+      );
+    }
+  } catch {
+    // Timeout or abort
+  } finally {
+    clearTimeout(timer);
+  }
+
+  return titleMap;
+}
