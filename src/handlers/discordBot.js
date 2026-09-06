@@ -23,6 +23,7 @@ import {
   fetchSteamWishlist,
   resolveSteamAppTitles,
 } from '../utils/steamWeb.js';
+import { getHowLongToBeatStats } from '../utils/hltbNative.js';
 
 const ddbClient = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(ddbClient);
@@ -256,7 +257,7 @@ export const handler = async (event) => {
     const { name, options } = interaction.data;
     const userId = interaction.member?.user?.id || interaction.user?.id;
 
-    const autocompleteCommands = ['compare', 'can-it-run', 'game-news', 'wishlist'];
+    const autocompleteCommands = ['compare', 'can-it-run', 'game-news', 'wishlist', 'how-long-to-beat'];
 
     if (autocompleteCommands.includes(name)) {
       const subCommand = options?.[0];
@@ -561,6 +562,231 @@ export const handler = async (event) => {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(
             createEphemeralEmbed('Dispatch Error', 'Failed to retrieve official patch notes and news.', PALETTE.DANGER)
+          ),
+        };
+      }
+    }
+
+    // Command: /how-long-to-beat <game>
+    if (name === 'how-long-to-beat') {
+      const gameOption = options?.find((opt) => opt.name === 'game');
+      const rawVal = gameOption?.value;
+
+      if (!rawVal) {
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(
+            createEphemeralEmbed(
+              'Selection Required',
+              'Please type and select a game from the autocomplete suggestions dropdown.',
+              PALETTE.WARNING
+            )
+          ),
+        };
+      }
+
+      let externalGameId = rawVal;
+      let gameTitle = rawVal;
+
+      if (rawVal.includes('|')) {
+        const [idPart, ...titleParts] = rawVal.split('|');
+        externalGameId = idPart;
+        gameTitle = titleParts.join('|');
+      }
+
+      try {
+        // Query caller's regional currency preference
+        let userCurrency = 'USD';
+        try {
+          const userConfigResult = await docClient.send(
+            new QueryCommand({
+              TableName: TABLE_NAME,
+              KeyConditionExpression: 'PK = :pk AND SK = :sk',
+              ExpressionAttributeValues: {
+                ':pk': `USER#${userId}`,
+                ':sk': 'CONFIG',
+              },
+            })
+          );
+          userCurrency = userConfigResult.Items?.[0]?.preferred_currency || 'USD';
+        } catch {
+          // Fallback to USD
+        }
+
+        // Concurrently query HowLongToBeat completion statistics and live storefront deal intelligence
+        const [hltbSettled, dealSettled] = await Promise.allSettled([
+          getHowLongToBeatStats(gameTitle),
+          getGameDealInfo(externalGameId, userCurrency, gameTitle),
+        ]);
+
+        const hltbData = hltbSettled.status === 'fulfilled' ? hltbSettled.value : null;
+        const dealInfo = dealSettled.status === 'fulfilled' ? dealSettled.value : null;
+
+        if (!hltbData || !hltbData.success) {
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(
+              createEphemeralEmbed(
+                'Playtime Data Unavailable',
+                `Could not retrieve HowLongToBeat completion statistics for **${gameTitle}**.\nThe title may not be indexed on HowLongToBeat or the service is temporarily unresponsive.`,
+                PALETTE.WARNING
+              )
+            ),
+          };
+        }
+
+        const sym = userCurrency === 'BRL' ? 'R$' : '$';
+        const bestOffer = dealInfo?.cheaperAlternative || dealInfo?.primaryDeal || null;
+        const bestPrice = bestOffer ? bestOffer.salePrice : null;
+        const mainHours = hltbData.mainStoryHours || 0;
+        const extraHours = hltbData.mainExtraHours || 0;
+        const compHours = hltbData.completionistHours || 0;
+        const allHours = hltbData.allPlayStylesHours || 0;
+
+        // Effective hours for primary Cost-Per-Hour calculation
+        const effectiveHours = mainHours > 0 ? mainHours : (allHours > 0 ? allHours : (extraHours > 0 ? extraHours : 0));
+
+        // Format Average Completion Times breakdown
+        const completionLines = [];
+        if (mainHours > 0) {
+          completionLines.push(`▸ Main Story: **${mainHours} hours**`);
+        }
+        if (extraHours > 0) {
+          completionLines.push(`▸ Main + Extras: **${extraHours} hours**`);
+        }
+        if (compHours > 0) {
+          completionLines.push(`▸ 100% Completionist: **${compHours} hours**`);
+        }
+        if (completionLines.length === 0 && allHours > 0) {
+          completionLines.push(`▸ All PlayStyles Average: **${allHours} hours**`);
+        }
+
+        // Compute Cost-Per-Hour entertainment metric
+        let cphValue = '';
+        if (bestPrice === null) {
+          cphValue = '▸ Storefront pricing currently unavailable to compute cost-per-hour.';
+        } else if (bestPrice === 0) {
+          cphValue = [
+            `▸ **Free to Play / 100% Promotional (${sym} 0.00 / hour)**`,
+            `└─ Based on current free storefront price at ${bestOffer.shopName}.`,
+          ].join('\n');
+        } else if (effectiveHours > 0) {
+          const cph = (bestPrice / effectiveHours).toFixed(2);
+          const hoursBasis = mainHours > 0 ? 'Main Story' : 'All PlayStyles';
+          const cutText = bestOffer.cutPercent > 0 ? ` (-${bestOffer.cutPercent}%)` : '';
+          cphValue = [
+            `▸ **${sym} ${cph} / hour** (based on ${hoursBasis}: ${effectiveHours}h)`,
+            `└─ Live Offer: **${sym} ${bestPrice.toFixed(2)}**${cutText} at ${bestOffer.shopName}`,
+          ].join('\n');
+        } else {
+          const cutText = bestOffer.cutPercent > 0 ? ` (-${bestOffer.cutPercent}%)` : '';
+          cphValue = [
+            `▸ Live Offer: **${sym} ${bestPrice.toFixed(2)}**${cutText} at ${bestOffer.shopName}`,
+            '└─ Playtime duration too variable to compute hourly rate.',
+          ].join('\n');
+        }
+
+        const fields = [
+          {
+            name: 'Average Completion Times',
+            value: completionLines.length > 0 ? completionLines.join('\n') : '▸ No verified completion times recorded.',
+            inline: false,
+          },
+          {
+            name: 'Cost-Per-Hour Analysis',
+            value: cphValue,
+            inline: false,
+          },
+        ];
+
+        if (dealInfo && dealInfo.reviewScore) {
+          fields.push({
+            name: 'Community Score',
+            value: `▸ **${dealInfo.reviewScore}/100** approval`,
+            inline: true,
+          });
+        }
+
+        if (dealInfo && dealInfo.allTimeLowPrice !== null) {
+          fields.push({
+            name: 'Historical Low (ATL)',
+            value: `▸ **${sym} ${dealInfo.allTimeLowPrice.toFixed(2)}**`,
+            inline: true,
+          });
+        }
+
+        // Action buttons
+        const buttons = [];
+        if (bestOffer?.url) {
+          buttons.push({
+            type: 2,
+            style: 5,
+            label: `Buy on ${bestOffer.shopName}`,
+            url: bestOffer.url,
+          });
+        }
+
+        if (hltbData.gameId) {
+          buttons.push({
+            type: 2,
+            style: 5,
+            label: 'View on HowLongToBeat',
+            url: `https://howlongtobeat.com/game/${hltbData.gameId}`,
+          });
+        }
+
+        if (dealInfo?.steamAppId) {
+          buttons.push({
+            type: 2,
+            style: 5,
+            label: 'SteamDB',
+            url: `https://steamdb.info/app/${dealInfo.steamAppId}/`,
+          });
+        }
+
+        const components = buttons.length > 0 ? [{ type: 1, components: buttons.slice(0, 5) }] : [];
+
+        const embed = {
+          title: `HowLongToBeat ❖ ${hltbData.gameTitle || gameTitle}`,
+          description: `Playtime intelligence & entertainment value analysis for **${hltbData.gameTitle || gameTitle}**.`,
+          color: PALETTE.BRAND,
+          fields,
+          footer: {
+            text: `zT Radar • Data via HowLongToBeat & Authorized Stores (${userCurrency})`,
+          },
+          timestamp: new Date().toISOString(),
+        };
+
+        const imageUrl = dealInfo?.imageUrl || hltbData.imageUrl;
+        if (imageUrl) {
+          embed.thumbnail = { url: imageUrl };
+        }
+
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
+            data: {
+              flags: MESSAGE_FLAGS.EPHEMERAL,
+              embeds: [embed],
+              components,
+            },
+          }),
+        };
+      } catch (hltbError) {
+        console.error('Error executing /how-long-to-beat command:', hltbError);
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(
+            createEphemeralEmbed(
+              'Analysis Error',
+              'An unexpected error occurred while analyzing playtime metrics.',
+              PALETTE.DANGER
+            )
           ),
         };
       }
@@ -1077,6 +1303,8 @@ export const handler = async (event) => {
               '  └─ Official minimum & recommended PC system specifications from Steam.',
               '▸ `/game-news <game>`',
               '  └─ Official developer dispatches, patch notes, and news updates.',
+              '▸ `/how-long-to-beat <game>`',
+              '  └─ Average completion times and live Cost-per-Hour entertainment analysis.',
               '▸ `/steam-most-played`',
               '  └─ Official live top 10 most-played games on Steam by concurrent players.',
               '▸ `/steam-trending`',

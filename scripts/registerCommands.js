@@ -4,12 +4,7 @@ dotenv.config();
 const APPLICATION_ID = process.env.DISCORD_APP_ID || process.env.DISCORD_APPLICATION_ID;
 const BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
 
-if (!APPLICATION_ID || !BOT_TOKEN) {
-  console.error('Missing DISCORD_APP_ID or DISCORD_BOT_TOKEN in .env');
-  process.exit(1);
-}
-
-const commands = [
+export const commands = [
   {
     name: 'compare',
     description: 'Compare current deals and historical low prices across verified stores',
@@ -43,6 +38,19 @@ const commands = [
       {
         name: 'game',
         description: 'Game name to check recent updates',
+        type: 3, // STRING
+        required: true,
+        autocomplete: true,
+      },
+    ],
+  },
+  {
+    name: 'how-long-to-beat',
+    description: 'Analyze average completion times and Cost-per-Hour entertainment metrics',
+    options: [
+      {
+        name: 'game',
+        description: 'Game name to inspect playtime metrics',
         type: 3, // STRING
         required: true,
         autocomplete: true,
@@ -260,7 +268,12 @@ const commands = [
   },
 ];
 
-async function registerCommands() {
+export async function registerCommands() {
+  if (!APPLICATION_ID || !BOT_TOKEN) {
+    console.error('Missing DISCORD_APP_ID or DISCORD_BOT_TOKEN in .env');
+    process.exit(1);
+  }
+
   const url = `https://discord.com/api/v10/applications/${APPLICATION_ID}/commands`;
 
   console.log('Registering official consolidated suite with Discord...');
@@ -287,4 +300,7 @@ async function registerCommands() {
   }
 }
 
-registerCommands();
+const isDirectRun = process.argv[1] && (process.argv[1].endsWith('registerCommands.js') || process.argv[1].includes('registerCommands'));
+if (isDirectRun) {
+  registerCommands();
+}
