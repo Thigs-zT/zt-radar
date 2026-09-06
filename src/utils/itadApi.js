@@ -361,14 +361,14 @@ export async function getGameDealInfo(rawGameIdentifier, preferredCurrency = 'US
 
     const cheaperAlternative = secondaryRaw
       ? {
-          shopName: secondaryRaw.shopName,
-          salePrice: secondaryRaw.salePrice,
-          regularPrice: secondaryRaw.regularPrice,
-          cutPercent: secondaryRaw.cutPercent,
-          url: secondaryRaw.url,
-          currency,
-          currencySymbol,
-        }
+        shopName: secondaryRaw.shopName,
+        salePrice: secondaryRaw.salePrice,
+        regularPrice: secondaryRaw.regularPrice,
+        cutPercent: secondaryRaw.cutPercent,
+        url: secondaryRaw.url,
+        currency,
+        currencySymbol,
+      }
       : null;
 
     const primaryIsAtl =

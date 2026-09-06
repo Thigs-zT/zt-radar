@@ -2194,6 +2194,7 @@ export const handler = async (event) => {
                 ':pk': `USER#${userId}`,
                 ':skPrefix': 'GAME#',
               },
+              ProjectionExpression: 'PK, SK',
             })
           );
 
@@ -2409,14 +2410,14 @@ export const handler = async (event) => {
             const isPrivate = wishlistResult.error === 'PRIVATE_OR_NOT_FOUND';
             const msg = isPrivate
               ? [
-                  'The Steam wishlist for this profile is **private or inaccessible**.',
-                  '',
-                  'To enable wishlist synchronization:',
-                  '▸ Open **Steam** and navigate to your **Profile**.',
-                  '▸ Go to **Edit Profile** ❖ **Privacy Settings**.',
-                  '▸ Set **Game Details** to **Public** and **Wishlist** to **Public**.',
-                  '▸ Re-run `/wishlist sync-steam` after saving.',
-                ].join('\n')
+                'The Steam wishlist for this profile is **private or inaccessible**.',
+                '',
+                'To enable wishlist synchronization:',
+                '▸ Open **Steam** and navigate to your **Profile**.',
+                '▸ Go to **Edit Profile** ❖ **Privacy Settings**.',
+                '▸ Set **Game Details** to **Public** and **Wishlist** to **Public**.',
+                '▸ Re-run `/wishlist sync-steam` after saving.',
+              ].join('\n')
               : 'Failed to retrieve Steam wishlist data. The Steam Web API may be temporarily unavailable. Please try again shortly.';
 
             return {
@@ -2462,6 +2463,7 @@ export const handler = async (event) => {
                 ':pk': `USER#${userId}`,
                 ':skPrefix': 'GAME#',
               },
+              ProjectionExpression: 'SK, external_game_id',
             })
           );
 
