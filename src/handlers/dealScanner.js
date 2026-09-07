@@ -162,10 +162,11 @@ export const handler = async () => {
 
     console.log(`Retrieved ${wishlistItems.length} wishlist items and ${guildConfigs.length} guild configs.`);
 
+    const userDmCountMap = new Map();
+    const MAX_DM_PER_USER = 3;
+
     // 1. Process Individual Wishlists (DMs)
     if (wishlistItems.length > 0) {
-      const userDmCountMap = new Map();
-      const MAX_DM_PER_USER = 3;
 
       for (const item of wishlistItems) {
         const userId = item.user_id || item.PK?.replace('USER#', '');
@@ -326,7 +327,129 @@ export const handler = async () => {
       }
     }
 
-    // 2. Process Curated Server Channel Radar
+    // 2. Process Global Free Game Alerts (Opted-in Users)
+    const freeAlertUsers = userConfigs.filter((cfg) => cfg.alert_global_free === true);
+    if (freeAlertUsers.length > 0) {
+      console.log(`Processing global free game alerts for ${freeAlertUsers.length} opted-in users.`);
+
+      const freeDealsByCurrency = new Map();
+      const neededCurrencies = new Set(freeAlertUsers.map((u) => u.preferred_currency || 'USD'));
+
+      for (const cur of neededCurrencies) {
+        try {
+          const overviewDeals = await getMarketOverviewDeals(false, cur);
+          const activeFree = overviewDeals.filter(
+            (d) => d.dealType === 'FREE_TO_KEEP' || d.dealType === 'FREE_PLAY_DAYS'
+          );
+          freeDealsByCurrency.set(cur, activeFree);
+        } catch (err) {
+          console.error(`Failed to fetch overview free deals for currency ${cur}:`, err.message || err);
+          freeDealsByCurrency.set(cur, []);
+        }
+      }
+
+      for (const userConfig of freeAlertUsers) {
+        const userId = userConfig.user_id || userConfig.PK?.replace('USER#', '');
+        const currentDmCount = userDmCountMap.get(userId) || 0;
+        if (currentDmCount >= MAX_DM_PER_USER) {
+          continue;
+        }
+
+        const userCurrency = userConfig.preferred_currency || 'USD';
+        const deals = freeDealsByCurrency.get(userCurrency) || [];
+        if (deals.length === 0) continue;
+
+        const broadcastedHistory = Array.isArray(userConfig.last_broadcasted_free_deals)
+          ? userConfig.last_broadcasted_free_deals
+          : [];
+
+        const newlySentDeals = [];
+
+        for (const deal of deals) {
+          if ((userDmCountMap.get(userId) || 0) >= MAX_DM_PER_USER) break;
+
+          const uniqueKey = `${deal.gameId}_${deal.dealType}`;
+          if (broadcastedHistory.includes(uniqueKey) || newlySentDeals.includes(uniqueKey)) {
+            continue;
+          }
+
+          const isFreeToKeep = deal.dealType === 'FREE_TO_KEEP';
+          const alertReason = isFreeToKeep
+            ? '100% FREE TO KEEP (Permanent Ownership)'
+            : 'FREE PLAY EVENT (Play For Free This Weekend)';
+          const embedColor = isFreeToKeep ? ALERT_PALETTE.FREE_TO_KEEP : ALERT_PALETTE.FREE_PLAY_DAYS;
+          const sym = deal.primaryDeal?.currencySymbol || (userCurrency === 'BRL' ? 'R$' : '$');
+
+          const diffPricing = [
+            '```diff',
+            `- Regular Price:     ${sym} ${deal.primaryDeal.regularPrice.toFixed(2)}`,
+            `+ Promotional Price: ${sym} 0.00 (-100%)`,
+            '```',
+          ].join('\n');
+
+          const fields = [
+            {
+              name: `Storefront Offer ❖ ${deal.primaryDeal.shopName}`,
+              value: diffPricing,
+              inline: false,
+            },
+          ];
+
+          if (deal.steamAppId) {
+            fields.push({
+              name: 'Platform Availability',
+              value: `▸ Steam AppID: \`${deal.steamAppId}\`\n▸ Claim via: **${deal.primaryDeal.shopName}**`,
+              inline: true,
+            });
+          }
+
+          const embed = {
+            title: `zT Radar ❖ Free Game Alert: ${deal.title}`,
+            description: `**${alertReason}**\nThis promotion was detected live on ${deal.primaryDeal.shopName}.`,
+            color: embedColor,
+            fields,
+            footer: {
+              text: 'zT Radar • Global Free Play Radar Dispatch',
+            },
+            timestamp: new Date().toISOString(),
+          };
+
+          if (deal.imageUrl) {
+            embed.image = { url: deal.imageUrl };
+          }
+
+          const components = createStoreButtons(deal);
+          const sent = await sendDiscordDm(userId, embed, components);
+
+          if (sent) {
+            const newCount = (userDmCountMap.get(userId) || 0) + 1;
+            userDmCountMap.set(userId, newCount);
+            newlySentDeals.push(uniqueKey);
+          }
+        }
+
+        if (newlySentDeals.length > 0) {
+          const updatedHistory = [...broadcastedHistory, ...newlySentDeals].slice(-50);
+          try {
+            await docClient.send(
+              new UpdateCommand({
+                TableName: TABLE_NAME,
+                Key: { PK: userConfig.PK, SK: userConfig.SK },
+                UpdateExpression: 'SET last_broadcasted_free_deals = :deals, last_free_alert_at = :now',
+                ExpressionAttributeValues: {
+                  ':deals': updatedHistory,
+                  ':now': new Date().toISOString(),
+                },
+              })
+            );
+          } catch (dbErr) {
+            console.error(`Failed to update free deal history for ${userConfig.PK}:`, dbErr);
+          }
+        }
+      }
+    }
+
+    // 3. Process Curated Server Channel Radar
     if (guildConfigs.length > 0) {
       for (const config of guildConfigs) {
         if (!config.alert_channel_id) continue;

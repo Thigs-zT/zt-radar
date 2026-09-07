@@ -269,6 +269,22 @@ export const commands = [
       },
     ],
   },
+  {
+    name: 'free-play-radar',
+    description: 'Inspect all active 100% free games to keep and temporary Free Weekend events',
+  },
+  {
+    name: 'free-radar-dm',
+    description: 'Toggle automated direct message alerts for all free games and free weekends',
+    options: [
+      {
+        name: 'enabled',
+        description: 'Enable or disable global free game alerts in your DMs',
+        type: 5, // BOOLEAN
+        required: true,
+      },
+    ],
+  },
 ];
 
 export async function registerCommands() {

@@ -9,7 +9,7 @@ import {
   UpdateCommand,
   BatchWriteCommand,
 } from '@aws-sdk/lib-dynamodb';
-import { searchGamesForAutocomplete, getGameDealInfo } from '../utils/itadApi.js';
+import { searchGamesForAutocomplete, getGameDealInfo, getMarketOverviewDeals } from '../utils/itadApi.js';
 import {
   checkPlatformStatuses,
   getSteamTrendingGames,
@@ -1349,6 +1349,16 @@ export const handler = async (event) => {
             inline: false,
           },
           {
+            name: 'Free Play & Giveaway Intelligence',
+            value: [
+              '▸ `/free-play-radar`',
+              '  └─ Inspect all active 100% free games to keep and temporary Free Weekend events.',
+              '▸ `/free-radar-dm <enabled>`',
+              '  └─ Toggle automated direct message alerts for all free games and free weekends.',
+            ].join('\n'),
+            inline: false,
+          },
+          {
             name: 'Server Broadcast Administration',
             value: [
               '▸ `/config-channel <channel> [currency] [include_third_party] [free_only]`',
@@ -1379,6 +1389,240 @@ export const handler = async (event) => {
           },
         }),
       };
+    }
+
+    // Command: /free-play-radar
+    if (name === 'free-play-radar') {
+      try {
+        let userCurrency = 'USD';
+        try {
+          const userConfigResult = await docClient.send(
+            new QueryCommand({
+              TableName: TABLE_NAME,
+              KeyConditionExpression: 'PK = :pk AND SK = :sk',
+              ExpressionAttributeValues: {
+                ':pk': `USER#${userId}`,
+                ':sk': 'CONFIG',
+              },
+            })
+          );
+          if (userConfigResult.Items?.[0]?.preferred_currency) {
+            userCurrency = userConfigResult.Items[0].preferred_currency;
+          }
+        } catch (cfgErr) {
+          console.warn('Could not query user config for /free-play-radar:', cfgErr.message || cfgErr);
+        }
+
+        const marketDeals = await getMarketOverviewDeals(false, userCurrency);
+        const freeToKeep = marketDeals.filter((d) => d.dealType === 'FREE_TO_KEEP');
+        const freePlayEvents = marketDeals.filter((d) => d.dealType === 'FREE_PLAY_DAYS');
+
+        if (freeToKeep.length === 0 && freePlayEvents.length === 0) {
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(
+              createEphemeralEmbed(
+                'Free Play Radar ❖ Market Overview',
+                'No promotional free games are currently active. Check back on Thursday when Epic Games updates weekly giveaways.',
+                PALETTE.NEUTRAL
+              )
+            ),
+          };
+        }
+
+        const sym = userCurrency === 'BRL' ? 'R$' : '$';
+        const fields = [];
+        const buttons = [];
+
+        if (freeToKeep.length > 0) {
+          const keepDescriptions = freeToKeep.map((deal) => {
+            const regPrice = deal.primaryDeal?.regularPrice
+              ? `${sym} ${deal.primaryDeal.regularPrice.toFixed(2)}`
+              : 'Paid';
+
+            return [
+              `❖ **${deal.title}** (${deal.primaryDeal.shopName})`,
+              `  └─ Claim for permanent library ownership • Value: ~~${regPrice}~~ ➔ **FREE**`,
+              '```diff',
+              `- Regular Price: ${regPrice}`,
+              `+ Promotional:   ${sym} 0.00 (-100%)`,
+              '```',
+            ].join('\n');
+          });
+
+          fields.push({
+            name: '100% Free to Keep ❖ Permanent Giveaways',
+            value: keepDescriptions.join('\n'),
+            inline: false,
+          });
+        }
+
+        if (freePlayEvents.length > 0) {
+          const eventDescriptions = freePlayEvents.map((deal) => {
+            const regPrice = deal.primaryDeal?.regularPrice
+              ? `${sym} ${deal.primaryDeal.regularPrice.toFixed(2)}`
+              : 'Standard';
+
+            return [
+              `❖ **${deal.title}** (Steam)`,
+              `  └─ Active Free Weekend promotion • Regular Price: ${regPrice}`,
+              '```diff',
+              `- Base Price:    ${regPrice}`,
+              `+ Weekend Play:  Free Access (Temporary)`,
+              '```',
+            ].join('\n');
+          });
+
+          fields.push({
+            name: 'Free Play Events ❖ Play for Free This Weekend',
+            value: eventDescriptions.join('\n'),
+            inline: false,
+          });
+        }
+
+        // Add store link buttons (up to 5 buttons in an Action Row)
+        const allFreeDeals = [...freeToKeep, ...freePlayEvents];
+        const seenButtonUrls = new Set();
+
+        for (const deal of allFreeDeals) {
+          if (buttons.length >= 5) break;
+
+          if (deal.primaryDeal?.url && !seenButtonUrls.has(deal.primaryDeal.url)) {
+            seenButtonUrls.add(deal.primaryDeal.url);
+            buttons.push({
+              type: 2, // BUTTON
+              style: 5, // LINK
+              label: `Claim on ${deal.primaryDeal.shopName}`,
+              url: deal.primaryDeal.url,
+            });
+          }
+
+          if (buttons.length < 5 && deal.steamAppId) {
+            const steamDbUrl = `https://steamdb.info/app/${deal.steamAppId}/`;
+            if (!seenButtonUrls.has(steamDbUrl)) {
+              seenButtonUrls.add(steamDbUrl);
+              buttons.push({
+                type: 2,
+                style: 5,
+                label: `SteamDB (${deal.title.substring(0, 15)})`,
+                url: steamDbUrl,
+              });
+            }
+          }
+        }
+
+        const components = buttons.length > 0 ? [{ type: 1, components: buttons.slice(0, 5) }] : [];
+        const featuredImage = allFreeDeals.find((d) => d.imageUrl)?.imageUrl || null;
+
+        const embed = {
+          title: 'zT Radar ❖ Free Play & Giveaway Intelligence',
+          description: 'Currently detected 100% free promotions and active Free Weekend events.',
+          color: freeToKeep.length > 0 ? PALETTE.SUCCESS : 0x9B59B6,
+          fields,
+          footer: {
+            text: `Currency: ${userCurrency} • Steam & Epic Games Store`,
+          },
+          timestamp: new Date().toISOString(),
+        };
+
+        if (featuredImage) {
+          embed.thumbnail = { url: featuredImage };
+        }
+
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
+            data: {
+              flags: MESSAGE_FLAGS.EPHEMERAL,
+              embeds: [embed],
+              components,
+            },
+          }),
+        };
+      } catch (err) {
+        console.error('Error executing /free-play-radar:', err);
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(
+            createEphemeralEmbed('Free Radar Error', 'Could not query active free game promotions. Please try again shortly.', PALETTE.DANGER)
+          ),
+        };
+      }
+    }
+
+    // Command: /free-radar-dm <enabled>
+    if (name === 'free-radar-dm') {
+      const enabledOpt = options?.find((opt) => opt.name === 'enabled');
+      const isEnabled = Boolean(enabledOpt?.value);
+
+      try {
+        await docClient.send(
+          new UpdateCommand({
+            TableName: TABLE_NAME,
+            Key: {
+              PK: `USER#${userId}`,
+              SK: 'CONFIG',
+            },
+            UpdateExpression: 'SET alert_global_free = :val, updated_at = :now',
+            ExpressionAttributeValues: {
+              ':val': isEnabled,
+              ':now': new Date().toISOString(),
+            },
+          })
+        );
+
+        const embed = isEnabled
+          ? {
+              title: 'Global Free Alerts Enabled ❖ Direct Messages Active',
+              description: [
+                'You will now receive automated direct messages whenever new **100% free games** (Steam & Epic Games Store) or **Free Weekend events** go live, without needing to add them to your personal wishlist.',
+                '',
+                '▸ **Alert Types**: Permanent giveaways & temporary Free Weekend access.',
+                '▸ **Throttling**: Capped at max 3 deal notifications per hourly scanner cycle.',
+                '▸ **Store Whitelist**: Steam and Epic Games Store.',
+                '',
+                '*You can toggle this off anytime with `/free-radar-dm enabled:False`.*',
+              ].join('\n'),
+              color: PALETTE.SUCCESS,
+              footer: { text: 'zT Radar • Global Free Play Dispatch' },
+              timestamp: new Date().toISOString(),
+            }
+          : {
+              title: 'Global Free Alerts Disabled',
+              description: [
+                'You have disabled automated direct messages for free games and Free Weekend events.',
+                'You will still receive notifications for games specifically added to your personal wishlist.',
+              ].join('\n'),
+              color: PALETTE.NEUTRAL,
+              footer: { text: 'zT Radar • Global Free Play Dispatch' },
+              timestamp: new Date().toISOString(),
+            };
+
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
+            data: {
+              flags: MESSAGE_FLAGS.EPHEMERAL,
+              embeds: [embed],
+            },
+          }),
+        };
+      } catch (err) {
+        console.error('Error updating user alert_global_free setting:', err);
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(
+            createEphemeralEmbed('Operation Failed', 'Unable to update free deal alert settings. Please try again.', PALETTE.DANGER)
+          ),
+        };
+      }
     }
 
     // Command: /steam-link <target>

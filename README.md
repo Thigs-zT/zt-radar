@@ -105,6 +105,7 @@ Discord interaction responses impose a strict 4096-character limit on embed desc
 | `/steam-trending` | *None* | Display the top 10 trending and surging titles on the Steam Storefront. |
 | `/steam-most-played`| *None* | Display the official top 10 most played games on Steam by live concurrent player count. |
 | `/platform-status` | *None* | Audit operational health and latency for Steam, Epic Games, PlayStation Network, and Xbox Live. |
+| `/free-play-radar` | *None* | Inspect all active 100% free games to keep (Epic/Steam) and temporary Free Weekend events. |
 
 ### 2. Personal Wishlist & Radar
 
@@ -115,6 +116,7 @@ Discord interaction responses impose a strict 4096-character limit on embed desc
 | `/wishlist list` | *None* | View your monitored wishlist with interactive pagination buttons (10 items/page). |
 | `/wishlist clear` | *None* | Instantly remove all monitored games from your wishlist via parallelized DynamoDB batch writes. |
 | `/wishlist sync-steam`| `[target] [min_discount] [min_rating]` | Bulk-import your public Steam wishlist using Valve's `IWishlistService` with quality thresholds. |
+| `/free-radar-dm` | `<enabled>` | Toggle automated direct message alerts for all free games and free weekends independent of wishlist. |
 
 ### 3. Steam Ecosystem Identity
 
