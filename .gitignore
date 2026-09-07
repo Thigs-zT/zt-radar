@@ -1,5 +1,6 @@
 node_modules/
 .env
+.env.*
 .aws-sam/
 samconfig.toml
 response.json
