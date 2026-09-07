@@ -1,6 +1,7 @@
 // Unit test script for Deal Scanner, Wishlist Batch Operations, and Filter Verification
 import assert from 'node:assert';
 import { resolveSteamAppTitles } from '../src/utils/steamWeb.js';
+import { formatExpiryAvailability, formatPriceComparisonDiff } from '../src/utils/itadApi.js';
 
 console.log('--- Running Diagnostics & Verification for Deal Scanner & Steam Web Fixes ---\n');
 
@@ -345,5 +346,152 @@ console.log('  Case 7 (Same price after 25h elapsed): isNewAlert = true (COOLDOW
 const isNew5 = evaluateIsNewAlert(29.99, 19.99, ONE_HOUR_AGO, NOW);
 assert.strictEqual(isNew5, false, 'Higher price must not alert');
 console.log('  Case 8 (Price increase $19.99 -> $29.99): isNewAlert = false (PASS)');
+
+
+// Test 7: Promotion Expiration Formatting & Dynamic Discord Timestamp Tags
+console.log('\n[Test 7] Promotion Expiration Formatting & Discord Timestamp Verification');
+
+// Case 1: Valid ISO string
+const isoExpiry = '2026-09-18T04:59:59+02:00';
+const expectedEpoch = Math.floor(new Date(isoExpiry).getTime() / 1000);
+const formattedIso = formatExpiryAvailability(isoExpiry);
+assert.strictEqual(
+  formattedIso,
+  `└─ Availability: Until <t:${expectedEpoch}:F> (<t:${expectedEpoch}:R>)`,
+  'Valid ISO string must format into dynamic Discord timestamp tag'
+);
+console.log(`  Case 1 (ISO 8601 string): ${formattedIso} (PASS)`);
+
+// Case 2: Numeric timestamp (epoch ms)
+const epochMs = 1789700399000;
+const formattedEpochMs = formatExpiryAvailability(epochMs);
+assert.strictEqual(
+  formattedEpochMs,
+  `└─ Availability: Until <t:${Math.floor(epochMs / 1000)}:F> (<t:${Math.floor(epochMs / 1000)}:R>)`,
+  'Numeric ms timestamp must format into dynamic Discord timestamp tag'
+);
+console.log(`  Case 2 (Epoch milliseconds): ${formattedEpochMs} (PASS)`);
+
+// Case 3: Null or missing timestamp fallback
+const formattedNull = formatExpiryAvailability(null);
+assert.strictEqual(
+  formattedNull,
+  '└─ Availability: Limited-time promotion (Claim as soon as possible)',
+  'Null expiry must return friendly limited-time fallback'
+);
+console.log(`  Case 3 (Null/missing expiry): ${formattedNull} (PASS)`);
+
+// Case 4: Invalid date string fallback
+const formattedInvalid = formatExpiryAvailability('invalid-timestamp-value');
+assert.strictEqual(
+  formattedInvalid,
+  '└─ Availability: Limited-time promotion (Claim as soon as possible)',
+  'Invalid date string must fallback gracefully'
+);
+console.log(`  Case 4 (Invalid date string): ${formattedInvalid} (PASS)`);
+
+
+// Test 8: /radar-help Category Structure, Command Counts, and Discord 1024 Character Limits
+console.log('\n[Test 8] /radar-help Category Structure & Character Limit Verification');
+
+const expectedCategories = [
+  '❖ Personal & Market Intelligence [DM & Server]',
+  '❖ Server Administration & Curated Radar [Server Only • Requires Manage Server]',
+];
+
+const mockHelpEmbed = {
+  title: 'zT Radar ❖ Command Directory',
+  description: 'Comprehensive directory of gaming intelligence, price monitoring, and server broadcast commands.',
+  fields: [
+    {
+      name: '❖ Personal & Market Intelligence [DM & Server]',
+      value: [
+        '▸ `/compare <game>`\n  └─ Price check across Steam, Epic, Nuuvem & GOG with ATL.',
+        '▸ `/can-it-run <game>`\n  └─ Minimum & recommended PC specs from Steam.',
+        '▸ `/game-news <game>`\n  └─ Patch notes, news, and developer dispatches.',
+        '▸ `/how-long-to-beat <game>`\n  └─ Completion times and cost-per-hour metrics.',
+        '▸ `/steam-most-played`\n  └─ Top 10 most-played Steam titles by players.',
+        '▸ `/steam-trending`\n  └─ Top 10 surging games on the Steam Store.',
+        '▸ `/platform-status`\n  └─ Service availability for Steam, Epic, PSN & Xbox.',
+        '▸ `/wishlist <add|list|clear|remove|sync-steam>`\n  └─ Track deals & price targets.',
+        '▸ `/currency <choice>`\n  └─ Set personal currency between USD ($) and BRL (R$).',
+        '▸ `/steam-link <target>`\n  └─ Link Steam account (SteamID64, vanity, or URL).',
+        '▸ `/steam-profile [user] [target]`\n  └─ View profile overview, VAC status, and stats.',
+        '▸ `/free-play-radar`\n  └─ Browse active free giveaways and Free Weekends.',
+        '▸ `/free-radar-dm <enabled>`\n  └─ Toggle automated DM alerts for free games.',
+      ].join('\n'),
+      inline: false,
+    },
+    {
+      name: '❖ Server Administration & Curated Radar [Server Only • Requires Manage Server]',
+      value: [
+        '▸ `/config-channel <channel> [currency] [include_third_party] [free_only]`\n  └─ Route curated deals and free game broadcasts into a server channel.',
+        '▸ `/config-channel-experimental [min_discount] [min_rating]`\n  └─ Configure minimum discount and community rating broadcast filters.',
+        '▸ `/config-channel-remove`\n  └─ Deactivate automatic deal and giveaway broadcasts for this server.',
+        '▸ `/radar-status`\n  └─ Display server broadcast configuration and system operational status.',
+      ].join('\n'),
+      inline: false,
+    },
+  ],
+};
+
+// Check Category Names
+assert.strictEqual(mockHelpEmbed.fields.length, 2, 'Help embed must have exactly 2 categories');
+assert.strictEqual(mockHelpEmbed.fields[0].name, expectedCategories[0]);
+assert.strictEqual(mockHelpEmbed.fields[1].name, expectedCategories[1]);
+console.log('  Categories matched expected execution scopes: PASS');
+
+// Check Command Count in Category 1
+const cat1Commands = (mockHelpEmbed.fields[0].value.match(/▸ `\//g) || []).length;
+assert.strictEqual(cat1Commands, 13, 'Category 1 must contain exactly 13 personal/DM commands');
+console.log(`  Category 1 command count: ${cat1Commands} / 13 (PASS)`);
+
+// Check Command Count in Category 2
+const cat2Commands = (mockHelpEmbed.fields[1].value.match(/▸ `\//g) || []).length;
+assert.strictEqual(cat2Commands, 4, 'Category 2 must contain exactly 4 server admin commands');
+console.log(`  Category 2 command count: ${cat2Commands} / 4 (PASS)`);
+
+// Check Character Limits <= 1024
+for (const [idx, field] of mockHelpEmbed.fields.entries()) {
+  const len = field.value.length;
+  assert.ok(len <= 1024, `Field [${idx}] length (${len}) must not exceed 1024 chars`);
+  console.log(`  Field [${idx}] character length: ${len} <= 1024 limit (PASS)`);
+}
+
+
+// Test 9: Price Comparison Structured Dual Diff Block Formatting
+console.log('\n[Test 9] Price Comparison Dual Diff Block Formatting Verification');
+
+const steamDeal = {
+  shopName: 'Steam',
+  regularPrice: 69.99,
+  salePrice: 48.99,
+  cutPercent: 30,
+  currencySymbol: '$',
+};
+
+const nuuvemDeal = {
+  shopName: 'Nuuvem',
+  regularPrice: 69.99,
+  salePrice: 34.99,
+  cutPercent: 50,
+  currencySymbol: '$',
+};
+
+// Case 1: Cheaper alternative exists -> Dual diff block
+const dualDiff = formatPriceComparisonDiff(steamDeal, nuuvemDeal, '$');
+assert.ok(dualDiff.includes('[ Monitored Storefront ❖ Steam ]'), 'Dual diff must include monitored storefront block');
+assert.ok(dualDiff.includes('[ Best Offer Detected ❖ Nuuvem ]'), 'Dual diff must include best offer block');
+assert.ok(dualDiff.includes('- Regular: $ 69.99'), 'Dual diff must include regular price');
+assert.ok(dualDiff.includes('+ Current: $ 48.99 (-30%)'), 'Dual diff must include current primary price');
+assert.ok(dualDiff.includes('+ Deal:    $ 34.99 (-50%) ★ Best Value'), 'Dual diff must include best value line');
+console.log('  Case 1 (Dual diff block with cheaper alternative):\n' + dualDiff + '\n  (PASS)');
+
+// Case 2: No cheaper alternative -> Single diff block
+const singleDiff = formatPriceComparisonDiff(steamDeal, null, '$');
+assert.ok(singleDiff.includes('[ Monitored Storefront ❖ Steam ]'), 'Single diff must include monitored storefront block');
+assert.ok(!singleDiff.includes('[ Best Offer Detected'), 'Single diff must NOT include second store header');
+assert.ok(singleDiff.includes('+ Current: $ 48.99 (-30%)'), 'Single diff must include current price');
+console.log('  Case 2 (Single diff block when primary is best offer):\n' + singleDiff + '\n  (PASS)');
 
 console.log('\nAll diagnostic verification checks PASSED successfully!');

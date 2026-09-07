@@ -9,7 +9,13 @@ import {
   UpdateCommand,
   BatchWriteCommand,
 } from '@aws-sdk/lib-dynamodb';
-import { searchGamesForAutocomplete, getGameDealInfo, getMarketOverviewDeals } from '../utils/itadApi.js';
+import {
+  searchGamesForAutocomplete,
+  getGameDealInfo,
+  getMarketOverviewDeals,
+  formatExpiryAvailability,
+  formatPriceComparisonDiff,
+} from '../utils/itadApi.js';
 import {
   checkPlatformStatuses,
   getSteamTrendingGames,
@@ -1119,16 +1125,14 @@ export const handler = async (event) => {
         const sym = dealInfo.primaryDeal.currencySymbol || (preferredCurrency === 'BRL' ? 'R$' : '$');
         const bestOffer = dealInfo.cheaperAlternative || dealInfo.primaryDeal;
 
-        const diffBlock = [
-          '```diff',
-          `- Regular Price: ${sym} ${dealInfo.primaryDeal.regularPrice.toFixed(2)}`,
-          `+ Current Best:  ${sym} ${bestOffer.salePrice.toFixed(2)} (-${bestOffer.cutPercent}%) at ${bestOffer.shopName}`,
-          '```',
-        ].join('\n');
+        const diffBlock = formatPriceComparisonDiff(dealInfo.primaryDeal, dealInfo.cheaperAlternative, sym);
+        const fieldName = dealInfo.cheaperAlternative
+          ? `Price Comparison ❖ ${dealInfo.primaryDeal.shopName} vs ${dealInfo.cheaperAlternative.shopName}`
+          : `Price Overview ❖ ${dealInfo.primaryDeal.shopName}`;
 
         const fields = [
           {
-            name: 'Price Overview',
+            name: fieldName,
             value: diffBlock,
             inline: false,
           },
@@ -1291,90 +1295,41 @@ export const handler = async (event) => {
     if (name === 'radar-help') {
       const helpEmbed = {
         title: 'zT Radar ❖ Command Directory',
-        description: 'Comprehensive guide to monitoring sales, setting price ceilings, and game intelligence.',
+        description: 'Comprehensive directory of gaming intelligence, price monitoring, and server broadcast commands.',
         color: PALETTE.BRAND,
         fields: [
           {
-            name: 'Game Intelligence & Hardware Suite',
+            name: '❖ Personal & Market Intelligence [DM & Server]',
             value: [
-              '▸ `/compare <game>`',
-              '  └─ Real-time price check comparing Steam, Epic, Nuuvem and GOG with historical low.',
-              '▸ `/can-it-run <game>`',
-              '  └─ Official minimum & recommended PC system specifications from Steam.',
-              '▸ `/game-news <game>`',
-              '  └─ Official developer dispatches, patch notes, and news updates.',
-              '▸ `/how-long-to-beat <game>`',
-              '  └─ Average completion times and live Cost-per-Hour entertainment analysis.',
-              '▸ `/steam-most-played`',
-              '  └─ Official live top 10 most-played games on Steam by concurrent players.',
-              '▸ `/steam-trending`',
-              '  └─ Display live top 10 surging games on the Steam Storefront.',
-              '▸ `/platform-status`',
-              '  └─ Real-time operational availability and latency across Steam, Epic, PSN, and Xbox.',
+              '▸ `/compare <game>`\n  └─ Price check across Steam, Epic, Nuuvem & GOG with ATL.',
+              '▸ `/can-it-run <game>`\n  └─ Minimum & recommended PC specs from Steam.',
+              '▸ `/game-news <game>`\n  └─ Patch notes, news, and developer dispatches.',
+              '▸ `/how-long-to-beat <game>`\n  └─ Completion times and cost-per-hour metrics.',
+              '▸ `/steam-most-played`\n  └─ Top 10 most-played Steam titles by players.',
+              '▸ `/steam-trending`\n  └─ Top 10 surging games on the Steam Store.',
+              '▸ `/platform-status`\n  └─ Service availability for Steam, Epic, PSN & Xbox.',
+              '▸ `/wishlist <add|list|clear|remove|sync-steam>`\n  └─ Track deals & price targets.',
+              '▸ `/currency <choice>`\n  └─ Set personal currency between USD ($) and BRL (R$).',
+              '▸ `/steam-link <target>`\n  └─ Link Steam account (SteamID64, vanity, or URL).',
+              '▸ `/steam-profile [user] [target]`\n  └─ View profile overview, VAC status, and stats.',
+              '▸ `/free-play-radar`\n  └─ Browse active free giveaways and Free Weekends.',
+              '▸ `/free-radar-dm <enabled>`\n  └─ Toggle automated DM alerts for free games.',
             ].join('\n'),
             inline: false,
           },
           {
-            name: 'Personal Wishlist Management',
+            name: '❖ Server Administration & Curated Radar [Server Only • Requires Manage Server]',
             value: [
-              '▸ `/wishlist add <game> [target_price]`',
-              '  └─ Register a game to monitor. Live search suggestions included.',
-              '▸ `/wishlist remove <game>`',
-              '  └─ Delete a game directly from your personal tracked list.',
-              '▸ `/wishlist list`',
-              '  └─ Display all tracked games with targets and currency settings.',
-              '▸ `/wishlist clear`',
-              '  └─ Wipe your entire personal monitoring list at once.',
-              '▸ `/wishlist sync-steam [target] [min_discount] [min_rating]`',
-              '  └─ Bulk-import your public Steam wishlist with configurable discount & rating thresholds.',
-            ].join('\n'),
-            inline: false,
-          },
-          {
-            name: 'Currency & Preferences',
-            value: [
-              '▸ `/currency <choice>`',
-              '  └─ Set alert formatting between **USD ($)** and **BRL (R$)**.',
-            ].join('\n'),
-            inline: false,
-          },
-          {
-            name: 'Steam Intelligence & Account Linking',
-            value: [
-              '▸ `/steam-link <target>`',
-              '  └─ Link your Steam profile (by SteamID64, profile link, or custom vanity URL).',
-              '▸ `/steam-profile [user] [target]`',
-              '  └─ Comprehensive profile intelligence, VAC/ban records, and library statistics.',
-            ].join('\n'),
-            inline: false,
-          },
-          {
-            name: 'Free Play & Giveaway Intelligence',
-            value: [
-              '▸ `/free-play-radar`',
-              '  └─ Inspect all active 100% free games to keep and temporary Free Weekend events.',
-              '▸ `/free-radar-dm <enabled>`',
-              '  └─ Toggle automated direct message alerts for all free games and free weekends.',
-            ].join('\n'),
-            inline: false,
-          },
-          {
-            name: 'Server Broadcast Administration',
-            value: [
-              '▸ `/config-channel <channel> [currency] [include_third_party] [free_only]`',
-              '  └─ Route curated deals into a designated server channel.',
-              '▸ `/config-channel-experimental [min_discount] [min_rating]`',
-              '  └─ [Admin] Override default heuristic discount/score thresholds.',
-              '▸ `/config-channel-remove`',
-              '  └─ Deactivate automatic broadcasts for this server.',
-              '▸ `/radar-status`',
-              '  └─ Inquire system metrics, community wishlist top 5, and guild parameters.',
+              '▸ `/config-channel <channel> [currency] [include_third_party] [free_only]`\n  └─ Route curated deals and free game broadcasts into a server channel.',
+              '▸ `/config-channel-experimental [min_discount] [min_rating]`\n  └─ Configure minimum discount and community rating broadcast filters.',
+              '▸ `/config-channel-remove`\n  └─ Deactivate automatic deal and giveaway broadcasts for this server.',
+              '▸ `/radar-status`\n  └─ Display server broadcast configuration and system operational status.',
             ].join('\n'),
             inline: false,
           },
         ],
         footer: {
-          text: 'zT Radar • Production Architecture',
+          text: 'zT Radar • Gaming Intelligence & Deal Radar',
         },
       };
 
@@ -1440,10 +1395,12 @@ export const handler = async (event) => {
             const regPrice = deal.primaryDeal?.regularPrice
               ? `${sym} ${deal.primaryDeal.regularPrice.toFixed(2)}`
               : 'Paid';
+            const expiryText = formatExpiryAvailability(deal.expiry || deal.primaryDeal?.expiry);
 
             return [
               `❖ **${deal.title}** (${deal.primaryDeal.shopName})`,
               `  └─ Claim for permanent library ownership • Value: ~~${regPrice}~~ ➔ **FREE**`,
+              `  ${expiryText}`,
               '```diff',
               `- Regular Price: ${regPrice}`,
               `+ Promotional:   ${sym} 0.00 (-100%)`,
@@ -1463,10 +1420,12 @@ export const handler = async (event) => {
             const regPrice = deal.primaryDeal?.regularPrice
               ? `${sym} ${deal.primaryDeal.regularPrice.toFixed(2)}`
               : 'Standard';
+            const expiryText = formatExpiryAvailability(deal.expiry || deal.primaryDeal?.expiry);
 
             return [
               `❖ **${deal.title}** (Steam)`,
               `  └─ Active Free Weekend promotion • Regular Price: ${regPrice}`,
+              `  ${expiryText}`,
               '```diff',
               `- Base Price:    ${regPrice}`,
               `+ Weekend Play:  Free Access (Temporary)`,

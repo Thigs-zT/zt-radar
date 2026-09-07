@@ -73,6 +73,70 @@ export function isCuratedGame(title, storeName, imageUrl, includeThirdParty = fa
 }
 
 /**
+ * Formats a deal expiration timestamp into a dynamic Discord timestamp tag or friendly fallback.
+ * @param {string|number|Date|null} expiry
+ * @returns {string}
+ */
+export function formatExpiryAvailability(expiry) {
+  if (!expiry) {
+    return '└─ Availability: Limited-time promotion (Claim as soon as possible)';
+  }
+  try {
+    let date;
+    if (typeof expiry === 'number') {
+      date = expiry < 10000000000 ? new Date(expiry * 1000) : new Date(expiry);
+    } else {
+      date = new Date(expiry);
+    }
+    const time = date.getTime();
+    if (isNaN(time)) {
+      return '└─ Availability: Limited-time promotion (Claim as soon as possible)';
+    }
+    const unixEpoch = Math.floor(time / 1000);
+    return `└─ Availability: Until <t:${unixEpoch}:F> (<t:${unixEpoch}:R>)`;
+  } catch {
+    return '└─ Availability: Limited-time promotion (Claim as soon as possible)';
+  }
+}
+
+/**
+ * Formats price comparison into structured dual diff blocks with equal visual hierarchy.
+ * @param {object} primaryDeal
+ * @param {object|null} cheaperAlternative
+ * @param {string} fallbackSym
+ * @returns {string}
+ */
+export function formatPriceComparisonDiff(primaryDeal, cheaperAlternative, fallbackSym = '$') {
+  const primarySym = primaryDeal?.currencySymbol || fallbackSym;
+  const primaryCut = primaryDeal?.cutPercent > 0 ? ` (-${primaryDeal.cutPercent}%)` : '';
+
+  if (!cheaperAlternative) {
+    return [
+      '```diff',
+      `[ Monitored Storefront ❖ ${primaryDeal?.shopName || 'Store'} ]`,
+      `- Regular: ${primarySym} ${Number(primaryDeal?.regularPrice || 0).toFixed(2)}`,
+      `+ Current: ${primarySym} ${Number(primaryDeal?.salePrice || 0).toFixed(2)}${primaryCut}`,
+      '```',
+    ].join('\n');
+  }
+
+  const altSym = cheaperAlternative.currencySymbol || primarySym;
+  const altCut = cheaperAlternative.cutPercent > 0 ? ` (-${cheaperAlternative.cutPercent}%)` : '';
+
+  return [
+    '```diff',
+    `[ Monitored Storefront ❖ ${primaryDeal?.shopName || 'Store'} ]`,
+    `- Regular: ${primarySym} ${Number(primaryDeal?.regularPrice || 0).toFixed(2)}`,
+    `+ Current: ${primarySym} ${Number(primaryDeal?.salePrice || 0).toFixed(2)}${primaryCut}`,
+    '',
+    `[ Best Offer Detected ❖ ${cheaperAlternative.shopName || 'Store'} ]`,
+    `- Regular: ${altSym} ${Number(cheaperAlternative.regularPrice || 0).toFixed(2)}`,
+    `+ Deal:    ${altSym} ${Number(cheaperAlternative.salePrice || 0).toFixed(2)}${altCut} ★ Best Value`,
+    '```',
+  ].join('\n');
+}
+
+/**
  * Autocomplete searching Steam Store official catalog (canonical) + Epic Games Store exclusives.
  * Returns empty array when query is empty, only showing results when the user starts typing.
  */
@@ -315,6 +379,7 @@ export async function getGameDealInfo(rawGameIdentifier, preferredCurrency = 'US
                   regularPrice: d.regular.amount,
                   cutPercent: d.cut,
                   url: d.url,
+                  expiry: d.expiry || null,
                 };
               }
             }
@@ -355,6 +420,7 @@ export async function getGameDealInfo(rawGameIdentifier, preferredCurrency = 'US
       regularPrice: primaryRaw.regularPrice,
       cutPercent: primaryRaw.cutPercent,
       url: primaryRaw.url,
+      expiry: primaryRaw.expiry || null,
       currency,
       currencySymbol,
     };
@@ -366,6 +432,7 @@ export async function getGameDealInfo(rawGameIdentifier, preferredCurrency = 'US
         regularPrice: secondaryRaw.regularPrice,
         cutPercent: secondaryRaw.cutPercent,
         url: secondaryRaw.url,
+        expiry: secondaryRaw.expiry || null,
         currency,
         currencySymbol,
       }
@@ -396,6 +463,7 @@ export async function getGameDealInfo(rawGameIdentifier, preferredCurrency = 'US
       dealType: isFree ? 'FREE_TO_KEEP' : 'CURATED_DEAL',
       isAllTimeLow,
       allTimeLowPrice: historyLow,
+      expiry: primaryDeal.expiry || cheaperAlternative?.expiry || null,
       primaryDeal,
       cheaperAlternative,
       storeBreakdown,
@@ -511,12 +579,14 @@ export async function getMarketOverviewDeals(includeThirdParty = false, preferre
                 reviewScore: item.reviews?.steam?.score ?? item.reviews?.metacritic?.score ?? null,
                 steamAppId: item.appid || item.steam_appid || null,
                 dealType: 'FREE_TO_KEEP',
+                expiry: item.deal?.expiry || null,
                 primaryDeal: {
                   shopName,
                   salePrice: 0,
                   regularPrice: item.deal?.regular?.amount ?? 0,
                   cutPercent: 100,
                   url: item.deal?.url,
+                  expiry: item.deal?.expiry || null,
                   currency: preferredCurrency === 'BRL' ? 'BRL' : 'USD',
                   currencySymbol: preferredCurrency === 'BRL' ? 'R$' : '$',
                 },

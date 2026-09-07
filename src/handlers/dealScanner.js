@@ -1,6 +1,11 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, ScanCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
-import { getGameDealInfo, getMarketOverviewDeals } from '../utils/itadApi.js';
+import {
+  getGameDealInfo,
+  getMarketOverviewDeals,
+  formatExpiryAvailability,
+  formatPriceComparisonDiff,
+} from '../utils/itadApi.js';
 
 const ddbClient = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(ddbClient);
@@ -259,29 +264,18 @@ export const handler = async () => {
           console.log(`DM Alert triggered for user ${userId} on ${resolvedTitle}: ${alertReason}`);
 
           const primarySym = deal.primaryDeal.currencySymbol || sym;
-          const diffPricing = [
-            '```diff',
-            `- Regular Price: ${primarySym} ${deal.primaryDeal.regularPrice.toFixed(2)}`,
-            `+ Promotion:     ${primarySym} ${deal.primaryDeal.salePrice.toFixed(2)} (-${deal.primaryDeal.cutPercent}%)`,
-            '```',
-          ].join('\n');
+          const diffPricing = formatPriceComparisonDiff(deal.primaryDeal, deal.cheaperAlternative, primarySym);
+          const fieldName = deal.cheaperAlternative
+            ? `Storefront Comparison ❖ ${deal.primaryDeal.shopName} vs ${deal.cheaperAlternative.shopName}`
+            : `Storefront Offer ❖ ${deal.primaryDeal.shopName}`;
 
           const fields = [
             {
-              name: `Storefront Offer ❖ ${deal.primaryDeal.shopName}`,
+              name: fieldName,
               value: diffPricing,
               inline: false,
             },
           ];
-
-          if (deal.cheaperAlternative) {
-            const altSym = deal.cheaperAlternative.currencySymbol || primarySym;
-            fields.push({
-              name: `Cheaper at ${deal.cheaperAlternative.shopName}!`,
-              value: `▸ Price: **${altSym} ${deal.cheaperAlternative.salePrice.toFixed(2)}** (-${deal.cheaperAlternative.cutPercent}%)`,
-              inline: false,
-            });
-          }
 
           if (deal.allTimeLowPrice !== null) {
             const atlText = (deal.isAllTimeLow && hasActiveDiscount)
@@ -419,9 +413,10 @@ export const handler = async () => {
             });
           }
 
+          const expiryText = formatExpiryAvailability(deal.expiry || deal.primaryDeal?.expiry);
           const embed = {
             title: `zT Radar ❖ Free Game Alert: ${deal.title}`,
-            description: `**${alertReason}**\nThis promotion was detected live on ${deal.primaryDeal.shopName}.`,
+            description: `**${alertReason}**\nThis promotion was detected live on ${deal.primaryDeal.shopName}.\n${expiryText}`,
             color: embedColor,
             fields,
             footer: {
@@ -507,13 +502,12 @@ export const handler = async () => {
           let embedColor = ALERT_PALETTE.CURATED_DEAL;
           let bannerHeadline = `High-value promotion detected (**-${cut}%**)!`;
 
-          let diffPricing = [
-            '```diff',
-            `- Regular Price: ${sym} ${deal.primaryDeal.regularPrice.toFixed(2)}`,
-            `+ Sale Price:    ${sym} ${deal.primaryDeal.salePrice.toFixed(2)} (-${deal.primaryDeal.cutPercent}%)`,
-            '```',
-          ].join('\n');
+          let expiryNotice = '';
+          if (isFreeToKeep || isFreeWeekend || deal.expiry || deal.primaryDeal?.expiry) {
+            expiryNotice = `\n${formatExpiryAvailability(deal.expiry || deal.primaryDeal?.expiry)}`;
+          }
 
+          let diffPricing;
           if (isFreeToKeep) {
             embedColor = ALERT_PALETTE.FREE_TO_KEEP;
             bannerHeadline = 'Claim this game for **FREE** to keep permanently in your library!';
@@ -532,11 +526,24 @@ export const handler = async () => {
               '+ Temporary:     FREE PLAY EVENT (Active Weekend Access)',
               '```',
             ].join('\n');
+          } else if (deal.cheaperAlternative) {
+            diffPricing = formatPriceComparisonDiff(deal.primaryDeal, deal.cheaperAlternative, sym);
+          } else {
+            diffPricing = [
+              '```diff',
+              `- Regular Price: ${sym} ${deal.primaryDeal.regularPrice.toFixed(2)}`,
+              `+ Sale Price:    ${sym} ${deal.primaryDeal.salePrice.toFixed(2)} (-${deal.primaryDeal.cutPercent}%)`,
+              '```',
+            ].join('\n');
           }
+
+          const fieldName = (!isFree && deal.cheaperAlternative)
+            ? `Storefront Comparison ❖ ${deal.primaryDeal.shopName} vs ${deal.cheaperAlternative.shopName}`
+            : `Store Offer ❖ ${deal.primaryDeal.shopName}`;
 
           const fields = [
             {
-              name: `Store Offer ❖ ${deal.primaryDeal.shopName}`,
+              name: fieldName,
               value: diffPricing,
               inline: false,
             },
@@ -552,7 +559,7 @@ export const handler = async () => {
 
           const embed = {
             title: `zT Radar ❖ ${deal.title}`,
-            description: bannerHeadline,
+            description: `${bannerHeadline}${expiryNotice}`,
             color: embedColor,
             fields,
             footer: {
