@@ -541,10 +541,12 @@ export async function getMarketOverviewDeals(includeThirdParty = false, preferre
     const seenTitles = new Set();
 
     // 1. Fetch 100% Free Game Promotions (Keep Forever - Steam & Epic)
-    if (ITAD_API_KEY) {
+    const itadKey = process.env.ITAD_API_KEY || ITAD_API_KEY;
+    if (itadKey) {
       try {
+        const country = preferredCurrency === 'BRL' ? 'BR' : 'US';
         const storeFilter = includeThirdParty ? '&shops=61,16,35' : '&shops=61,16';
-        const itadFreeUrl = `${ITAD_BASE_URL}/deals/v2?key=${ITAD_API_KEY}&country=BR&limit=30&sort=-cut${storeFilter}`;
+        const itadFreeUrl = `${ITAD_BASE_URL}/deals/v2?key=${itadKey}&country=${country}&limit=30&sort=-cut${storeFilter}`;
         const itadRes = await fetch(itadFreeUrl, {
           headers: { 'User-Agent': USER_AGENT },
           signal: controller.signal,

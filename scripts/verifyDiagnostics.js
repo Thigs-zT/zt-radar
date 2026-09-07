@@ -1,7 +1,7 @@
 // Unit test script for Deal Scanner, Wishlist Batch Operations, and Filter Verification
 import assert from 'node:assert';
 import { resolveSteamAppTitles } from '../src/utils/steamWeb.js';
-import { formatExpiryAvailability, formatPriceComparisonDiff } from '../src/utils/itadApi.js';
+import { formatExpiryAvailability, formatPriceComparisonDiff, getMarketOverviewDeals } from '../src/utils/itadApi.js';
 
 console.log('--- Running Diagnostics & Verification for Deal Scanner & Steam Web Fixes ---\n');
 
@@ -493,5 +493,58 @@ assert.ok(singleDiff.includes('[ Monitored Storefront ❖ Steam ]'), 'Single dif
 assert.ok(!singleDiff.includes('[ Best Offer Detected'), 'Single diff must NOT include second store header');
 assert.ok(singleDiff.includes('+ Current: $ 48.99 (-30%)'), 'Single diff must include current price');
 console.log('  Case 2 (Single diff block when primary is best offer):\n' + singleDiff + '\n  (PASS)');
+
+
+// Test 10: Dynamic Regional Country Code in getMarketOverviewDeals Verification
+console.log('\n[Test 10] Dynamic Regional Country Code Routing Verification');
+
+const originalFetch = globalThis.fetch;
+const capturedUrls = [];
+
+globalThis.fetch = async (url, options) => {
+  const urlStr = typeof url === 'string' ? url : url.toString();
+  capturedUrls.push(urlStr);
+
+  if (urlStr.includes('cheapshark')) {
+    return {
+      ok: true,
+      json: async () => [],
+    };
+  }
+  if (urlStr.includes('featuredcategories')) {
+    return {
+      ok: true,
+      json: async () => ({ specials: { items: [] }, top_sellers: { items: [] } }),
+    };
+  }
+  return {
+    ok: true,
+    json: async () => ({ list: [] }),
+  };
+};
+
+try {
+  process.env.ITAD_API_KEY = 'mock_key_for_test';
+
+  // Case 1: preferredCurrency = 'USD' -> must route country=US
+  capturedUrls.length = 0;
+  await getMarketOverviewDeals(false, 'USD');
+  const usdUrl = capturedUrls.find((u) => u.includes('api.isthereanydeal.com/deals/v2'));
+  assert.ok(usdUrl, 'ITAD deals URL must be called when ITAD_API_KEY is present');
+  assert.ok(usdUrl.includes('country=US'), `Expected country=US in URL: ${usdUrl}`);
+  assert.ok(!usdUrl.includes('country=BR'), `URL must not contain hardcoded country=BR when currency is USD: ${usdUrl}`);
+  console.log(`  Case 1 (preferredCurrency: 'USD'): correctly routes country=US (PASS)`);
+
+  // Case 2: preferredCurrency = 'BRL' -> must route country=BR
+  capturedUrls.length = 0;
+  await getMarketOverviewDeals(false, 'BRL');
+  const brlUrl = capturedUrls.find((u) => u.includes('api.isthereanydeal.com/deals/v2'));
+  assert.ok(brlUrl, 'ITAD deals URL must be called for BRL');
+  assert.ok(brlUrl.includes('country=BR'), `Expected country=BR in URL: ${brlUrl}`);
+  assert.ok(!brlUrl.includes('country=US'), `URL must not contain country=US when currency is BRL: ${brlUrl}`);
+  console.log(`  Case 2 (preferredCurrency: 'BRL'): correctly routes country=BR (PASS)`);
+} finally {
+  globalThis.fetch = originalFetch;
+}
 
 console.log('\nAll diagnostic verification checks PASSED successfully!');
