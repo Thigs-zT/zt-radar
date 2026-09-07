@@ -268,4 +268,82 @@ const r6 = shouldAlertWishlistItem(freeDeal, defaultSyncedItem);
 assert.strictEqual(r6.shouldAlert, true, '100% Free giveaway MUST trigger');
 console.log('  Case 6 (100% Free giveaway promotion): shouldAlert = true (ALERTED - PASS)');
 
+
+// Test 6: Auto-Healing Titles & Anti-Amnesia Protection
+console.log('\n[Test 6] Auto-Healing Titles & Anti-Amnesia Protection Verification');
+
+// Part A: Auto-Heal Title Resolution
+function resolveDisplayTitle(itemTitle, dealTitle) {
+  return (dealTitle && !dealTitle.startsWith('Steam App #')) ? dealTitle : itemTitle;
+}
+
+function shouldAutoHeal(itemTitle, dealTitle) {
+  return Boolean(itemTitle?.startsWith('Steam App #') && dealTitle && !dealTitle.startsWith('Steam App #'));
+}
+
+// Case 1: Generic title auto-heals to real game name
+const genericItemTitle = 'Steam App #1086940';
+const resolvedDealTitle = "Baldur's Gate 3";
+const displayTitle1 = resolveDisplayTitle(genericItemTitle, resolvedDealTitle);
+const autoHealTriggered1 = shouldAutoHeal(genericItemTitle, resolvedDealTitle);
+
+assert.strictEqual(displayTitle1, "Baldur's Gate 3", 'Generic Steam App title must resolve to real deal title');
+assert.strictEqual(autoHealTriggered1, true, 'Auto-heal flag must be true when itemTitle starts with Steam App #');
+console.log('  Case 1 (Steam App #1086940 -> "Baldur\'s Gate 3"): Auto-heal = true (PASS)');
+
+// Case 2: Already clean title is preserved without redundant update
+const cleanItemTitle = 'Cyberpunk 2077';
+const displayTitle2 = resolveDisplayTitle(cleanItemTitle, 'Cyberpunk 2077');
+const autoHealTriggered2 = shouldAutoHeal(cleanItemTitle, 'Cyberpunk 2077');
+assert.strictEqual(displayTitle2, 'Cyberpunk 2077');
+assert.strictEqual(autoHealTriggered2, false, 'Clean title should not trigger redundant auto-heal');
+console.log('  Case 2 (Clean title preserved): Auto-heal = false (PASS)');
+
+// Case 3: Deal title also failed / fallback - preserve existing without corrupting
+const fallbackDealTitle = 'Steam App #999999';
+const displayTitle3 = resolveDisplayTitle(genericItemTitle, fallbackDealTitle);
+const autoHealTriggered3 = shouldAutoHeal(genericItemTitle, fallbackDealTitle);
+assert.strictEqual(displayTitle3, genericItemTitle);
+assert.strictEqual(autoHealTriggered3, false);
+console.log('  Case 3 (Fallback deal title avoids corrupting state): PASS');
+
+// Part B: Anti-Amnesia & 24h Deduplication Cooldown
+function evaluateIsNewAlert(effectivePrice, lastNotifiedPrice, lastNotifiedAt, now = Date.now()) {
+  const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+  return (
+    lastNotifiedPrice === null ||
+    effectivePrice < lastNotifiedPrice ||
+    ((now - lastNotifiedAt) >= ONE_DAY_MS && effectivePrice <= lastNotifiedPrice)
+  );
+}
+
+const NOW = 1725700000000;
+const ONE_HOUR_AGO = NOW - 1 * 60 * 60 * 1000;
+const TWENTY_FIVE_HOURS_AGO = NOW - 25 * 60 * 60 * 1000;
+
+// Case 4: First scan (never alerted) - triggers alert
+const isNew1 = evaluateIsNewAlert(19.99, null, 0, NOW);
+assert.strictEqual(isNew1, true, 'First-time deal (lastNotifiedPrice === null) must trigger');
+console.log('  Case 4 (First scan, lastNotifiedPrice = null): isNewAlert = true (PASS)');
+
+// Case 5: Consecutive scan 1 hour later at exact same price - MUST BE SUPPRESSED (anti-spam)
+const isNew2 = evaluateIsNewAlert(19.99, 19.99, ONE_HOUR_AGO, NOW);
+assert.strictEqual(isNew2, false, 'Same price within 24h must NOT trigger repeated DM');
+console.log('  Case 5 (Consecutive scan 1h later at same $19.99): isNewAlert = false (SUPPRESSED - PASS)');
+
+// Case 6: Price drops further (e.g. from $19.99 to $14.99) within 1 hour - MUST ALERT IMMEDIATELY
+const isNew3 = evaluateIsNewAlert(14.99, 19.99, ONE_HOUR_AGO, NOW);
+assert.strictEqual(isNew3, true, 'Lower price drop must alert immediately regardless of cooldown');
+console.log('  Case 6 (Price drop $19.99 -> $14.99 within 1h): isNewAlert = true (IMMEDIATE ALERT - PASS)');
+
+// Case 7: Same price after 24 hours elapsed - Re-alert permitted once per 24 hours
+const isNew4 = evaluateIsNewAlert(19.99, 19.99, TWENTY_FIVE_HOURS_AGO, NOW);
+assert.strictEqual(isNew4, true, 'Same price after 24h cooldown allows reminder alert');
+console.log('  Case 7 (Same price after 25h elapsed): isNewAlert = true (COOLDOWN EXPIRED - PASS)');
+
+// Case 8: Price increased (e.g. sale worsened or ended) - No alert
+const isNew5 = evaluateIsNewAlert(29.99, 19.99, ONE_HOUR_AGO, NOW);
+assert.strictEqual(isNew5, false, 'Higher price must not alert');
+console.log('  Case 8 (Price increase $19.99 -> $29.99): isNewAlert = false (PASS)');
+
 console.log('\nAll diagnostic verification checks PASSED successfully!');

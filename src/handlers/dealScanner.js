@@ -179,6 +179,29 @@ export const handler = async () => {
         const deal = await getGameDealInfo(item.external_game_id, preferredCurrency, item.game_title);
         if (!deal) continue;
 
+        // Auto-heal & clean resolved display title
+        const resolvedTitle = (deal.title && !deal.title.startsWith('Steam App #')) ? deal.title : item.game_title;
+
+        if (item.game_title?.startsWith('Steam App #') && deal.title && !deal.title.startsWith('Steam App #')) {
+          try {
+            await docClient.send(
+              new UpdateCommand({
+                TableName: TABLE_NAME,
+                Key: { PK: item.PK, SK: item.SK },
+                UpdateExpression: 'SET game_title = :title, updated_at = :now',
+                ExpressionAttributeValues: {
+                  ':title': deal.title,
+                  ':now': new Date().toISOString(),
+                },
+              })
+            );
+            item.game_title = deal.title;
+            console.log(`Auto-healed generic title for ${item.SK} -> "${deal.title}"`);
+          } catch (autoHealErr) {
+            console.error(`Failed to auto-heal generic title for ${item.SK}:`, autoHealErr.message || autoHealErr);
+          }
+        }
+
         const effectivePrice = deal.cheaperAlternative?.salePrice ?? deal.primaryDeal?.salePrice ?? 0;
         const effectiveCut = deal.cheaperAlternative?.cutPercent ?? deal.primaryDeal?.cutPercent ?? 0;
         const regularPrice = deal.cheaperAlternative?.regularPrice ?? deal.primaryDeal?.regularPrice ?? 0;
@@ -223,25 +246,17 @@ export const handler = async () => {
           }
         }
 
-        const lastPrice = item.last_notified_price !== undefined ? Number(item.last_notified_price) : null;
-        const isNewLowerPrice = lastPrice === null || effectivePrice < lastPrice;
+        const lastNotifiedPrice = item.last_notified_price !== undefined ? Number(item.last_notified_price) : null;
+        const lastNotifiedAt = item.last_notified_at ? new Date(item.last_notified_at).getTime() : 0;
+        const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 
-        if (lastPrice !== null && effectiveCut === 0) {
-          try {
-            await docClient.send(
-              new UpdateCommand({
-                TableName: TABLE_NAME,
-                Key: { PK: item.PK, SK: item.SK },
-                UpdateExpression: 'REMOVE last_notified_price, last_notified_at',
-              })
-            );
-          } catch (resetErr) {
-            console.error(`Failed to reset notification state for ${item.SK}:`, resetErr);
-          }
-        }
+        const isNewAlert =
+          lastNotifiedPrice === null ||
+          effectivePrice < lastNotifiedPrice ||
+          ((Date.now() - lastNotifiedAt) >= ONE_DAY_MS && effectivePrice <= lastNotifiedPrice);
 
-        if (shouldAlert && isNewLowerPrice) {
-          console.log(`DM Alert triggered for user ${userId} on ${item.game_title}: ${alertReason}`);
+        if (shouldAlert && isNewAlert) {
+          console.log(`DM Alert triggered for user ${userId} on ${resolvedTitle}: ${alertReason}`);
 
           const primarySym = deal.primaryDeal.currencySymbol || sym;
           const diffPricing = [
@@ -288,7 +303,7 @@ export const handler = async () => {
           }
 
           const embed = {
-            title: `zT Radar ❖ Wishlist Alert: ${item.game_title}`,
+            title: `zT Radar ❖ Wishlist Alert: ${resolvedTitle}`,
             description: `**${alertReason}**`,
             color: embedColor,
             fields,
@@ -312,10 +327,11 @@ export const handler = async () => {
                 new UpdateCommand({
                   TableName: TABLE_NAME,
                   Key: { PK: item.PK, SK: item.SK },
-                  UpdateExpression: 'SET last_notified_price = :price, last_notified_at = :notifiedAt',
+                  UpdateExpression: 'SET last_notified_price = :price, last_notified_at = :now, game_title = :title',
                   ExpressionAttributeValues: {
                     ':price': effectivePrice,
-                    ':notifiedAt': new Date().toISOString(),
+                    ':now': new Date().toISOString(),
+                    ':title': resolvedTitle,
                   },
                 })
               );
