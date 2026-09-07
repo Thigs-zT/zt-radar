@@ -1,5 +1,6 @@
 # zT Radar ❖ Serverless Gaming Intelligence Engine
 
+[![Discord Invite](https://img.shields.io/badge/Discord-Add_to_Server-5865F2?style=flat-square&logo=discord&logoColor=white)](https://discord.com/oauth2/authorize?client_id=1537623174211182712&permissions=314368&integration_type=0&scope=applications.commands+bot)
 [![Runtime: Node.js 22.x](https://img.shields.io/badge/Runtime-Node.js_22.x-339933?style=flat-square&logo=node.js&logoColor=white)](https://nodejs.org/)
 [![Compute: AWS Lambda Graviton](https://img.shields.io/badge/Compute-AWS_Lambda_Graviton_(arm64)-FF9900?style=flat-square&logo=awslambda&logoColor=white)](https://aws.amazon.com/lambda/)
 [![Database: DynamoDB Single-Table](https://img.shields.io/badge/Database-Amazon_DynamoDB_(On--Demand)-4053D6?style=flat-square&logo=amazondynamodb&logoColor=white)](https://aws.amazon.com/dynamodb/)
@@ -9,6 +10,14 @@
 [![License: ISC](https://img.shields.io/badge/License-ISC-blue?style=flat-square)](LICENSE)
 
 > A high-precision, serverless Discord intelligence bot engineered to deliver real-time multi-storefront video game price comparisons, historical all-time low tracking, PC hardware specifications, playtime analytics, and automated Steam ecosystem synchronization.
+
+### ❖ Quick Server Authorization
+
+[![Add zT Radar to Discord](https://img.shields.io/badge/Add_zT_Radar_to_Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.com/oauth2/authorize?client_id=1537623174211182712&permissions=314368&integration_type=0&scope=applications.commands+bot)
+
+▸ **One-Click Invite Link**: [Direct OAuth2 Authorization URL](https://discord.com/oauth2/authorize?client_id=1537623174211182712&permissions=314368&integration_type=0&scope=applications.commands+bot)  
+▸ **Least-Privilege Scopes**: `applications.commands` + `bot` (`Send Messages`, `Embed Links`, `Attach Files`, `Use External Emojis`).  
+▸ **Zero Gateway Overhead**: Operates 100% serverless via webhooks with zero message content access.
 
 ---
 
