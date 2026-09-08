@@ -904,6 +904,127 @@ export function filterBacklogData(games, preferredCurrency = 'USD') {
 }
 
 /**
+ * Pure function: Computes total base MSRP for unplayed backlog games from a price map.
+ * Sums regular base retail prices (ignoring temporary discount cuts), skips free titles,
+ * and tracks the count of successfully priced titles.
+ *
+ * @param {Array} backlogGames - Unplayed games list
+ * @param {Map|object} priceMap - Map or object of appId -> price info
+ * @param {string} [preferredCurrency='USD'] - 'USD' or 'BRL'
+ * @returns {object} { totalMsrp: number, pricedCount: number, totalUnplayed: number, currencySymbol: string, msrpFormatted: string, msrpSummary: string }
+ */
+export function calculateBacklogMsrp(backlogGames, priceMap, preferredCurrency = 'USD') {
+  const sym = preferredCurrency === 'BRL' ? 'R$' : '$';
+  const totalUnplayed = Array.isArray(backlogGames) ? backlogGames.length : 0;
+  let totalMsrp = 0;
+  let pricedCount = 0;
+
+  if (Array.isArray(backlogGames) && priceMap) {
+    for (const g of backlogGames) {
+      const appId = Number(g.appid || g.appId || 0);
+      const priceInfo = priceMap instanceof Map ? priceMap.get(appId) : priceMap[appId];
+      if (!priceInfo) continue;
+      if (priceInfo.isFree || priceInfo.isDelisted) continue;
+
+      const basePrice = Number(priceInfo.initial || priceInfo.final || priceInfo.price || 0);
+      if (basePrice > 0) {
+        totalMsrp += basePrice;
+        pricedCount += 1;
+      }
+    }
+  }
+
+  const formattedVal = totalMsrp.toFixed(2);
+  const msrpFormatted = `${sym} ${formattedVal}`;
+  const msrpSummary = `${msrpFormatted} (${pricedCount}/${totalUnplayed} priced)`;
+
+  return {
+    totalMsrp: Number(formattedVal),
+    pricedCount,
+    totalUnplayed,
+    totalBacklog: totalUnplayed,
+    currencySymbol: sym,
+    msrpFormatted,
+    formattedTotalMsrp: msrpFormatted,
+    msrpSummary,
+  };
+}
+
+/**
+ * Batch fetches Steam Storefront price overview for multiple application IDs.
+ * Divides IDs into chunks of 25 to respect URL and API limitations.
+ * Employs a defensive 1800ms timeout with AbortController.
+ *
+ * @param {Array<number|string>} appIds - List of Steam app IDs
+ * @param {string} countryCode - 'us' or 'br'
+ * @param {number} [maxBatch=100] - Maximum total app IDs to query
+ * @returns {Promise<Map<number, { initial: number, final: number, initialFormatted: string, finalFormatted: string, isFree: boolean, isDelisted?: boolean }>>}
+ */
+export async function batchFetchSteamAppPrices(appIds, countryCode = 'us', maxBatch = 100) {
+  const priceMap = new Map();
+  if (!Array.isArray(appIds) || appIds.length === 0) return priceMap;
+
+  const targetIds = appIds.slice(0, maxBatch).map(Number).filter(Boolean);
+  if (targetIds.length === 0) return priceMap;
+
+  const CHUNK_SIZE = 25;
+  const chunks = [];
+  for (let i = 0; i < targetIds.length; i += CHUNK_SIZE) {
+    chunks.push(targetIds.slice(i, i + CHUNK_SIZE));
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 1800);
+
+  try {
+    await Promise.all(
+      chunks.map(async (chunk) => {
+        try {
+          const url = `https://store.steampowered.com/api/appdetails?appids=${chunk.join(',')}&cc=${countryCode}&filters=price_overview`;
+          const res = await fetch(url, {
+            headers: { 'User-Agent': USER_AGENT },
+            signal: controller.signal,
+          });
+          if (!res.ok) return;
+          const data = await res.json();
+          if (!data || typeof data !== 'object') return;
+
+          for (const [idStr, appObj] of Object.entries(data)) {
+            const appId = Number(idStr);
+            if (!appObj?.success) {
+              priceMap.set(appId, { isDelisted: true });
+              continue;
+            }
+            if (appObj.data?.is_free) {
+              priceMap.set(appId, { isFree: true });
+              continue;
+            }
+            const overview = appObj.data?.price_overview;
+            if (overview) {
+              const initialCents = Number(overview.initial || overview.final || 0);
+              const finalCents = Number(overview.final || 0);
+              priceMap.set(appId, {
+                initial: initialCents / 100,
+                final: finalCents / 100,
+                initialFormatted: overview.initial_formatted || '',
+                finalFormatted: overview.final_formatted || '',
+                isFree: false,
+              });
+            }
+          }
+        } catch {
+          // Gracefully continue on chunk failure
+        }
+      })
+    );
+  } finally {
+    clearTimeout(timer);
+  }
+
+  return priceMap;
+}
+
+/**
  * End-to-end backlog telemetry retrieval and analysis for a Steam ID.
  */
 export async function calculateBacklogTelemetry(steamId64, apiKey, preferredCurrency = 'USD') {
@@ -921,9 +1042,34 @@ export async function calculateBacklogTelemetry(steamId64, apiKey, preferredCurr
   }
 
   const telemetry = filterBacklogData(library.games, preferredCurrency);
+  const countryCode = preferredCurrency === 'BRL' ? 'br' : 'us';
+
+  const backlogAppIds = telemetry.backlogGames.map((g) => g.appid);
+  let priceMap = new Map();
+  try {
+    priceMap = await batchFetchSteamAppPrices(backlogAppIds, countryCode, 100);
+  } catch {
+    // Non-blocking fallback
+  }
+
+  const msrpData = calculateBacklogMsrp(telemetry.backlogGames, priceMap, preferredCurrency);
+
+  const storePricesMap = {};
+  for (const [appId, p] of priceMap.entries()) {
+    if (p.isFree) {
+      storePricesMap[appId] = 'Free / Included';
+    } else if (p.isDelisted) {
+      storePricesMap[appId] = 'Delisted / Legacy';
+    } else if (p.finalFormatted) {
+      storePricesMap[appId] = p.finalFormatted;
+    }
+  }
+
   return {
     success: true,
     ...telemetry,
+    ...msrpData,
+    storePricesMap,
   };
 }
 
@@ -1030,23 +1176,21 @@ export function buildDuelEmbedPayload(comparison, summaryA, summaryB, page = 1) 
     `Total Time Invested: **${comparison.totalHoursA}h** vs **${comparison.totalHoursB}h** • **${commonCount}** Shared Titles`,
   ].join('\n');
 
-  const fields = [
-    {
-      name: `Shared Titles Playtime Comparison [Page ${currentPage}/${totalPages}]`,
-      value: diffBlocks || '*No shared titles on this page.*',
-      inline: false,
-    },
-  ];
-
-  const embed = {
-    title: 'Steam Library Duel',
+  const embed1 = {
     author: {
       name: `${personaA} vs ${personaB} • Steam Duel`,
       icon_url: avatarA || undefined,
     },
+    title: 'Steam Library Duel Overview',
     description: scoreboardDescription,
     color: 0x5865f2,
-    fields,
+    thumbnail: avatarA ? { url: avatarA } : undefined,
+  };
+
+  const embed2 = {
+    title: `Shared Titles Playtime Comparison [Page ${currentPage}/${totalPages}]`,
+    description: diffBlocks || '*No shared titles on this page.*',
+    color: 0x5865f2,
     thumbnail: avatarB ? { url: avatarB } : undefined,
     footer: {
       text: `Page ${currentPage} of ${totalPages} • zT Radar • Steam Duel`,
@@ -1076,7 +1220,7 @@ export function buildDuelEmbedPayload(comparison, summaryA, summaryB, page = 1) 
     },
   ] : [];
 
-  return { embed, embeds: [embed], components };
+  return { embed: embed1, embeds: [embed1, embed2], components };
 }
 
 /**
@@ -1101,7 +1245,7 @@ export async function buildBacklogEmbedPayload(telemetry, summary, page = 1, sto
   const unplayedList = await Promise.all(
     pageGames.map(async (g) => {
       const timeLabel = g.playtime_forever === 0 ? 'Never Opened (0m)' : `${g.playtime_forever}m played`;
-      let priceLabel = storePricesMap?.[g.appid];
+      let priceLabel = storePricesMap?.[g.appid] || telemetry.storePricesMap?.[g.appid];
       if (!priceLabel) {
         priceLabel = await fetchSteamAppStorePrice(g.appid, countryCode);
       }
@@ -1139,9 +1283,19 @@ export async function buildBacklogEmbedPayload(telemetry, summary, page = 1, sto
     },
   ];
 
+  const msrpText = telemetry.msrpSummary
+    ? (telemetry.msrpSummary.startsWith('Total Inactive MSRP:')
+      ? telemetry.msrpSummary.replace(/^Total Inactive MSRP:\s*/, '')
+      : telemetry.msrpSummary)
+    : `${telemetry.currencySymbol || '$'} ${Number(telemetry.totalMsrp || 0).toFixed(2)} (${telemetry.pricedCount || 0}/${totalUnplayed} priced)`;
+  const descriptionLines = [
+    `Paid library telemetry analysis detecting unplayed games, backlog percentage, and live store valuation.`,
+    `▸ **Total Inactive MSRP:** ${msrpText}`,
+  ];
+
   const embed = {
     title: `Steam Library Backlog Intelligence ❖ ${personaName}`,
-    description: `Paid library telemetry analysis detecting unplayed games, backlog percentage, and live store valuation.`,
+    description: descriptionLines.join('\n'),
     color: 0x5865f2,
     fields,
     thumbnail: avatarUrl ? { url: avatarUrl } : undefined,
@@ -1451,23 +1605,21 @@ export function buildGameMatchEmbedPayload(matchResult, summaryA, summaryB, page
       .join('\n\n');
   }
 
-  const fields = [
-    {
-      name: `Matched Titles [Page ${currentPage}/${totalPages}]`,
-      value: gameCardsText,
-      inline: false,
-    },
-  ];
-
-  const embed = {
+  const embed1 = {
     author: {
       name: `${personaA} ✖ ${personaB} • Game Match`,
       icon_url: avatarA || undefined,
     },
-    title: 'Steam Library Match',
+    title: 'Steam Library Match Overview',
     description: descriptionLines.join('\n'),
     color: 0x5865f2,
-    fields,
+    thumbnail: avatarA ? { url: avatarA } : undefined,
+  };
+
+  const embed2 = {
+    title: `Matched Titles [Page ${currentPage}/${totalPages}]`,
+    description: gameCardsText,
+    color: 0x5865f2,
     thumbnail: avatarB ? { url: avatarB } : undefined,
     footer: {
       text: `Page ${currentPage} of ${totalPages} • Filter: ${filterMode} • zT Radar Co-op Discovery`,
@@ -1497,5 +1649,5 @@ export function buildGameMatchEmbedPayload(matchResult, summaryA, summaryB, page
     },
   ] : [];
 
-  return { embed, embeds: [embed], components };
+  return { embed: embed1, embeds: [embed1, embed2], components };
 }

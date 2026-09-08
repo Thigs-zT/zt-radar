@@ -96,6 +96,113 @@ function createEphemeralEmbed(title, description, color = PALETTE.BRAND, fields 
 }
 
 /**
+ * Resolves a target parameter to a SteamID64, identifying whether it belongs to the caller
+ * or a mentioned user, and whether an account is unlinked.
+ *
+ * @param {string|null|undefined} targetStr - Raw target input (mention, SteamID64, URL, vanity, or omitted)
+ * @param {string} callerUserId - Discord ID of the command invoker
+ * @param {object} [ddbDocClient] - DynamoDB document client
+ * @param {string} [tableName] - DynamoDB table name
+ * @param {string} [steamApiKey] - Valve Steam Web API key
+ * @returns {Promise<object>} Resolution result: { success, steamId, isCaller, userId } or { unlinked, isCaller, userId } or { error }
+ */
+export async function resolveSteamTarget(targetStr, callerUserId, ddbDocClient, tableName, steamApiKey) {
+  if (!targetStr) {
+    // Target is the caller
+    if (!ddbDocClient || !tableName) {
+      return { success: false, unlinked: true, isCaller: true, userId: callerUserId, error: 'NO_LINKED_ACCOUNT' };
+    }
+    const cfg = await ddbDocClient.send(
+      new QueryCommand({
+        TableName: tableName,
+        KeyConditionExpression: 'PK = :pk AND SK = :sk',
+        ExpressionAttributeValues: {
+          ':pk': `USER#${callerUserId}`,
+          ':sk': 'CONFIG',
+        },
+      })
+    );
+    const steamId = cfg.Items?.[0]?.steam_id;
+    if (!steamId) {
+      return { success: false, unlinked: true, isCaller: true, userId: callerUserId, error: 'NO_LINKED_ACCOUNT' };
+    }
+    return { success: true, steamId, isCaller: true, userId: callerUserId };
+  }
+
+  const mentionMatch = targetStr.match(/^<@!?(\d+)>$/);
+  if (mentionMatch) {
+    const mentionedId = mentionMatch[1];
+    const isCaller = (mentionedId === callerUserId);
+    if (!ddbDocClient || !tableName) {
+      return { success: false, unlinked: true, isCaller, userId: mentionedId, error: isCaller ? 'NO_LINKED_ACCOUNT' : 'TARGET_NOT_LINKED' };
+    }
+    const cfg = await ddbDocClient.send(
+      new QueryCommand({
+        TableName: tableName,
+        KeyConditionExpression: 'PK = :pk AND SK = :sk',
+        ExpressionAttributeValues: {
+          ':pk': `USER#${mentionedId}`,
+          ':sk': 'CONFIG',
+        },
+      })
+    );
+    const steamId = cfg.Items?.[0]?.steam_id;
+    if (!steamId) {
+      return { success: false, unlinked: true, isCaller, userId: mentionedId, error: isCaller ? 'NO_LINKED_ACCOUNT' : 'TARGET_NOT_LINKED' };
+    }
+    return { success: true, steamId, isCaller, userId: mentionedId };
+  }
+
+  const resolved = await resolveSteamId(targetStr, steamApiKey);
+  if (!resolved) {
+    return {
+      success: false,
+      error: `Could not resolve Steam profile for: \`${targetStr}\`.\n\nPlease verify your input:\n▸ 17-digit numeric **SteamID64**\n▸ Profile URL (\`https://steamcommunity.com/id/...\`)\n▸ Custom vanity URL or alias`,
+    };
+  }
+  return { success: true, steamId: resolved, isCaller: false };
+}
+
+/**
+ * Builds the appropriate unlinked response payload based on whether the unlinked account
+ * is the caller (returns OpenID 2.0 connection button) or a mentioned target (returns targeted guidance).
+ *
+ * @param {object} targetResult - Result from resolveSteamTarget where unlinked === true
+ * @param {string} authLoginUrl - Base Steam OpenID login initiation URL
+ * @returns {object} Discord interaction response payload
+ */
+export function buildTargetUnlinkedResponse(targetResult, authLoginUrl) {
+  if (targetResult.isCaller) {
+    const loginUrl = authLoginUrl ? `${authLoginUrl}?user_id=${encodeURIComponent(targetResult.userId)}` : '';
+    return {
+      statusCode: 200,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(buildUnlinkedAccountEmbed(targetResult.userId, loginUrl)),
+    };
+  }
+
+  return {
+    statusCode: 200,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
+      data: {
+        flags: MESSAGE_FLAGS.EPHEMERAL,
+        embeds: [
+          {
+            title: 'Steam Account Not Linked',
+            description: `User <@${targetResult.userId}> has not linked a Steam profile with zT Radar yet.\n\nAsk them to use \`/steam-link\`, or pass their SteamID64 / custom URL directly in the command.`,
+            color: PALETTE.WARNING,
+            footer: { text: 'zT Radar • Steam Identity Engine' },
+            timestamp: new Date().toISOString(),
+          },
+        ],
+      },
+    }),
+  };
+}
+
+/**
  * Constructs paginated embed and action row components for /wishlist list.
  *
  * @param {Array} items - Monitored game items from DynamoDB
@@ -493,14 +600,14 @@ export const handler = async (event) => {
           };
         }
 
-        const { embed, components } = buildDuelEmbedPayload(comparison, summaryA, summaryB, targetPage);
+        const { embeds, components } = buildDuelEmbedPayload(comparison, summaryA, summaryB, targetPage);
         return {
           statusCode: 200,
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             type: RESPONSE_TYPES.UPDATE_MESSAGE,
             data: {
-              embeds: [embed],
+              embeds,
               components,
             },
           }),
@@ -578,14 +685,14 @@ export const handler = async (event) => {
           };
         }
 
-        const { embed, components } = buildGameMatchEmbedPayload(matchResult, summaryA, summaryB, targetPage, filterMode);
+        const { embeds, components } = buildGameMatchEmbedPayload(matchResult, summaryA, summaryB, targetPage, filterMode);
         return {
           statusCode: 200,
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             type: RESPONSE_TYPES.UPDATE_MESSAGE,
             data: {
-              embeds: [embed],
+              embeds,
               components,
             },
           }),
@@ -2415,59 +2522,18 @@ export const handler = async (event) => {
 
       const authLoginUrl = AUTH_CALLBACK_URL ? AUTH_CALLBACK_URL.replace('/callback', '/login') : '';
 
-      async function resolveDuelTarget(targetStr) {
-        if (!targetStr) return { error: 'Target is required.' };
-        const mentionMatch = targetStr.match(/^<@!?(\d+)>$/);
-        if (mentionMatch) {
-          const mentionedId = mentionMatch[1];
-          const cfg = await docClient.send(
-            new QueryCommand({
-              TableName: TABLE_NAME,
-              KeyConditionExpression: 'PK = :pk AND SK = :sk',
-              ExpressionAttributeValues: {
-                ':pk': `USER#${mentionedId}`,
-                ':sk': 'CONFIG',
-              },
-            })
-          );
-          const steamId = cfg.Items?.[0]?.steam_id;
-          if (!steamId) {
-            return { unlinkedUserId: mentionedId };
-          }
-          return { steamId };
-        }
-
-        const resolved = await resolveSteamId(targetStr, STEAM_API_KEY);
-        if (!resolved) {
-          return {
-            error: `Could not resolve Steam profile for: \`${targetStr}\`.\n\nPlease verify your input:\n▸ 17-digit numeric **SteamID64**\n▸ Profile URL (\`https://steamcommunity.com/id/...\`)\n▸ Custom vanity URL or alias`,
-          };
-        }
-        return { steamId: resolved };
-      }
-
       try {
         const [res1, res2] = await Promise.all([
-          resolveDuelTarget(target1Opt),
-          resolveDuelTarget(target2Opt),
+          resolveSteamTarget(target1Opt, userId, docClient, TABLE_NAME, STEAM_API_KEY),
+          resolveSteamTarget(target2Opt, userId, docClient, TABLE_NAME, STEAM_API_KEY),
         ]);
 
-        if (res1.unlinkedUserId) {
-          const loginUrl = `${authLoginUrl}?user_id=${encodeURIComponent(res1.unlinkedUserId)}`;
-          return {
-            statusCode: 200,
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(buildUnlinkedAccountEmbed(res1.unlinkedUserId, loginUrl)),
-          };
+        if (res1.unlinked) {
+          return buildTargetUnlinkedResponse(res1, authLoginUrl);
         }
 
-        if (res2.unlinkedUserId) {
-          const loginUrl = `${authLoginUrl}?user_id=${encodeURIComponent(res2.unlinkedUserId)}`;
-          return {
-            statusCode: 200,
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(buildUnlinkedAccountEmbed(res2.unlinkedUserId, loginUrl)),
-          };
+        if (res2.unlinked) {
+          return buildTargetUnlinkedResponse(res2, authLoginUrl);
         }
 
         if (res1.error) {
@@ -2581,7 +2647,7 @@ export const handler = async (event) => {
           };
         }
 
-        const { embed, components } = buildDuelEmbedPayload(comparison, summaryA, summaryB, 1);
+        const { embeds, components } = buildDuelEmbedPayload(comparison, summaryA, summaryB, 1);
 
         return {
           statusCode: 200,
@@ -2589,7 +2655,7 @@ export const handler = async (event) => {
           body: JSON.stringify({
             type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
             data: {
-              embeds: [embed],
+              embeds,
               components,
             },
           }),
@@ -2627,59 +2693,18 @@ export const handler = async (event) => {
 
       const authLoginUrl = AUTH_CALLBACK_URL ? AUTH_CALLBACK_URL.replace('/callback', '/login') : '';
 
-      async function resolveMatchTarget(targetStr) {
-        if (!targetStr) return { error: 'Target is required.' };
-        const mentionMatch = targetStr.match(/^<@!?(\d+)>$/);
-        if (mentionMatch) {
-          const mentionedId = mentionMatch[1];
-          const cfg = await docClient.send(
-            new QueryCommand({
-              TableName: TABLE_NAME,
-              KeyConditionExpression: 'PK = :pk AND SK = :sk',
-              ExpressionAttributeValues: {
-                ':pk': `USER#${mentionedId}`,
-                ':sk': 'CONFIG',
-              },
-            })
-          );
-          const steamId = cfg.Items?.[0]?.steam_id;
-          if (!steamId) {
-            return { unlinkedUserId: mentionedId };
-          }
-          return { steamId };
-        }
-
-        const resolved = await resolveSteamId(targetStr, STEAM_API_KEY);
-        if (!resolved) {
-          return {
-            error: `Could not resolve Steam profile for: \`${targetStr}\`.\n\nPlease verify your input:\n▸ 17-digit numeric **SteamID64**\n▸ Profile URL (\`https://steamcommunity.com/id/...\`)\n▸ Custom vanity URL or alias`,
-          };
-        }
-        return { steamId: resolved };
-      }
-
       try {
         const [res1, res2] = await Promise.all([
-          resolveMatchTarget(target1Opt),
-          resolveMatchTarget(target2Opt),
+          resolveSteamTarget(target1Opt, userId, docClient, TABLE_NAME, STEAM_API_KEY),
+          resolveSteamTarget(target2Opt, userId, docClient, TABLE_NAME, STEAM_API_KEY),
         ]);
 
-        if (res1.unlinkedUserId) {
-          const loginUrl = `${authLoginUrl}?user_id=${encodeURIComponent(res1.unlinkedUserId)}`;
-          return {
-            statusCode: 200,
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(buildUnlinkedAccountEmbed(res1.unlinkedUserId, loginUrl)),
-          };
+        if (res1.unlinked) {
+          return buildTargetUnlinkedResponse(res1, authLoginUrl);
         }
 
-        if (res2.unlinkedUserId) {
-          const loginUrl = `${authLoginUrl}?user_id=${encodeURIComponent(res2.unlinkedUserId)}`;
-          return {
-            statusCode: 200,
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(buildUnlinkedAccountEmbed(res2.unlinkedUserId, loginUrl)),
-          };
+        if (res2.unlinked) {
+          return buildTargetUnlinkedResponse(res2, authLoginUrl);
         }
 
         if (res1.error) {
@@ -2794,7 +2819,7 @@ export const handler = async (event) => {
           };
         }
 
-        const { embed, components } = buildGameMatchEmbedPayload(matchResult, summaryA, summaryB, 1, filterMode);
+        const { embeds, components } = buildGameMatchEmbedPayload(matchResult, summaryA, summaryB, 1, filterMode);
 
         return {
           statusCode: 200,
@@ -2802,7 +2827,7 @@ export const handler = async (event) => {
           body: JSON.stringify({
             type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
             data: {
-              embeds: [embed],
+              embeds,
               components,
             },
           }),
@@ -2838,68 +2863,20 @@ export const handler = async (event) => {
       const authLoginUrl = AUTH_CALLBACK_URL ? AUTH_CALLBACK_URL.replace('/callback', '/login') : '';
 
       try {
-        let steamId = null;
-
-        if (!targetOpt) {
-          const cfg = await docClient.send(
-            new QueryCommand({
-              TableName: TABLE_NAME,
-              KeyConditionExpression: 'PK = :pk AND SK = :sk',
-              ExpressionAttributeValues: {
-                ':pk': `USER#${userId}`,
-                ':sk': 'CONFIG',
-              },
-            })
-          );
-          steamId = cfg.Items?.[0]?.steam_id;
-          if (!steamId) {
-            const loginUrl = `${authLoginUrl}?user_id=${encodeURIComponent(userId)}`;
-            return {
-              statusCode: 200,
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(buildUnlinkedAccountEmbed(userId, loginUrl)),
-            };
-          }
-        } else {
-          const mentionMatch = targetOpt.match(/^<@!?(\d+)>$/);
-          if (mentionMatch) {
-            const mentionedId = mentionMatch[1];
-            const cfg = await docClient.send(
-              new QueryCommand({
-                TableName: TABLE_NAME,
-                KeyConditionExpression: 'PK = :pk AND SK = :sk',
-                ExpressionAttributeValues: {
-                  ':pk': `USER#${mentionedId}`,
-                  ':sk': 'CONFIG',
-                },
-              })
-            );
-            steamId = cfg.Items?.[0]?.steam_id;
-            if (!steamId) {
-              const loginUrl = `${authLoginUrl}?user_id=${encodeURIComponent(mentionedId)}`;
-              return {
-                statusCode: 200,
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(buildUnlinkedAccountEmbed(mentionedId, loginUrl)),
-              };
-            }
-          } else {
-            steamId = await resolveSteamId(targetOpt, STEAM_API_KEY);
-            if (!steamId) {
-              return {
-                statusCode: 200,
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(
-                  createEphemeralEmbed(
-                    'Steam Resolution Failed',
-                    `Could not resolve Steam profile for: \`${targetOpt}\`.\n\nPlease verify your input:\n▸ 17-digit numeric **SteamID64**\n▸ Profile URL (\`https://steamcommunity.com/id/...\`)\n▸ Custom vanity URL or alias`,
-                    PALETTE.WARNING
-                  )
-                ),
-              };
-            }
-          }
+        const res = await resolveSteamTarget(targetOpt, userId, docClient, TABLE_NAME, STEAM_API_KEY);
+        if (res.unlinked) {
+          return buildTargetUnlinkedResponse(res, authLoginUrl);
         }
+        if (res.error) {
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(
+              createEphemeralEmbed('Steam Resolution Failed', res.error, PALETTE.WARNING)
+            ),
+          };
+        }
+        const steamId = res.steamId;
 
         let preferredCurrency = 'USD';
         try {

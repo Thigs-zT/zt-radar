@@ -9,10 +9,14 @@ import {
   matchLibraryData,
   buildGameMatchEmbedPayload,
   resolveMultiplayerBadges,
+  calculateBacklogMsrp,
+  batchFetchSteamAppPrices,
+  calculateBacklogTelemetry,
   KNOWN_F2P_APP_IDS,
 } from '../src/utils/steamWeb.js';
 import { formatExpiryAvailability, formatPriceComparisonDiff, getMarketOverviewDeals } from '../src/utils/itadApi.js';
 import { buildSteamLoginUrl, parseSteamIdFromClaimedId, buildUnlinkedAccountEmbed } from '../src/utils/steamOpenId.js';
+import { resolveSteamTarget, buildTargetUnlinkedResponse } from '../src/handlers/discordBot.js';
 
 console.log('--- Running Diagnostics & Verification for Deal Scanner & Steam Web Fixes ---\n');
 
@@ -754,18 +758,20 @@ const mockSummaryA = { personaname: 'Alice', avatarfull: 'https://steam.cdn/alic
 const mockSummaryB = { personaname: 'Bob', avatarfull: 'https://steam.cdn/bob.jpg' };
 
 const duelPayload = buildDuelEmbedPayload(duelComparison, mockSummaryA, mockSummaryB, 1);
-assert.ok(duelPayload.embeds && duelPayload.embeds.length === 1, 'Must contain 1 embed');
-assert.strictEqual(duelPayload.embeds[0].color, 0x5865f2, 'Embed color must be 0x5865F2');
+assert.ok(duelPayload.embeds && duelPayload.embeds.length === 2, 'Must contain 2 embeds for dual-embed layout');
+assert.strictEqual(duelPayload.embeds[0].color, 0x5865f2, 'Embed 1 color must be 0x5865F2');
+assert.strictEqual(duelPayload.embeds[1].color, 0x5865f2, 'Embed 2 color must be 0x5865F2');
 
 // Dual Profile Visualization assertion
 assert.ok(duelPayload.embeds[0].author, 'Duel embed must contain author field');
 assert.strictEqual(duelPayload.embeds[0].author.name, 'Alice vs Bob • Steam Duel', 'Author name must contain dual profile title');
 assert.strictEqual(duelPayload.embeds[0].author.icon_url, 'https://steam.cdn/alice.jpg', 'Author icon must be Player A avatar');
-assert.strictEqual(duelPayload.embeds[0].thumbnail.url, 'https://steam.cdn/bob.jpg', 'Thumbnail must be Player B avatar');
+assert.strictEqual(duelPayload.embeds[0].thumbnail.url, 'https://steam.cdn/alice.jpg', 'Embed 1 thumbnail must be Player A avatar');
+assert.strictEqual(duelPayload.embeds[1].thumbnail.url, 'https://steam.cdn/bob.jpg', 'Embed 2 thumbnail must be Player B avatar');
 
 // Purge sticky achievement header assertion
 assert.ok(!duelPayload.embeds[0].description.includes('Achievement Dominance'), 'Duel description must NOT repeat top game achievements across pages');
-assert.ok(!duelPayload.embeds[0].fields.some((f) => f.value.includes('Achievement Dominance')), 'Duel fields must NOT include sticky achievements');
+assert.ok(!(duelPayload.embeds[0].fields || []).some((f) => f.value.includes('Achievement Dominance')), 'Duel fields must NOT include sticky achievements');
 assert.ok(duelPayload.embeds[0].description.includes('Dominance Score:'), 'Description must contain verified aggregated dominance score');
 assert.ok(duelPayload.embeds[0].description.includes('Total Time Invested:'), 'Description must contain total time invested');
 
@@ -795,9 +801,9 @@ const [prevBtn1, nextBtn1] = duelPage1.components[0].components;
 assert.strictEqual(prevBtn1.disabled, true, 'Prev button on page 1 must be disabled');
 assert.strictEqual(nextBtn1.disabled, false, 'Next button on page 1 must be enabled');
 
-// Streamlined markdown without glyph overload
-assert.ok(duelPage1.embeds[0].fields[0].value.includes('[ Game 1 ]'), 'Diff block should use clean [ Game Title ]');
-assert.ok(!duelPage1.embeds[0].fields[0].value.includes('[ Common Title ❖'), 'Diff block must not contain [ Common Title ❖ ]');
+// Streamlined markdown without glyph overload (diff blocks in embeds[1].description)
+assert.ok(duelPage1.embeds[1].description.includes('[ Game 1 ]'), 'Diff block should use clean [ Game Title ]');
+assert.ok(!duelPage1.embeds[1].description.includes('[ Common Title ❖'), 'Diff block must not contain [ Common Title ❖ ]');
 
 const duelPage3 = buildDuelEmbedPayload(multiPageComparison, mockSummaryA, mockSummaryB, 3);
 const [prevBtn3, nextBtn3] = duelPage3.components[0].components;
@@ -875,11 +881,13 @@ const mockMatchSummaryB = { personaName: 'Bob', avatarUrl: 'https://steam.cdn/bo
 
 const matchPayload = buildGameMatchEmbedPayload(coopMatch, mockMatchSummaryA, mockMatchSummaryB, 1, 'coop');
 assert.ok(matchPayload.embed, 'Must return embed');
+assert.strictEqual(matchPayload.embeds.length, 2, 'Game match payload must return 2 embeds');
 assert.strictEqual(matchPayload.embed.color, 0x5865f2, 'Embed color must be 0x5865F2');
 assert.strictEqual(matchPayload.embed.author.name, 'Alice ✖ Bob • Game Match', 'Dual author title must match');
 assert.strictEqual(matchPayload.embed.author.icon_url, 'https://steam.cdn/alice.jpg', 'Author icon must be Player A');
-assert.strictEqual(matchPayload.embed.thumbnail.url, 'https://steam.cdn/bob.jpg', 'Thumbnail must be Player B');
-assert.ok(matchPayload.embed.fields[0].value.includes('`[Online Co-op]`'), 'Field must include Online Co-op badge');
+assert.strictEqual(matchPayload.embeds[0].thumbnail.url, 'https://steam.cdn/alice.jpg', 'Embed 1 thumbnail must be Player A');
+assert.strictEqual(matchPayload.embeds[1].thumbnail.url, 'https://steam.cdn/bob.jpg', 'Embed 2 thumbnail must be Player B');
+assert.ok(matchPayload.embeds[1].description.includes('`[Online Co-op]`'), 'Embed 2 description must include Online Co-op badge');
 
 // Multi-page test for Game Match (e.g. 8 matching games with 5/page)
 const multiGamesA = Array.from({ length: 8 }, (_, i) => ({
@@ -909,6 +917,173 @@ const [mPrev2, mNext2] = multiMatchPayloadP2.components[0].components;
 assert.strictEqual(mPrev2.disabled, false, 'Prev button on page 2 must be enabled');
 assert.strictEqual(mNext2.disabled, true, 'Next button on page 2 must be disabled');
 console.log('  Case 3 (Embed payload structure, dual avatars, badges & pagination): Verified author, thumbnail, badges & button states (PASS)');
+
+// Test 14: Phase 4 - Target Disambiguation, Dual-Embed Layout & Backlog MSRP Valuation
+console.log('\n[Test 14] Phase 4: Target Disambiguation, Dual-Embed Layout & Backlog MSRP Valuation');
+
+// Case 1: Target Disambiguation (resolveSteamTarget & buildTargetUnlinkedResponse)
+const mockEmptyDocClient = {
+  send: async () => ({ Items: [] }),
+};
+const test14AuthLoginUrl = 'https://abc123.execute-api.us-east-1.amazonaws.com/prod/auth/steam/login';
+
+// 1A: Caller unlinked -> returns isCaller: true and Link button interaction response
+const callerResult = await resolveSteamTarget(null, '111111111111111111', mockEmptyDocClient, 'MockTable', 'mockApiKey');
+assert.strictEqual(callerResult.success, false, 'Caller with no DB item must return success: false');
+assert.strictEqual(callerResult.isCaller, true, 'isCaller must be true for empty target');
+assert.strictEqual(callerResult.userId, '111111111111111111', 'userId must match caller');
+assert.strictEqual(callerResult.error, 'NO_LINKED_ACCOUNT');
+
+const callerHttp = buildTargetUnlinkedResponse(callerResult, test14AuthLoginUrl);
+assert.strictEqual(callerHttp.statusCode, 200, 'Must return HTTP 200 wrapper');
+const callerResponse = JSON.parse(callerHttp.body);
+assert.strictEqual(callerResponse.type, 4, 'Response type must be 4');
+assert.strictEqual(callerResponse.data.flags, 64, 'Caller response must be ephemeral (flags: 64)');
+assert.ok(callerResponse.data.components?.length > 0, 'Caller response must include Link button component');
+assert.strictEqual(callerResponse.data.components[0].components[0].style, 5, 'Button style must be 5 (Link)');
+assert.ok(callerResponse.data.components[0].components[0].url.includes('111111111111111111'), 'Login URL must contain caller userId');
+
+// 1B: Mentioned target unlinked -> returns isCaller: false and targeted guidance (NO button, NO ephemeral)
+const targetResult = await resolveSteamTarget('<@222222222222222222>', '111111111111111111', mockEmptyDocClient, 'MockTable', 'mockApiKey');
+assert.strictEqual(targetResult.success, false, 'Target with no DB item must return success: false');
+assert.strictEqual(targetResult.isCaller, false, 'isCaller must be false for mentioned target');
+assert.strictEqual(targetResult.userId, '222222222222222222', 'userId must match target');
+assert.strictEqual(targetResult.error, 'TARGET_NOT_LINKED');
+
+const targetHttp = buildTargetUnlinkedResponse(targetResult, test14AuthLoginUrl);
+assert.strictEqual(targetHttp.statusCode, 200, 'Must return HTTP 200 wrapper');
+const targetResponse = JSON.parse(targetHttp.body);
+assert.strictEqual(targetResponse.type, 4, 'Response type must be 4');
+assert.strictEqual(targetResponse.data.embeds[0].title, 'Steam Account Not Linked');
+assert.ok(targetResponse.data.embeds[0].description.includes('<@222222222222222222>'), 'Description must mention specific target <@222222222222222222>');
+assert.ok(targetResponse.data.embeds[0].description.includes('has not linked a Steam profile with zT Radar yet'));
+assert.strictEqual(targetResponse.data.components, undefined, 'Target guidance must NOT include Link button');
+
+// 1C: Direct SteamID64 target -> resolves immediately without DB lookup
+const directResult = await resolveSteamTarget('76561198012345678', '111111111111111111', mockEmptyDocClient, 'MockTable', 'mockApiKey');
+assert.strictEqual(directResult.success, true);
+assert.strictEqual(directResult.steamId, '76561198012345678');
+
+// 1D: Mentioned target who IS linked in DB -> resolves successfully
+const mockPopulatedDocClient = {
+  send: async () => ({ Items: [{ steam_id: '76561198099999999' }] }),
+};
+const linkedTargetResult = await resolveSteamTarget('<@333333333333333333>', '111111111111111111', mockPopulatedDocClient, 'MockTable', 'mockApiKey');
+assert.strictEqual(linkedTargetResult.success, true);
+assert.strictEqual(linkedTargetResult.steamId, '76561198099999999');
+assert.strictEqual(linkedTargetResult.userId, '333333333333333333');
+
+console.log('  Case 1 (Target Disambiguation & Response Formatting): Verified caller vs mentioned guidance & direct ID (PASS)');
+
+// Case 2: Dual-Embed Layout Verification (Both Duel & Match)
+const dualDuel = buildDuelEmbedPayload(duelComparison, mockSummaryA, mockSummaryB, 1);
+assert.strictEqual(dualDuel.embeds.length, 2, 'buildDuelEmbedPayload must return exactly 2 embeds');
+assert.strictEqual(dualDuel.embeds[0].title, 'Steam Library Duel Overview');
+assert.strictEqual(dualDuel.embeds[0].thumbnail.url, 'https://steam.cdn/alice.jpg', 'Duel Embed 1 thumbnail must be Player A');
+assert.strictEqual(dualDuel.embeds[1].thumbnail.url, 'https://steam.cdn/bob.jpg', 'Duel Embed 2 thumbnail must be Player B');
+assert.ok(dualDuel.embeds[1].title.includes('Shared Titles Playtime Comparison'));
+
+const dualMatch = buildGameMatchEmbedPayload(coopMatch, mockMatchSummaryA, mockMatchSummaryB, 1, 'coop');
+assert.strictEqual(dualMatch.embeds.length, 2, 'buildGameMatchEmbedPayload must return exactly 2 embeds');
+assert.strictEqual(dualMatch.embeds[0].title, 'Steam Library Match Overview');
+assert.strictEqual(dualMatch.embeds[0].thumbnail.url, 'https://steam.cdn/alice.jpg', 'Match Embed 1 thumbnail must be Player A');
+assert.strictEqual(dualMatch.embeds[1].thumbnail.url, 'https://steam.cdn/bob.jpg', 'Match Embed 2 thumbnail must be Player B');
+assert.ok(dualMatch.embeds[1].title.includes('Matched Titles'));
+
+console.log('  Case 2 (Dual-Embed Layout Verification): 2 embeds returned with Player A on Embed 1 & Player B on Embed 2 (PASS)');
+
+// Case 3: Factual Full-Library Backlog MSRP Valuation (calculateBacklogMsrp & batchFetchSteamAppPrices)
+const mockBacklogList = [
+  { appid: 10, name: 'Game on 50% Sale' },
+  { appid: 20, name: 'Full Priced Game' },
+  { appid: 30, name: 'Free-to-Play Title' },
+  { appid: 40, name: 'Delisted Title' },
+  { appid: 50, name: 'Unpriced / Unresolved Title' },
+];
+
+const mockPriceMap = new Map([
+  [10, { initial: 39.99, final: 19.99, currency: 'USD', finalFormatted: '$ 19.99', isFree: false, isDelisted: false }],
+  [20, { initial: 0, final: 59.99, currency: 'USD', finalFormatted: '$ 59.99', isFree: false, isDelisted: false }],
+  [30, { initial: 0, final: 0, currency: 'USD', finalFormatted: 'Free', isFree: true, isDelisted: false }],
+  [40, { initial: 0, final: 0, currency: 'USD', finalFormatted: 'Delisted', isFree: false, isDelisted: true }],
+]);
+
+// 3A: USD MSRP calculation (initial 39.99 + final 59.99 = 99.98)
+const msrpUsd = calculateBacklogMsrp(mockBacklogList, mockPriceMap, 'USD');
+assert.strictEqual(msrpUsd.totalMsrp, 99.98, 'Total MSRP must sum base retail prices: 39.99 + 59.99');
+assert.strictEqual(msrpUsd.pricedCount, 2, 'Priced count must be exactly 2');
+assert.strictEqual(msrpUsd.totalBacklog, 5, 'Total backlog count must be 5');
+assert.strictEqual(msrpUsd.currencySymbol, '$');
+assert.strictEqual(msrpUsd.formattedTotalMsrp, '$ 99.98');
+assert.strictEqual(msrpUsd.msrpSummary, '$ 99.98 (2/5 priced)');
+
+// 3B: BRL MSRP calculation
+const msrpBrl = calculateBacklogMsrp(mockBacklogList, mockPriceMap, 'BRL');
+assert.strictEqual(msrpBrl.totalMsrp, 99.98);
+assert.strictEqual(msrpBrl.currencySymbol, 'R$');
+assert.strictEqual(msrpBrl.formattedTotalMsrp, 'R$ 99.98');
+assert.strictEqual(msrpBrl.msrpSummary, 'R$ 99.98 (2/5 priced)');
+
+// 3C: Batch price fetch mock verification
+const origFetch = globalThis.fetch;
+try {
+  globalThis.fetch = async (url) => {
+    const urlStr = String(url);
+    if (urlStr.includes('filters=price_overview')) {
+      return {
+        ok: true,
+        json: async () => ({
+          10: {
+            success: true,
+            data: {
+              is_free: false,
+              price_overview: {
+                initial: 2999,
+                final: 1499,
+                currency: 'USD',
+                final_formatted: '$ 14.99',
+              },
+            },
+          },
+          20: {
+            success: true,
+            data: {
+              is_free: true,
+            },
+          },
+        }),
+      };
+    }
+    return { ok: false };
+  };
+
+  const fetchedPrices = await batchFetchSteamAppPrices([10, 20], 'us', 50);
+  assert.strictEqual(fetchedPrices.size, 2, 'Must fetch prices for 2 apps');
+  assert.strictEqual(fetchedPrices.get(10)?.initial, 29.99, 'App 10 initial price must be 29.99');
+  assert.strictEqual(fetchedPrices.get(10)?.final, 14.99, 'App 10 final price must be 14.99');
+  assert.strictEqual(fetchedPrices.get(20)?.isFree, true, 'App 20 must be flagged as free');
+} finally {
+  globalThis.fetch = origFetch;
+}
+
+// 3D: buildBacklogEmbedPayload renders Total Inactive MSRP in description
+const mockTelemetry = {
+  ...backlogUsd,
+  totalMsrp: 99.98,
+  pricedCount: 2,
+  totalBacklog: 5,
+  currencySymbol: '$',
+  formattedTotalMsrp: '$ 99.98',
+  msrpSummary: '$ 99.98 (2/5 priced)',
+  storePricesMap: { 10: '$ 19.99', 20: '$ 59.99' },
+};
+const backlogEmbedResult = await buildBacklogEmbedPayload(mockTelemetry, mockSummaryA, 1, mockTelemetry.storePricesMap);
+assert.ok(
+  backlogEmbedResult.embeds[0].description.includes('▸ **Total Inactive MSRP:** $ 99.98 (2/5 priced)'),
+  'Backlog embed description must include formatted Total Inactive MSRP summary'
+);
+
+console.log('  Case 3 (Backlog MSRP Valuation & Storefront API Batching): Pure summation, initial base price, and embed rendering (PASS)');
 
 console.log('\nAll diagnostic verification checks PASSED successfully!');
 
