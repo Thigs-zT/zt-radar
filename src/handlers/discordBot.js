@@ -165,12 +165,13 @@ function buildWishlistPagePayload(items, userConfig, requestedPage = 1) {
 export const handler = async (event) => {
   // HTTP routing guard — intercept GET requests for Steam OpenID auth routes
   // before Ed25519 signature verification (these are not Discord interactions).
-  const httpMethod = event.requestContext?.http?.method || event.httpMethod || '';
-  const httpPath = event.requestContext?.http?.path || event.rawPath || '';
+  const httpMethod = (event.requestContext?.http?.method || event.httpMethod || '').toUpperCase();
+  const rawPath = event.rawPath || event.requestContext?.http?.path || event.path || '';
+  const isSteamLogin = httpMethod === 'GET' && (rawPath === '/auth/steam/login' || rawPath.endsWith('/auth/steam/login'));
+  const isSteamCallback = httpMethod === 'GET' && (rawPath === '/auth/steam/callback' || rawPath.endsWith('/auth/steam/callback'));
 
-  if (httpMethod === 'GET' && httpPath === '/auth/steam/login') {
-    const queryParams = event.queryStringParameters || {};
-    const userId = queryParams.user_id;
+  if (isSteamLogin) {
+    const userId = event.queryStringParameters?.user_id || new URLSearchParams(event.rawQueryString || '').get('user_id');
 
     if (!userId) {
       return {
@@ -195,9 +196,8 @@ export const handler = async (event) => {
         statusCode: 302,
         headers: {
           Location: steamRedirectUrl,
-          'Cache-Control': 'no-store',
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
         },
-        body: '',
       };
     } catch (err) {
       console.error('Error generating Steam login redirect:', err);
@@ -209,8 +209,12 @@ export const handler = async (event) => {
     }
   }
 
-  if (httpMethod === 'GET' && httpPath === '/auth/steam/callback') {
-    const queryParams = event.queryStringParameters || {};
+  if (isSteamCallback) {
+    const rawParams = event.rawQueryString ? Object.fromEntries(new URLSearchParams(event.rawQueryString)) : {};
+    const queryParams = {
+      ...rawParams,
+      ...(event.queryStringParameters || {}),
+    };
     const stateToken = queryParams.state;
 
     // Extract the user_id that was embedded in the return_to URL's state param format

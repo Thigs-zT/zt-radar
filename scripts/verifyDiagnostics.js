@@ -620,5 +620,38 @@ assert.throws(
 );
 console.log(`  Case 5 (Unlinked account embed): correct interaction structure with Link Button (length=${linkButton.url.length} <= 512, no custom_id) (PASS)`);
 
+// Case 6: Stage-agnostic route matching logic for Steam OpenID auth guard
+const checkIsSteamLogin = (method, path) => {
+  const httpMethod = (method || '').toUpperCase();
+  const rawPath = path || '';
+  return httpMethod === 'GET' && (rawPath === '/auth/steam/login' || rawPath.endsWith('/auth/steam/login'));
+};
+
+const checkIsSteamCallback = (method, path) => {
+  const httpMethod = (method || '').toUpperCase();
+  const rawPath = path || '';
+  return httpMethod === 'GET' && (rawPath === '/auth/steam/callback' || rawPath.endsWith('/auth/steam/callback'));
+};
+
+// Stage-prefixed paths must match
+assert.ok(checkIsSteamLogin('GET', '/prod/auth/steam/login'), 'Must match /prod/auth/steam/login with prod stage prefix');
+assert.ok(checkIsSteamLogin('GET', '/dev/auth/steam/login'), 'Must match /dev/auth/steam/login with dev stage prefix');
+assert.ok(checkIsSteamLogin('GET', '/auth/steam/login'), 'Must match /auth/steam/login without stage prefix');
+
+assert.ok(checkIsSteamCallback('GET', '/prod/auth/steam/callback'), 'Must match /prod/auth/steam/callback with prod stage prefix');
+assert.ok(checkIsSteamCallback('GET', '/dev/auth/steam/callback'), 'Must match /dev/auth/steam/callback with dev stage prefix');
+assert.ok(checkIsSteamCallback('GET', '/auth/steam/callback'), 'Must match /auth/steam/callback without stage prefix');
+
+// Non-auth paths and non-GET methods must NOT match (must bypass to Discord interaction handler)
+assert.ok(!checkIsSteamLogin('POST', '/prod/auth/steam/login'), 'POST /prod/auth/steam/login must bypass auth guard');
+assert.ok(!checkIsSteamLogin('POST', '/interactions'), 'POST /interactions must bypass auth guard');
+assert.ok(!checkIsSteamLogin('POST', '/prod/interactions'), 'POST /prod/interactions must bypass auth guard');
+assert.ok(!checkIsSteamCallback('POST', '/prod/interactions'), 'POST /prod/interactions must bypass callback guard');
+assert.ok(!checkIsSteamLogin('GET', '/prod/interactions'), 'GET /prod/interactions must bypass auth guard');
+assert.ok(!checkIsSteamCallback('GET', '/prod/other/route'), 'GET /prod/other/route must bypass callback guard');
+
+console.log('  Case 6 (Stage-agnostic route matching): stage prefixes (/prod, /dev) match & non-auth paths bypass (PASS)');
+
 
 console.log('\nAll diagnostic verification checks PASSED successfully!');
+
