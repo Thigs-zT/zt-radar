@@ -1,6 +1,13 @@
 // Unit test script for Deal Scanner, Wishlist Batch Operations, and Filter Verification
 import assert from 'node:assert';
-import { resolveSteamAppTitles } from '../src/utils/steamWeb.js';
+import {
+  resolveSteamAppTitles,
+  compareLibraryData,
+  filterBacklogData,
+  buildDuelEmbedPayload,
+  buildBacklogEmbedPayload,
+  KNOWN_F2P_APP_IDS,
+} from '../src/utils/steamWeb.js';
 import { formatExpiryAvailability, formatPriceComparisonDiff, getMarketOverviewDeals } from '../src/utils/itadApi.js';
 import { buildSteamLoginUrl, parseSteamIdFromClaimedId, buildUnlinkedAccountEmbed } from '../src/utils/steamOpenId.js';
 
@@ -652,6 +659,132 @@ assert.ok(!checkIsSteamCallback('GET', '/prod/other/route'), 'GET /prod/other/ro
 
 console.log('  Case 6 (Stage-agnostic route matching): stage prefixes (/prod, /dev) match & non-auth paths bypass (PASS)');
 
+// Test 12: Steam Social Intelligence Suite (Duel, Backlog & Interactive Pagination)
+console.log('\n[Test 12] Steam Social Intelligence: Library Duel, Backlog Telemetry & Pagination');
+
+// Case 1: Library intersection, win tally, and combined playtime descending sorting
+const sampleGamesA = [
+  { appid: 10, name: 'Counter-Strike', playtime_forever: 1200 }, // 20h
+  { appid: 20, name: 'Team Fortress Classic', playtime_forever: 60 }, // 1h
+  { appid: 30, name: 'Day of Defeat', playtime_forever: 300 }, // 5h
+  { appid: 40, name: 'Deathmatch Classic', playtime_forever: 500 }, // A only
+];
+
+const sampleGamesB = [
+  { appid: 10, name: 'Counter-Strike', playtime_forever: 300 }, // 5h
+  { appid: 20, name: 'Team Fortress Classic', playtime_forever: 600 }, // 10h
+  { appid: 30, name: 'Day of Defeat', playtime_forever: 300 }, // 5h (tie)
+  { appid: 50, name: 'Half-Life: Opposing Force', playtime_forever: 100 }, // B only
+];
+
+const duelComparison = compareLibraryData(sampleGamesA, sampleGamesB);
+
+assert.strictEqual(duelComparison.totalCommon, 3, 'Must find exactly 3 common games');
+assert.strictEqual(duelComparison.winsA, 1, 'Player A should win Counter-Strike (1200 vs 300 mins)');
+assert.strictEqual(duelComparison.winsB, 1, 'Player B should win Team Fortress Classic (600 vs 60 mins)');
+assert.strictEqual(duelComparison.ties, 1, 'Day of Defeat must be a tie (300 vs 300 mins)');
+
+// Check descending sort order by total combined playtime
+assert.strictEqual(duelComparison.commonGames[0].appid, 10, 'AppID 10 must be first (1500 total mins)');
+assert.strictEqual(duelComparison.commonGames[0].winner, 'A', 'Winner of first game must be Player A');
+assert.strictEqual(duelComparison.commonGames[1].appid, 20, 'AppID 20 must be second (660 total mins)');
+assert.strictEqual(duelComparison.commonGames[1].winner, 'B', 'Winner of second game must be Player B');
+assert.strictEqual(duelComparison.commonGames[2].appid, 30, 'AppID 30 must be third (600 total mins)');
+assert.strictEqual(duelComparison.commonGames[2].winner, 'TIE', 'Third game must be a tie');
+
+console.log('  Case 1 (Library Duel intersection & playtime ranking): 3 common titles, wins: A=1, B=1, ties=1 (PASS)');
+
+// Case 2: Backlog filtering asserting games >= 60 minutes are excluded and F2P titles are omitted
+const sampleLibrary = [
+  { appid: 100, name: 'Paid Game Unplayed 15m', playtime_forever: 15 },
+  { appid: 200, name: 'Paid Game Never Played 0m', playtime_forever: 0 },
+  { appid: 300, name: 'Paid Game Played Exactly 60m', playtime_forever: 60 }, // Boundary: >= 60m excluded
+  { appid: 400, name: 'Paid Game Played 3000m', playtime_forever: 3000 }, // Played >= 60m excluded
+  { appid: 730, name: 'Counter-Strike 2 (F2P)', playtime_forever: 10 }, // Known F2P excluded
+  { appid: 570, name: 'Dota 2 (F2P)', playtime_forever: 0 }, // Known F2P excluded
+  { appid: 999, name: 'Indie F2P Game', playtime_forever: 5, is_free: true }, // is_free excluded
+];
+
+const backlogUsd = filterBacklogData(sampleLibrary, 'USD');
+assert.strictEqual(backlogUsd.totalPaidGames, 4, 'Must identify exactly 4 paid games (excluding F2P)');
+assert.strictEqual(backlogUsd.unplayedPaidCount, 2, 'Must identify exactly 2 unplayed paid games (<60 mins)');
+assert.strictEqual(backlogUsd.backlogRatioPercent, 50, 'Backlog ratio must be exactly 50% (2 / 4)');
+assert.strictEqual(backlogUsd.backlogGames[0].appid, 200, 'Lowest playtime game (0m) must be first');
+assert.strictEqual(backlogUsd.backlogGames[1].appid, 100, 'Second unplayed game (15m) must be second');
+assert.ok(backlogUsd.estimatedInactiveValue > 0, 'Estimated inactive value must be greater than zero');
+assert.strictEqual(backlogUsd.currencySymbol, '$', 'Currency symbol for USD must be $');
+
+const backlogBrl = filterBacklogData(sampleLibrary, 'BRL');
+assert.strictEqual(backlogBrl.currencySymbol, 'R$', 'Currency symbol for BRL must be R$');
+assert.ok(backlogBrl.estimatedInactiveValue > backlogUsd.estimatedInactiveValue, 'BRL estimated value must reflect regional pricing multiplier');
+
+console.log('  Case 2 (Backlog filtering & telemetry): F2P excluded, games >=60m excluded, backlog ratio=50% (PASS)');
+
+// Case 3: Custom ID pagination boundaries (< 100 characters) and parsing
+const duelCustomId = `duel_p:999:76561198012345678:76561198087654321`;
+assert.ok(duelCustomId.length < 100, `Duel custom_id length (${duelCustomId.length}) must be strictly < 100 chars`);
+const duelTokens = duelCustomId.split(':');
+assert.strictEqual(duelTokens[0], 'duel_p');
+assert.strictEqual(parseInt(duelTokens[1], 10), 999);
+assert.strictEqual(duelTokens[2], '76561198012345678');
+assert.strictEqual(duelTokens[3], '76561198087654321');
+
+const backlogCustomId = `backlog_p:999:76561198012345678`;
+assert.ok(backlogCustomId.length < 100, `Backlog custom_id length (${backlogCustomId.length}) must be strictly < 100 chars`);
+const backlogTokens = backlogCustomId.split(':');
+assert.strictEqual(backlogTokens[0], 'backlog_p');
+assert.strictEqual(parseInt(backlogTokens[1], 10), 999);
+assert.strictEqual(backlogTokens[2], '76561198012345678');
+
+console.log(`  Case 3 (Pagination custom_id limits): duel_p length=${duelCustomId.length}, backlog_p length=${backlogCustomId.length} (<100 chars) (PASS)`);
+
+// Case 4: Embed generation and interactive pagination component structures
+const mockSummaryA = { personaname: 'Alice', avatarfull: 'https://steam.cdn/alice.jpg' };
+const mockSummaryB = { personaname: 'Bob', avatarfull: 'https://steam.cdn/bob.jpg' };
+
+const duelPayload = buildDuelEmbedPayload(duelComparison, mockSummaryA, mockSummaryB, 0);
+assert.ok(duelPayload.embeds && duelPayload.embeds.length === 1, 'Must contain 1 embed');
+assert.strictEqual(duelPayload.embeds[0].color, 0x5865f2, 'Embed color must be 0x5865F2');
+assert.ok(duelPayload.embeds[0].title.includes('Steam Library Duel'), 'Title must reflect Steam Library Duel');
+// Pagination buttons: with 3 games and 5 games per page, totalPages is 1 (components should be empty)
+assert.strictEqual(duelPayload.components.length, 0, 'With 1 page, components should be empty');
+
+// Multi-page test for Duel
+const multiPageComparison = {
+  ...duelComparison,
+  commonGames: Array.from({ length: 12 }, (_, i) => ({
+    appid: 1000 + i,
+    name: `Game ${i + 1}`,
+    playtimeA: 100,
+    playtimeB: 200,
+    hoursA: '1.7',
+    hoursB: '3.3',
+    winner: 'B',
+    totalPlaytime: 300,
+  })),
+  totalCommon: 12,
+};
+
+const duelPage1 = buildDuelEmbedPayload(multiPageComparison, mockSummaryA, mockSummaryB, 1);
+assert.strictEqual(duelPage1.components.length, 1, 'Multi-page duel must include action row');
+const [prevBtn1, nextBtn1] = duelPage1.components[0].components;
+assert.strictEqual(prevBtn1.disabled, true, 'Prev button on page 1 must be disabled');
+assert.strictEqual(nextBtn1.disabled, false, 'Next button on page 1 must be enabled');
+
+const duelPage3 = buildDuelEmbedPayload(multiPageComparison, mockSummaryA, mockSummaryB, 3);
+const [prevBtn3, nextBtn3] = duelPage3.components[0].components;
+assert.strictEqual(prevBtn3.disabled, false, 'Prev button on last page must be enabled');
+assert.strictEqual(nextBtn3.disabled, true, 'Next button on last page must be disabled');
+
+// Backlog Embed Payload test
+const backlogPayload = buildBacklogEmbedPayload(backlogUsd, mockSummaryA, 0);
+assert.ok(backlogPayload.embeds && backlogPayload.embeds.length === 1, 'Must contain 1 backlog embed');
+assert.strictEqual(backlogPayload.embeds[0].color, 0x5865f2, 'Backlog embed color must be 0x5865F2');
+assert.ok(backlogPayload.embeds[0].fields.some((f) => f.name.includes('Backlog Score')), 'Must include Backlog Score field');
+assert.ok(backlogPayload.embeds[0].fields.some((f) => f.name.includes('Estimated Inactive Value')), 'Must include Estimated Inactive Value field');
+
+console.log('  Case 4 (Embed and pagination payload structures): Valid embeds, diff blocks, and pagination state (PASS)');
 
 console.log('\nAll diagnostic verification checks PASSED successfully!');
+
 

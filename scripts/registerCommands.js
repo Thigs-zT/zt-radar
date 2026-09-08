@@ -270,6 +270,36 @@ export const commands = [
     ],
   },
   {
+    name: 'steam-duel',
+    description: 'Duel two Steam libraries comparing playtime and achievement dominance on common games',
+    options: [
+      {
+        name: 'target1',
+        description: '@user mention, SteamID64, profile URL, or custom vanity',
+        type: 3, // STRING
+        required: true,
+      },
+      {
+        name: 'target2',
+        description: '@user mention, SteamID64, profile URL, or custom vanity',
+        type: 3, // STRING
+        required: true,
+      },
+    ],
+  },
+  {
+    name: 'steam-backlog',
+    description: 'Analyze unplayed paid games, backlog percentage, and estimated wasted library value',
+    options: [
+      {
+        name: 'target',
+        description: 'Optional @user mention, SteamID64, or profile URL (defaults to caller)',
+        type: 3, // STRING
+        required: false,
+      },
+    ],
+  },
+  {
     name: 'free-play-radar',
     description: 'Inspect all active 100% free games to keep and temporary Free Weekend events',
   },

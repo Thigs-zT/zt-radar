@@ -28,6 +28,10 @@ import {
   getCompletePlayerProfile,
   fetchSteamWishlist,
   resolveSteamAppTitles,
+  compareLibraries,
+  calculateBacklogTelemetry,
+  buildDuelEmbedPayload,
+  buildBacklogEmbedPayload,
 } from '../utils/steamWeb.js';
 import { getHowLongToBeatStats } from '../utils/hltbNative.js';
 import {
@@ -427,6 +431,189 @@ export const handler = async (event) => {
                 {
                   title: 'Pagination Error',
                   description: 'Unable to load the requested page. Please run `/wishlist list` again.',
+                  color: PALETTE.DANGER,
+                },
+              ],
+            },
+          }),
+        };
+      }
+    }
+
+    if (customId.startsWith('duel_p:')) {
+      const parts = customId.split(':');
+      const targetPage = parseInt(parts[1], 10) || 1;
+      const steamIdA = parts[2];
+      const steamIdB = parts[3];
+
+      if (!steamIdA || !steamIdB || !STEAM_API_KEY) {
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: RESPONSE_TYPES.UPDATE_MESSAGE,
+            data: {
+              embeds: [
+                {
+                  title: 'Duel Inaccessible',
+                  description: 'Unable to load duel data for pagination.',
+                  color: PALETTE.DANGER,
+                },
+              ],
+            },
+          }),
+        };
+      }
+
+      try {
+        const [summaryA, summaryB, comparison] = await Promise.all([
+          getPlayerSummary(steamIdA, STEAM_API_KEY),
+          getPlayerSummary(steamIdB, STEAM_API_KEY),
+          compareLibraries(steamIdA, steamIdB, STEAM_API_KEY),
+        ]);
+
+        if (!summaryA || !summaryB || !comparison?.success) {
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              type: RESPONSE_TYPES.UPDATE_MESSAGE,
+              data: {
+                embeds: [
+                  {
+                    title: 'Pagination Error',
+                    description: 'Failed to retrieve duel comparison data.',
+                    color: PALETTE.DANGER,
+                  },
+                ],
+              },
+            }),
+          };
+        }
+
+        const { embed, components } = buildDuelEmbedPayload(comparison, summaryA, summaryB, targetPage);
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: RESPONSE_TYPES.UPDATE_MESSAGE,
+            data: {
+              embeds: [embed],
+              components,
+            },
+          }),
+        };
+      } catch (err) {
+        console.error('Error in duel pagination:', err);
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: RESPONSE_TYPES.UPDATE_MESSAGE,
+            data: {
+              embeds: [
+                {
+                  title: 'Pagination Error',
+                  description: 'An error occurred while loading duel page.',
+                  color: PALETTE.DANGER,
+                },
+              ],
+            },
+          }),
+        };
+      }
+    }
+
+    if (customId.startsWith('backlog_p:')) {
+      const parts = customId.split(':');
+      const targetPage = parseInt(parts[1], 10) || 1;
+      const steamId = parts[2];
+
+      if (!steamId || !STEAM_API_KEY) {
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: RESPONSE_TYPES.UPDATE_MESSAGE,
+            data: {
+              embeds: [
+                {
+                  title: 'Backlog Inaccessible',
+                  description: 'Unable to load backlog data for pagination.',
+                  color: PALETTE.DANGER,
+                },
+              ],
+            },
+          }),
+        };
+      }
+
+      try {
+        let preferredCurrency = 'USD';
+        try {
+          const userConfigResult = await docClient.send(
+            new QueryCommand({
+              TableName: TABLE_NAME,
+              KeyConditionExpression: 'PK = :pk AND SK = :sk',
+              ExpressionAttributeValues: {
+                ':pk': `USER#${userId}`,
+                ':sk': 'CONFIG',
+              },
+            })
+          );
+          preferredCurrency = userConfigResult.Items?.[0]?.preferred_currency || 'USD';
+        } catch {
+          // fallback to USD
+        }
+
+        const [summary, telemetry] = await Promise.all([
+          getPlayerSummary(steamId, STEAM_API_KEY),
+          calculateBacklogTelemetry(steamId, STEAM_API_KEY, preferredCurrency),
+        ]);
+
+        if (!summary || !telemetry?.success) {
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              type: RESPONSE_TYPES.UPDATE_MESSAGE,
+              data: {
+                embeds: [
+                  {
+                    title: 'Pagination Error',
+                    description: 'Failed to retrieve backlog telemetry data.',
+                    color: PALETTE.DANGER,
+                  },
+                ],
+              },
+            }),
+          };
+        }
+
+        const { embed, components } = buildBacklogEmbedPayload(telemetry, summary, targetPage);
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: RESPONSE_TYPES.UPDATE_MESSAGE,
+            data: {
+              embeds: [embed],
+              components,
+            },
+          }),
+        };
+      } catch (err) {
+        console.error('Error in backlog pagination:', err);
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: RESPONSE_TYPES.UPDATE_MESSAGE,
+            data: {
+              embeds: [
+                {
+                  title: 'Pagination Error',
+                  description: 'An error occurred while loading backlog page.',
                   color: PALETTE.DANGER,
                 },
               ],
@@ -2113,6 +2300,379 @@ export const handler = async (event) => {
           body: JSON.stringify(
             createEphemeralEmbed('Operation Failed', 'Unable to retrieve Steam profile intelligence.', PALETTE.DANGER)
           ),
+        };
+      }
+    }
+
+    // Command: /steam-duel <target1> <target2>
+    if (name === 'steam-duel') {
+      const target1Opt = options?.find((opt) => opt.name === 'target1')?.value?.trim();
+      const target2Opt = options?.find((opt) => opt.name === 'target2')?.value?.trim();
+
+      if (!STEAM_API_KEY) {
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(
+            createEphemeralEmbed(
+              'Steam Integration Offline',
+              'The Valve Steam Web API Key is not configured on this instance. Please contact the bot administrator.',
+              PALETTE.WARNING
+            )
+          ),
+        };
+      }
+
+      const authLoginUrl = AUTH_CALLBACK_URL ? AUTH_CALLBACK_URL.replace('/callback', '/login') : '';
+
+      async function resolveDuelTarget(targetStr) {
+        if (!targetStr) return { error: 'Target is required.' };
+        const mentionMatch = targetStr.match(/^<@!?(\d+)>$/);
+        if (mentionMatch) {
+          const mentionedId = mentionMatch[1];
+          const cfg = await docClient.send(
+            new QueryCommand({
+              TableName: TABLE_NAME,
+              KeyConditionExpression: 'PK = :pk AND SK = :sk',
+              ExpressionAttributeValues: {
+                ':pk': `USER#${mentionedId}`,
+                ':sk': 'CONFIG',
+              },
+            })
+          );
+          const steamId = cfg.Items?.[0]?.steam_id;
+          if (!steamId) {
+            return { unlinkedUserId: mentionedId };
+          }
+          return { steamId };
+        }
+
+        const resolved = await resolveSteamId(targetStr, STEAM_API_KEY);
+        if (!resolved) {
+          return {
+            error: `Could not resolve Steam profile for: \`${targetStr}\`.\n\nPlease verify your input:\n▸ 17-digit numeric **SteamID64**\n▸ Profile URL (\`https://steamcommunity.com/id/...\`)\n▸ Custom vanity URL or alias`,
+          };
+        }
+        return { steamId: resolved };
+      }
+
+      try {
+        const [res1, res2] = await Promise.all([
+          resolveDuelTarget(target1Opt),
+          resolveDuelTarget(target2Opt),
+        ]);
+
+        if (res1.unlinkedUserId) {
+          const loginUrl = `${authLoginUrl}?user_id=${encodeURIComponent(res1.unlinkedUserId)}`;
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(buildUnlinkedAccountEmbed(res1.unlinkedUserId, loginUrl)),
+          };
+        }
+
+        if (res2.unlinkedUserId) {
+          const loginUrl = `${authLoginUrl}?user_id=${encodeURIComponent(res2.unlinkedUserId)}`;
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(buildUnlinkedAccountEmbed(res2.unlinkedUserId, loginUrl)),
+          };
+        }
+
+        if (res1.error) {
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(createEphemeralEmbed('Steam Resolution Failed', res1.error, PALETTE.WARNING)),
+          };
+        }
+
+        if (res2.error) {
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(createEphemeralEmbed('Steam Resolution Failed', res2.error, PALETTE.WARNING)),
+          };
+        }
+
+        const steamIdA = res1.steamId;
+        const steamIdB = res2.steamId;
+
+        if (steamIdA === steamIdB) {
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(
+              createEphemeralEmbed(
+                'Invalid Duel Pairing',
+                'Cannot duel a Steam library against itself. Please specify two different players or profiles.',
+                PALETTE.WARNING
+              )
+            ),
+          };
+        }
+
+        const [summaryA, summaryB, comparison] = await Promise.all([
+          getPlayerSummary(steamIdA, STEAM_API_KEY),
+          getPlayerSummary(steamIdB, STEAM_API_KEY),
+          compareLibraries(steamIdA, steamIdB, STEAM_API_KEY),
+        ]);
+
+        if (!summaryA || !summaryB) {
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(
+              createEphemeralEmbed('Profile Inaccessible', 'Unable to retrieve Steam summary data for one or both profiles.', PALETTE.WARNING)
+            ),
+          };
+        }
+
+        if (!comparison?.success) {
+          if (comparison?.error === 'PRIVATE_LIBRARY') {
+            const privateName =
+              comparison.privatePlayer === 'A'
+                ? summaryA.personaName
+                : comparison.privatePlayer === 'B'
+                ? summaryB.personaName
+                : 'Both players';
+
+            return {
+              statusCode: 200,
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
+                data: {
+                  embeds: [
+                    {
+                      title: 'Steam Library Private ❖ Duel Inaccessible',
+                      description: `Cannot perform library duel: **${privateName}** has their Steam game library set to **Private**.\n\nOwned games must be set to **Public** in Steam Privacy Settings to allow library cross-referencing.`,
+                      color: PALETTE.WARNING,
+                      footer: { text: 'zT Radar • Steam Duel Intelligence' },
+                      timestamp: new Date().toISOString(),
+                    },
+                  ],
+                },
+              }),
+            };
+          }
+
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(createEphemeralEmbed('Duel Failed', 'An error occurred while cross-referencing libraries.', PALETTE.DANGER)),
+          };
+        }
+
+        if (comparison.commonGames.length === 0) {
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
+              data: {
+                embeds: [
+                  {
+                    title: `Steam Library Duel ❖ ${summaryA.personaName} vs ${summaryB.personaName}`,
+                    description: `No common titles found between **${summaryA.personaName}** (${comparison.countA} games) and **${summaryB.personaName}** (${comparison.countB} games).`,
+                    color: 0x5865f2,
+                    footer: { text: 'zT Radar • Steam Duel Intelligence' },
+                    timestamp: new Date().toISOString(),
+                  },
+                ],
+              },
+            }),
+          };
+        }
+
+        const { embed, components } = buildDuelEmbedPayload(comparison, summaryA, summaryB, 1);
+
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
+            data: {
+              embeds: [embed],
+              components,
+            },
+          }),
+        };
+      } catch (err) {
+        console.error('Error executing /steam-duel:', err);
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(createEphemeralEmbed('Operation Failed', 'Unable to complete Steam library duel.', PALETTE.DANGER)),
+        };
+      }
+    }
+
+    // Command: /steam-backlog [target]
+    if (name === 'steam-backlog') {
+      const targetOpt = options?.find((opt) => opt.name === 'target')?.value?.trim();
+
+      if (!STEAM_API_KEY) {
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(
+            createEphemeralEmbed(
+              'Steam Integration Offline',
+              'The Valve Steam Web API Key is not configured on this instance. Please contact the bot administrator.',
+              PALETTE.WARNING
+            )
+          ),
+        };
+      }
+
+      const authLoginUrl = AUTH_CALLBACK_URL ? AUTH_CALLBACK_URL.replace('/callback', '/login') : '';
+
+      try {
+        let steamId = null;
+
+        if (!targetOpt) {
+          const cfg = await docClient.send(
+            new QueryCommand({
+              TableName: TABLE_NAME,
+              KeyConditionExpression: 'PK = :pk AND SK = :sk',
+              ExpressionAttributeValues: {
+                ':pk': `USER#${userId}`,
+                ':sk': 'CONFIG',
+              },
+            })
+          );
+          steamId = cfg.Items?.[0]?.steam_id;
+          if (!steamId) {
+            const loginUrl = `${authLoginUrl}?user_id=${encodeURIComponent(userId)}`;
+            return {
+              statusCode: 200,
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(buildUnlinkedAccountEmbed(userId, loginUrl)),
+            };
+          }
+        } else {
+          const mentionMatch = targetOpt.match(/^<@!?(\d+)>$/);
+          if (mentionMatch) {
+            const mentionedId = mentionMatch[1];
+            const cfg = await docClient.send(
+              new QueryCommand({
+                TableName: TABLE_NAME,
+                KeyConditionExpression: 'PK = :pk AND SK = :sk',
+                ExpressionAttributeValues: {
+                  ':pk': `USER#${mentionedId}`,
+                  ':sk': 'CONFIG',
+                },
+              })
+            );
+            steamId = cfg.Items?.[0]?.steam_id;
+            if (!steamId) {
+              const loginUrl = `${authLoginUrl}?user_id=${encodeURIComponent(mentionedId)}`;
+              return {
+                statusCode: 200,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(buildUnlinkedAccountEmbed(mentionedId, loginUrl)),
+              };
+            }
+          } else {
+            steamId = await resolveSteamId(targetOpt, STEAM_API_KEY);
+            if (!steamId) {
+              return {
+                statusCode: 200,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(
+                  createEphemeralEmbed(
+                    'Steam Resolution Failed',
+                    `Could not resolve Steam profile for: \`${targetOpt}\`.\n\nPlease verify your input:\n▸ 17-digit numeric **SteamID64**\n▸ Profile URL (\`https://steamcommunity.com/id/...\`)\n▸ Custom vanity URL or alias`,
+                    PALETTE.WARNING
+                  )
+                ),
+              };
+            }
+          }
+        }
+
+        let preferredCurrency = 'USD';
+        try {
+          const userConfigResult = await docClient.send(
+            new QueryCommand({
+              TableName: TABLE_NAME,
+              KeyConditionExpression: 'PK = :pk AND SK = :sk',
+              ExpressionAttributeValues: {
+                ':pk': `USER#${userId}`,
+                ':sk': 'CONFIG',
+              },
+            })
+          );
+          preferredCurrency = userConfigResult.Items?.[0]?.preferred_currency || 'USD';
+        } catch {
+          // fallback to USD
+        }
+
+        const [summary, telemetry] = await Promise.all([
+          getPlayerSummary(steamId, STEAM_API_KEY),
+          calculateBacklogTelemetry(steamId, STEAM_API_KEY, preferredCurrency),
+        ]);
+
+        if (!summary) {
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(
+              createEphemeralEmbed('Profile Inaccessible', 'Unable to retrieve Steam summary data for profile.', PALETTE.WARNING)
+            ),
+          };
+        }
+
+        if (!telemetry?.success) {
+          if (telemetry?.error === 'PRIVATE_LIBRARY') {
+            return {
+              statusCode: 200,
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
+                data: {
+                  embeds: [
+                    {
+                      title: 'Steam Library Private ❖ Backlog Inaccessible',
+                      description: `Cannot analyze backlog telemetry: **${summary.personaName}** has their Steam game library set to **Private**.\n\nOwned games must be set to **Public** in Steam Privacy Settings to inspect library telemetry.`,
+                      color: PALETTE.WARNING,
+                      footer: { text: 'zT Radar • Steam Backlog Intelligence' },
+                      timestamp: new Date().toISOString(),
+                    },
+                  ],
+                },
+              }),
+            };
+          }
+
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(createEphemeralEmbed('Backlog Analysis Failed', 'An error occurred while analyzing library backlog.', PALETTE.DANGER)),
+          };
+        }
+
+        const { embed, components } = buildBacklogEmbedPayload(telemetry, summary, 1);
+
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
+            data: {
+              embeds: [embed],
+              components,
+            },
+          }),
+        };
+      } catch (err) {
+        console.error('Error executing /steam-backlog:', err);
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(createEphemeralEmbed('Operation Failed', 'Unable to analyze Steam library backlog.', PALETTE.DANGER)),
         };
       }
     }
