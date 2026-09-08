@@ -33,6 +33,10 @@ Parameters:
     NoEcho: true
     Default: ""
     Description: Valve Steam Web API Key (Optional)
+  AuthCallbackUrl:
+    Type: String
+    Default: ""
+    Description: Public HTTPS URL for the Steam OpenID callback route (e.g. https://<api-id>.execute-api.<region>.amazonaws.com/prod/auth/steam/callback)
 
 Resources:
   # HTTP API Gateway with Rate Limiting & Throttling Protection
@@ -71,9 +75,11 @@ Resources:
         Variables:
           TABLE_NAME: !Ref DealsTable
           DISCORD_PUBLIC_KEY: !Ref DiscordPublicKey
+          DISCORD_BOT_TOKEN: !Ref DiscordBotToken
           DISCORD_APP_ID: !Ref DiscordAppId
           ITAD_API_KEY: !Ref ItadApiKey
           STEAM_API_KEY: !Ref SteamApiKey
+          AUTH_CALLBACK_URL: !Ref AuthCallbackUrl
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref DealsTable
@@ -84,6 +90,18 @@ Resources:
             ApiId: !Ref DiscordApi
             Path: /interactions
             Method: post
+        SteamAuthLogin:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref DiscordApi
+            Path: /auth/steam/login
+            Method: get
+        SteamAuthCallback:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref DiscordApi
+            Path: /auth/steam/callback
+            Method: get
 
   # Scheduled Market Deal Scanner
   DealScannerFunction:

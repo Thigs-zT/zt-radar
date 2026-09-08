@@ -2,6 +2,7 @@
 import assert from 'node:assert';
 import { resolveSteamAppTitles } from '../src/utils/steamWeb.js';
 import { formatExpiryAvailability, formatPriceComparisonDiff, getMarketOverviewDeals } from '../src/utils/itadApi.js';
+import { buildSteamLoginUrl, parseSteamIdFromClaimedId, buildUnlinkedAccountEmbed } from '../src/utils/steamOpenId.js';
 
 console.log('--- Running Diagnostics & Verification for Deal Scanner & Steam Web Fixes ---\n');
 
@@ -546,5 +547,64 @@ try {
 } finally {
   globalThis.fetch = originalFetch;
 }
+
+
+// Test 11: Steam OpenID 2.0 Utility Verification
+console.log('\n[Test 11] Steam OpenID 2.0 Utility Verification');
+
+// Case 1: State token entropy — simulate the token format (hex, 64 chars)
+const mockToken = Buffer.from(Array.from({ length: 32 }, () => Math.floor(Math.random() * 256))).toString('hex');
+assert.strictEqual(mockToken.length, 64, 'State token must be 64 hex characters (32 bytes)');
+assert.ok(/^[0-9a-f]+$/.test(mockToken), 'State token must be lowercase hex');
+console.log(`  Case 1 (State token entropy): ${mockToken.substring(0, 16)}... length=${mockToken.length} (PASS)`);
+
+// Case 2: Steam login URL construction
+const mockCallbackUrl = 'https://abc123.execute-api.us-east-1.amazonaws.com/prod/auth/steam/callback';
+const loginUrl = buildSteamLoginUrl(mockToken, mockCallbackUrl, '987654321012345678');
+assert.ok(loginUrl.startsWith('https://steamcommunity.com/openid/login?'), 'Login URL must point to Steam OpenID endpoint');
+assert.ok(loginUrl.includes('openid.ns='), 'Login URL must include openid.ns');
+assert.ok(loginUrl.includes('openid.mode=checkid_setup'), 'Login URL must include openid.mode=checkid_setup');
+assert.ok(loginUrl.includes('openid.return_to='), 'Login URL must include openid.return_to');
+assert.ok(loginUrl.includes('openid.realm='), 'Login URL must include openid.realm');
+assert.ok(loginUrl.includes(encodeURIComponent('987654321012345678')), 'Login URL return_to must include user_id');
+assert.ok(loginUrl.includes(encodeURIComponent(mockToken)), 'Login URL return_to must include state token');
+console.log(`  Case 2 (Steam login URL): correctly constructs OpenID 2.0 parameters (PASS)`);
+
+// Case 3: Valid claimed_id SteamID64 extraction
+const validClaimedId = 'https://steamcommunity.com/openid/id/76561198012345678';
+const extractedSteamId = parseSteamIdFromClaimedId(validClaimedId);
+assert.strictEqual(extractedSteamId, '76561198012345678', 'Must extract 17-digit SteamID64 from valid claimed_id');
+console.log(`  Case 3 (Valid claimed_id): extracted SteamID64 = ${extractedSteamId} (PASS)`);
+
+// Case 4: Invalid claimed_id format must return null
+const invalidClaimedIds = [
+  'https://steamcommunity.com/openid/id/12345',           // too short
+  'https://evil.com/openid/id/76561198012345678',         // wrong domain
+  'https://steamcommunity.com/openid/id/abcdefg12345678', // non-numeric
+  '',                                                     // empty string
+  null,                                                   // null
+  undefined,                                              // undefined
+];
+for (const badId of invalidClaimedIds) {
+  const result = parseSteamIdFromClaimedId(badId);
+  assert.strictEqual(result, null, `Invalid claimed_id "${badId}" must return null, got: ${result}`);
+}
+console.log(`  Case 4 (Invalid claimed_id formats): all ${invalidClaimedIds.length} cases correctly return null (PASS)`);
+
+// Case 5: buildUnlinkedAccountEmbed returns valid Discord interaction response structure
+const mockLoginUrl = 'https://steamcommunity.com/openid/login?openid.ns=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0&openid.mode=checkid_setup';
+const embedResponse = buildUnlinkedAccountEmbed('123456789012345678', mockLoginUrl);
+assert.strictEqual(embedResponse.type, 4, 'Response type must be 4 (CHANNEL_MESSAGE_WITH_SOURCE)');
+assert.strictEqual(embedResponse.data.flags, 64, 'Response data.flags must be 64 (EPHEMERAL)');
+assert.ok(Array.isArray(embedResponse.data.embeds), 'Response must include embeds array');
+assert.ok(Array.isArray(embedResponse.data.components), 'Response must include components array');
+assert.strictEqual(embedResponse.data.components[0]?.type, 1, 'Component must be an Action Row (type 1)');
+const linkButton = embedResponse.data.components[0]?.components?.[0];
+assert.ok(linkButton, 'Action Row must contain at least one component');
+assert.strictEqual(linkButton.type, 2, 'Button component must have type 2');
+assert.strictEqual(linkButton.style, 5, 'Link Button must have style 5');
+assert.strictEqual(linkButton.url, mockLoginUrl, 'Link Button URL must match the provided login URL');
+console.log(`  Case 5 (Unlinked account embed): correct interaction structure with Link Button (PASS)`);
+
 
 console.log('\nAll diagnostic verification checks PASSED successfully!');

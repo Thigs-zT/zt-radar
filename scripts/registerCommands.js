@@ -245,9 +245,9 @@ export const commands = [
     options: [
       {
         name: 'target',
-        description: 'Your SteamID64, profile URL, or custom vanity URL',
+        description: 'SteamID64, profile URL, or vanity URL — omit to link via Valve OpenID',
         type: 3, // STRING
-        required: true,
+        required: false,
       },
     ],
   },

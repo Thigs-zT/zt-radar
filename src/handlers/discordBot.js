@@ -30,6 +30,13 @@ import {
   resolveSteamAppTitles,
 } from '../utils/steamWeb.js';
 import { getHowLongToBeatStats } from '../utils/hltbNative.js';
+import {
+  generateStateToken,
+  validateAndConsumeStateToken,
+  buildSteamLoginUrl,
+  verifyOpenIdAssertion,
+  buildUnlinkedAccountEmbed,
+} from '../utils/steamOpenId.js';
 
 const ddbClient = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(ddbClient);
@@ -37,6 +44,8 @@ const docClient = DynamoDBDocumentClient.from(ddbClient);
 const TABLE_NAME = process.env.TABLE_NAME;
 const PUBLIC_KEY = process.env.DISCORD_PUBLIC_KEY;
 const STEAM_API_KEY = process.env.STEAM_API_KEY;
+const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
+const AUTH_CALLBACK_URL = process.env.AUTH_CALLBACK_URL || '';
 
 const RESPONSE_TYPES = {
   PONG: 1,
@@ -154,6 +163,172 @@ function buildWishlistPagePayload(items, userConfig, requestedPage = 1) {
 }
 
 export const handler = async (event) => {
+  // HTTP routing guard — intercept GET requests for Steam OpenID auth routes
+  // before Ed25519 signature verification (these are not Discord interactions).
+  const httpMethod = event.requestContext?.http?.method || event.httpMethod || '';
+  const httpPath = event.requestContext?.http?.path || event.rawPath || '';
+
+  if (httpMethod === 'GET' && httpPath === '/auth/steam/login') {
+    const queryParams = event.queryStringParameters || {};
+    const userId = queryParams.user_id;
+
+    if (!userId) {
+      return {
+        statusCode: 400,
+        headers: { 'Content-Type': 'text/html; charset=utf-8' },
+        body: '<h2>Bad Request</h2><p>Missing user_id parameter.</p>',
+      };
+    }
+
+    if (!AUTH_CALLBACK_URL) {
+      return {
+        statusCode: 503,
+        headers: { 'Content-Type': 'text/html; charset=utf-8' },
+        body: '<h2>Service Unavailable</h2><p>Steam OpenID callback URL is not configured.</p>',
+      };
+    }
+
+    try {
+      const stateToken = await generateStateToken(userId, docClient, TABLE_NAME);
+      const loginUrl = buildSteamLoginUrl(stateToken, AUTH_CALLBACK_URL, userId);
+      return {
+        statusCode: 302,
+        headers: {
+          Location: loginUrl,
+          'Cache-Control': 'no-store',
+        },
+        body: '',
+      };
+    } catch (err) {
+      console.error('Error generating Steam login redirect:', err);
+      return {
+        statusCode: 500,
+        headers: { 'Content-Type': 'text/html; charset=utf-8' },
+        body: '<h2>Internal Error</h2><p>Unable to initiate Steam authentication. Please try again.</p>',
+      };
+    }
+  }
+
+  if (httpMethod === 'GET' && httpPath === '/auth/steam/callback') {
+    const queryParams = event.queryStringParameters || {};
+    const stateToken = queryParams.state;
+
+    // Extract the user_id that was embedded in the return_to URL's state param format
+    // The state token is a 64-char hex string keyed by user ID in DynamoDB.
+    // We need to find the user by iterating — since we store per user, decode from state.
+    // Architecture note: the state token lookup requires a scan unless userId is also passed.
+    // Solution: pass userId as a separate query param on the return_to URL.
+    const userId = queryParams.user_id;
+
+    if (!stateToken || !userId) {
+      return {
+        statusCode: 400,
+        headers: { 'Content-Type': 'text/html; charset=utf-8' },
+        body: '<h2>Bad Request</h2><p>Missing required OpenID callback parameters.</p>',
+      };
+    }
+
+    try {
+      // Validate CSRF state token before trusting the assertion
+      const isValidState = await validateAndConsumeStateToken(userId, stateToken, docClient, TABLE_NAME);
+      if (!isValidState) {
+        return {
+          statusCode: 403,
+          headers: { 'Content-Type': 'text/html; charset=utf-8' },
+          body: '<h2>Authentication Failed</h2><p>Invalid or expired state token. Please try linking your account again.</p>',
+        };
+      }
+
+      // Verify the OpenID assertion with Steam's check_authentication endpoint
+      const steamId64 = await verifyOpenIdAssertion(queryParams);
+      if (!steamId64) {
+        return {
+          statusCode: 403,
+          headers: { 'Content-Type': 'text/html; charset=utf-8' },
+          body: '<h2>Verification Failed</h2><p>Steam could not verify your identity. Please try again.</p>',
+        };
+      }
+
+      // Fetch persona name and avatar from Steam Web API for display
+      let personaName = steamId64;
+      let avatarUrl = '';
+      if (STEAM_API_KEY) {
+        try {
+          const summary = await getPlayerSummary(steamId64, STEAM_API_KEY);
+          if (summary) {
+            personaName = summary.personaName || steamId64;
+            avatarUrl = summary.avatarUrl || '';
+          }
+        } catch (profileErr) {
+          console.warn('Could not fetch Steam profile for callback confirmation:', profileErr.message);
+        }
+      }
+
+      // Persist verified Steam identity to DynamoDB
+      await docClient.send(
+        new UpdateCommand({
+          TableName: TABLE_NAME,
+          Key: {
+            PK: `USER#${userId}`,
+            SK: 'CONFIG',
+          },
+          UpdateExpression:
+            'SET steam_id = :sid, steam_persona_name = :sname, steam_avatar_url = :savatar, steam_verified = :verified, updated_at = :now',
+          ExpressionAttributeValues: {
+            ':sid': steamId64,
+            ':sname': personaName,
+            ':savatar': avatarUrl,
+            ':verified': true,
+            ':now': new Date().toISOString(),
+          },
+        })
+      );
+
+      const html = [
+        '<!DOCTYPE html>',
+        '<html lang="en">',
+        '<head>',
+        '  <meta charset="UTF-8">',
+        '  <meta name="viewport" content="width=device-width, initial-scale=1.0">',
+        '  <title>zT Radar - Steam Account Linked</title>',
+        '  <style>',
+        '    body { font-family: system-ui, sans-serif; background: #1b2838; color: #c7d5e0; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }',
+        '    .card { background: #2a475e; border-radius: 8px; padding: 2rem 2.5rem; max-width: 420px; text-align: center; box-shadow: 0 4px 24px rgba(0,0,0,0.4); }',
+        '    h1 { color: #66c0f4; margin-bottom: 0.5rem; font-size: 1.4rem; }',
+        '    .persona { font-size: 1.1rem; font-weight: 600; color: #ffffff; margin: 0.75rem 0 0.25rem; }',
+        '    .steamid { font-family: monospace; font-size: 0.85rem; color: #8f98a0; }',
+        '    .note { margin-top: 1.25rem; font-size: 0.85rem; color: #8f98a0; }',
+        '    .checkmark { font-size: 2.5rem; margin-bottom: 0.5rem; }',
+        '  </style>',
+        '</head>',
+        '<body>',
+        '  <div class="card">',
+        '    <div class="checkmark">&#10003;</div>',
+        '    <h1>Steam Account Linked</h1>',
+        `    <p class="persona">${personaName.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</p>`,
+        `    <p class="steamid">${steamId64}</p>`,
+        '    <p class="note">You may close this window and return to Discord. Your Steam profile is now linked to zT Radar.</p>',
+        '  </div>',
+        '</body>',
+        '</html>',
+      ].join('\n');
+
+      return {
+        statusCode: 200,
+        headers: { 'Content-Type': 'text/html; charset=utf-8' },
+        body: html,
+      };
+    } catch (err) {
+      console.error('Error during Steam OpenID callback processing:', err);
+      return {
+        statusCode: 500,
+        headers: { 'Content-Type': 'text/html; charset=utf-8' },
+        body: '<h2>Internal Error</h2><p>An unexpected error occurred. Please try linking your account again.</p>',
+      };
+    }
+  }
+
+  // Ed25519 signature verification for Discord interaction webhooks
   const signature = event.headers['x-signature-ed25519'] || event.headers['X-Signature-Ed25519'];
   const timestamp = event.headers['x-signature-timestamp'] || event.headers['X-Signature-Timestamp'];
 
@@ -1603,18 +1778,44 @@ export const handler = async (event) => {
         };
       }
 
+      // Smart fallback: no target provided -> initiate OpenID 2.0 one-click flow
       if (!rawTarget) {
-        return {
-          statusCode: 200,
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(
-            createEphemeralEmbed(
-              'Input Required',
-              'Please provide your SteamID64, full profile URL, or custom vanity URL.',
-              PALETTE.WARNING
-            )
-          ),
-        };
+        if (!AUTH_CALLBACK_URL) {
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(
+              createEphemeralEmbed(
+                'OpenID Not Configured',
+                'The one-click Steam login flow is not available on this instance. Please use `/steam-link <target>` with your SteamID64, profile URL, or vanity name.',
+                PALETTE.WARNING
+              )
+            ),
+          };
+        }
+
+        try {
+          const stateToken = await generateStateToken(userId, docClient, TABLE_NAME);
+          const loginUrl = buildSteamLoginUrl(stateToken, AUTH_CALLBACK_URL, userId);
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(buildUnlinkedAccountEmbed(userId, loginUrl)),
+          };
+        } catch (err) {
+          console.error('Error initiating Steam OpenID flow for user', userId, ':', err);
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(
+              createEphemeralEmbed(
+                'Authentication Error',
+                'Unable to initiate Steam OpenID login. Please try again or use `/steam-link <target>` for manual linking.',
+                PALETTE.DANGER
+              )
+            ),
+          };
+        }
       }
 
       try {
