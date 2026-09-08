@@ -32,6 +32,8 @@ import {
   calculateBacklogTelemetry,
   buildDuelEmbedPayload,
   buildBacklogEmbedPayload,
+  findMatchingGames,
+  buildGameMatchEmbedPayload,
 } from '../utils/steamWeb.js';
 import { getHowLongToBeatStats } from '../utils/hltbNative.js';
 import {
@@ -515,6 +517,91 @@ export const handler = async (event) => {
                 {
                   title: 'Pagination Error',
                   description: 'An error occurred while loading duel page.',
+                  color: PALETTE.DANGER,
+                },
+              ],
+            },
+          }),
+        };
+      }
+    }
+
+    if (customId.startsWith('match_p:')) {
+      const parts = customId.split(':');
+      const targetPage = parseInt(parts[1], 10) || 1;
+      const filterMode = parts[2] || 'coop';
+      const steamIdA = parts[3];
+      const steamIdB = parts[4];
+
+      if (!steamIdA || !steamIdB || !STEAM_API_KEY) {
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: RESPONSE_TYPES.UPDATE_MESSAGE,
+            data: {
+              embeds: [
+                {
+                  title: 'Match Inaccessible',
+                  description: 'Unable to load game match data for pagination.',
+                  color: PALETTE.DANGER,
+                },
+              ],
+            },
+          }),
+        };
+      }
+
+      try {
+        const [summaryA, summaryB, matchResult] = await Promise.all([
+          getPlayerSummary(steamIdA, STEAM_API_KEY),
+          getPlayerSummary(steamIdB, STEAM_API_KEY),
+          findMatchingGames(steamIdA, steamIdB, filterMode, STEAM_API_KEY),
+        ]);
+
+        if (!summaryA || !summaryB || !matchResult?.success) {
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              type: RESPONSE_TYPES.UPDATE_MESSAGE,
+              data: {
+                embeds: [
+                  {
+                    title: 'Pagination Error',
+                    description: 'Failed to retrieve game match comparison data.',
+                    color: PALETTE.DANGER,
+                  },
+                ],
+              },
+            }),
+          };
+        }
+
+        const { embed, components } = buildGameMatchEmbedPayload(matchResult, summaryA, summaryB, targetPage, filterMode);
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: RESPONSE_TYPES.UPDATE_MESSAGE,
+            data: {
+              embeds: [embed],
+              components,
+            },
+          }),
+        };
+      } catch (err) {
+        console.error('Error in game match pagination:', err);
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: RESPONSE_TYPES.UPDATE_MESSAGE,
+            data: {
+              embeds: [
+                {
+                  title: 'Pagination Error',
+                  description: 'An error occurred while loading game match page.',
                   color: PALETTE.DANGER,
                 },
               ],
@@ -1676,8 +1763,11 @@ export const handler = async (event) => {
               '▸ `/platform-status`\n  └─ Service availability for Steam, Epic, PSN & Xbox.',
               '▸ `/wishlist <add|list|clear|remove|sync-steam>`\n  └─ Track deals & price targets.',
               '▸ `/currency <choice>`\n  └─ Set personal currency between USD ($) and BRL (R$).',
-              '▸ `/steam-link <target>`\n  └─ Link Steam account (SteamID64, vanity, or URL).',
+              '▸ `/steam-link [target]`\n  └─ Link Steam account (Valve OpenID one-click, SteamID64, or vanity).',
               '▸ `/steam-profile [user] [target]`\n  └─ View profile overview, VAC status, and stats.',
+              '▸ `/game-match <target1> <target2> [filter]`\n  └─ Discover shared co-op & multiplayer games across two libraries.',
+              '▸ `/steam-duel <target1> <target2>`\n  └─ Compare playtime and achievement dominance on common games.',
+              '▸ `/steam-backlog [target]`\n  └─ Telemetry on unplayed games, backlog percentage & wasted value.',
               '▸ `/free-play-radar`\n  └─ Browse active free giveaways and Free Weekends.',
               '▸ `/free-radar-dm <enabled>`\n  └─ Toggle automated DM alerts for free games.',
             ].join('\n'),
@@ -2510,6 +2600,219 @@ export const handler = async (event) => {
           statusCode: 200,
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(createEphemeralEmbed('Operation Failed', 'Unable to complete Steam library duel.', PALETTE.DANGER)),
+        };
+      }
+    }
+
+    // Command: /game-match <target1> <target2> [filter]
+    if (name === 'game-match') {
+      const target1Opt = options?.find((opt) => opt.name === 'target1')?.value?.trim();
+      const target2Opt = options?.find((opt) => opt.name === 'target2')?.value?.trim();
+      const filterOpt = options?.find((opt) => opt.name === 'filter')?.value?.trim() || 'coop';
+      const filterMode = filterOpt === 'all' ? 'all' : 'coop';
+
+      if (!STEAM_API_KEY) {
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(
+            createEphemeralEmbed(
+              'Steam Integration Offline',
+              'The Valve Steam Web API Key is not configured on this instance. Please contact the bot administrator.',
+              PALETTE.WARNING
+            )
+          ),
+        };
+      }
+
+      const authLoginUrl = AUTH_CALLBACK_URL ? AUTH_CALLBACK_URL.replace('/callback', '/login') : '';
+
+      async function resolveMatchTarget(targetStr) {
+        if (!targetStr) return { error: 'Target is required.' };
+        const mentionMatch = targetStr.match(/^<@!?(\d+)>$/);
+        if (mentionMatch) {
+          const mentionedId = mentionMatch[1];
+          const cfg = await docClient.send(
+            new QueryCommand({
+              TableName: TABLE_NAME,
+              KeyConditionExpression: 'PK = :pk AND SK = :sk',
+              ExpressionAttributeValues: {
+                ':pk': `USER#${mentionedId}`,
+                ':sk': 'CONFIG',
+              },
+            })
+          );
+          const steamId = cfg.Items?.[0]?.steam_id;
+          if (!steamId) {
+            return { unlinkedUserId: mentionedId };
+          }
+          return { steamId };
+        }
+
+        const resolved = await resolveSteamId(targetStr, STEAM_API_KEY);
+        if (!resolved) {
+          return {
+            error: `Could not resolve Steam profile for: \`${targetStr}\`.\n\nPlease verify your input:\n▸ 17-digit numeric **SteamID64**\n▸ Profile URL (\`https://steamcommunity.com/id/...\`)\n▸ Custom vanity URL or alias`,
+          };
+        }
+        return { steamId: resolved };
+      }
+
+      try {
+        const [res1, res2] = await Promise.all([
+          resolveMatchTarget(target1Opt),
+          resolveMatchTarget(target2Opt),
+        ]);
+
+        if (res1.unlinkedUserId) {
+          const loginUrl = `${authLoginUrl}?user_id=${encodeURIComponent(res1.unlinkedUserId)}`;
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(buildUnlinkedAccountEmbed(res1.unlinkedUserId, loginUrl)),
+          };
+        }
+
+        if (res2.unlinkedUserId) {
+          const loginUrl = `${authLoginUrl}?user_id=${encodeURIComponent(res2.unlinkedUserId)}`;
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(buildUnlinkedAccountEmbed(res2.unlinkedUserId, loginUrl)),
+          };
+        }
+
+        if (res1.error) {
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(createEphemeralEmbed('Steam Resolution Failed', res1.error, PALETTE.WARNING)),
+          };
+        }
+
+        if (res2.error) {
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(createEphemeralEmbed('Steam Resolution Failed', res2.error, PALETTE.WARNING)),
+          };
+        }
+
+        const steamIdA = res1.steamId;
+        const steamIdB = res2.steamId;
+
+        if (steamIdA === steamIdB) {
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(
+              createEphemeralEmbed(
+                'Invalid Match Pairing',
+                'Cannot match a Steam library against itself. Please specify two different players or profiles.',
+                PALETTE.WARNING
+              )
+            ),
+          };
+        }
+
+        const [summaryA, summaryB, matchResult] = await Promise.all([
+          getPlayerSummary(steamIdA, STEAM_API_KEY),
+          getPlayerSummary(steamIdB, STEAM_API_KEY),
+          findMatchingGames(steamIdA, steamIdB, filterMode, STEAM_API_KEY),
+        ]);
+
+        if (!summaryA || !summaryB) {
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(
+              createEphemeralEmbed('Profile Inaccessible', 'Unable to retrieve Steam summary data for one or both profiles.', PALETTE.WARNING)
+            ),
+          };
+        }
+
+        if (!matchResult?.success) {
+          if (matchResult?.error === 'PRIVATE_LIBRARY') {
+            const privateName =
+              matchResult.privatePlayer === 'A'
+                ? summaryA.personaName
+                : matchResult.privatePlayer === 'B'
+                ? summaryB.personaName
+                : 'Both players';
+
+            return {
+              statusCode: 200,
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
+                data: {
+                  embeds: [
+                    {
+                      title: 'Steam Library Private ❖ Match Inaccessible',
+                      description: `Cannot find matching games: **${privateName}** has their Steam game library set to **Private**.\n\nOwned games must be set to **Public** in Steam Privacy Settings to allow library cross-referencing.`,
+                      color: PALETTE.WARNING,
+                      footer: { text: 'zT Radar • Steam Match Intelligence' },
+                      timestamp: new Date().toISOString(),
+                    },
+                  ],
+                },
+              }),
+            };
+          }
+
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(createEphemeralEmbed('Match Failed', 'An error occurred while cross-referencing libraries.', PALETTE.DANGER)),
+          };
+        }
+
+        if (matchResult.matchingGames.length === 0) {
+          const filterDesc = filterMode === 'coop' ? 'co-op or multiplayer ' : '';
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
+              data: {
+                embeds: [
+                  {
+                    author: {
+                      name: `${summaryA.personaName} ✖ ${summaryB.personaName} • Game Match`,
+                      icon_url: summaryA.avatarUrl || undefined,
+                    },
+                    title: 'Shared Game Discovery',
+                    description: `No shared ${filterDesc}titles found between **${summaryA.personaName}** (${matchResult.countA} games) and **${summaryB.personaName}** (${matchResult.countB} games).${filterMode === 'coop' ? '\n\nTry running `/game-match` with filter set to **All Shared Games** to inspect single-player overlaps.' : ''}`,
+                    color: 0x5865f2,
+                    thumbnail: summaryB.avatarUrl ? { url: summaryB.avatarUrl } : undefined,
+                    footer: { text: 'zT Radar • Steam Co-op Discovery' },
+                    timestamp: new Date().toISOString(),
+                  },
+                ],
+              },
+            }),
+          };
+        }
+
+        const { embed, components } = buildGameMatchEmbedPayload(matchResult, summaryA, summaryB, 1, filterMode);
+
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
+            data: {
+              embeds: [embed],
+              components,
+            },
+          }),
+        };
+      } catch (err) {
+        console.error('Error executing /game-match:', err);
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(createEphemeralEmbed('Operation Failed', 'Unable to complete Steam game match discovery.', PALETTE.DANGER)),
         };
       }
     }

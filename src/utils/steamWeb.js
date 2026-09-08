@@ -1175,3 +1175,327 @@ export async function buildBacklogEmbedPayload(telemetry, summary, page = 1, sto
 
   return { embed, embeds: [embed], components };
 }
+
+/**
+ * Institutional registry of top Steam titles known to support multiplayer/co-op.
+ * Maps AppID to specific badge tags.
+ */
+export const KNOWN_MULTIPLAYER_APP_IDS = new Map([
+  [105600, ['Online Co-op', 'Multiplayer', 'Shared Screen']], // Terraria
+  [413150, ['Online Co-op', 'Multiplayer', 'Shared Screen']], // Stardew Valley
+  [620, ['Online Co-op', 'Shared Screen']],                   // Portal 2
+  [550, ['Online Co-op', 'Multiplayer']],                     // Left 4 Dead 2
+  [730, ['Multiplayer', 'Online PvP']],                       // Counter-Strike 2
+  [570, ['Multiplayer', 'Online PvP']],                       // Dota 2
+  [440, ['Multiplayer', 'Online Co-op']],                     // Team Fortress 2
+  [218620, ['Online Co-op', 'Multiplayer']],                  // Payday 2
+  [322330, ['Online Co-op', 'Multiplayer']],                  // Don't Starve Together
+  [252490, ['Multiplayer', 'Online PvP']],                    // Rust
+  [271590, ['Online Co-op', 'Multiplayer']],                  // GTA V
+  [1174180, ['Online Co-op', 'Multiplayer']],                 // Red Dead Redemption 2
+  [1086940, ['Online Co-op', 'Multiplayer']],                 // Baldur's Gate 3
+  [1245620, ['Online Co-op', 'Multiplayer']],                 // ELDEN RING
+  [1840080, ['Online Co-op', 'Multiplayer']],                 // HELLDIVERS 2
+  [1966720, ['Online Co-op', 'Multiplayer']],                 // Lethal Company
+  [1623730, ['Online Co-op', 'Multiplayer']],                 // Palworld
+  [2183900, ['Online Co-op', 'Multiplayer']],                 // Warhammer 40k: Space Marine 2
+  [892970, ['Online Co-op', 'Multiplayer']],                  // Valheim
+  [739630, ['Online Co-op', 'Multiplayer']],                  // Phasmophobia
+  [548430, ['Online Co-op', 'Multiplayer']],                  // Deep Rock Galactic
+  [1426210, ['Online Co-op', 'Shared Screen']],               // It Takes Two
+  [960090, ['Shared Screen', 'Multiplayer']],                 // Bloons TD 6
+  [1794680, ['Shared Screen', 'Multiplayer']],                // Vampire Survivors
+  [381210, ['Online Co-op', 'Multiplayer']],                  // Dead by Daylight
+  [252950, ['Online Co-op', 'Multiplayer']],                  // Rocket League
+  [1364780, ['Online Co-op', 'Multiplayer']],                 // Street Fighter 6
+  [774171, ['Online Co-op', 'Multiplayer']],                  // Among Us
+  [230410, ['Online Co-op', 'Multiplayer']],                  // Warframe
+  [236390, ['Multiplayer', 'Online PvP']],                    // War Thunder
+  [107410, ['Multiplayer', 'Online Co-op']],                  // Arma 3 / Arma 2
+  [386360, ['Online Co-op', 'Multiplayer']],                  // SMITE
+  [250900, ['Shared Screen']],                                // The Binding of Isaac: Rebirth
+  [588650, ['Shared Screen', 'Multiplayer']],                 // Dead Cells
+  [1046930, ['Online Co-op', 'Multiplayer']],                 // Risk of Rain 2
+  [281990, ['Multiplayer', 'Online Co-op']],                  // Stellaris
+  [289070, ['Multiplayer', 'Online Co-op']],                  // Sid Meier's Civilization VI
+  [394360, ['Multiplayer', 'Online Co-op']],                  // Hearts of Iron IV
+  [227300, ['Online Co-op', 'Multiplayer']],                  // Euro Truck Simulator 2
+  [270880, ['Online Co-op', 'Multiplayer']],                  // American Truck Simulator
+  [264710, ['Multiplayer', 'Online PvP']],                    // Subnautica
+  [1145350, ['Online Co-op', 'Multiplayer']],                 // Hades II
+  [1063730, ['Online Co-op', 'Multiplayer']],                 // New World
+]);
+
+/**
+ * Resolves multiplayer badges for an AppID by combining institutional registry,
+ * category IDs, and title keyword heuristics.
+ *
+ * @param {number} appId - Steam AppID
+ * @param {string} [name=''] - Title name
+ * @param {Array<number|object>} [categories=[]] - Category IDs or objects from Steam/ITAD
+ * @returns {Array<string>} Array of badges (e.g. ['Online Co-op', 'Multiplayer'])
+ */
+export function resolveMultiplayerBadges(appId, name = '', categories = []) {
+  const numericId = Number(appId);
+  const badges = new Set();
+
+  if (KNOWN_MULTIPLAYER_APP_IDS.has(numericId)) {
+    for (const b of KNOWN_MULTIPLAYER_APP_IDS.get(numericId)) {
+      badges.add(b);
+    }
+  }
+
+  if (Array.isArray(categories)) {
+    for (const cat of categories) {
+      const catId = typeof cat === 'object' ? Number(cat.id) : Number(cat);
+      if (catId === 38 || catId === 9 || catId === 39) {
+        badges.add('Online Co-op');
+      }
+      if (catId === 1 || catId === 48 || catId === 49) {
+        badges.add('Multiplayer');
+      }
+      if (catId === 24 || catId === 39) {
+        badges.add('Shared Screen');
+      }
+    }
+  }
+
+  const titleLower = (name || '').toLowerCase();
+  if (/\b(co-op|coop|together|team)\b/i.test(titleLower)) {
+    badges.add('Online Co-op');
+  }
+  if (/\b(multiplayer|online|arena|versus|vs|party|deathmatch|battle|warzone|squad|royale)\b/i.test(titleLower)) {
+    badges.add('Multiplayer');
+  }
+
+  return Array.from(badges);
+}
+
+/**
+ * Pure function: Computes library intersection between Player A and Player B,
+ * resolves multiplayer tags, filters by mode, and sorts descending by combined playtime.
+ *
+ * @param {Array} gamesA - Player A owned games
+ * @param {Array} gamesB - Player B owned games
+ * @param {string} [filterMode='coop'] - 'coop' (Multiplayer/Co-op only) or 'all'
+ * @returns {object} Matching telemetry and games list
+ */
+export function matchLibraryData(gamesA, gamesB, filterMode = 'coop') {
+  if (!Array.isArray(gamesA) || !Array.isArray(gamesB)) {
+    return {
+      totalCommon: 0,
+      matchedCount: 0,
+      filterMode,
+      games: [],
+    };
+  }
+
+  const mapA = new Map();
+  for (const g of gamesA) {
+    if (g?.appid) {
+      mapA.set(Number(g.appid), g);
+    }
+  }
+
+  const matched = [];
+  let totalCommonCount = 0;
+
+  for (const gB of gamesB) {
+    if (!gB?.appid) continue;
+    const appId = Number(gB.appid);
+    if (mapA.has(appId)) {
+      totalCommonCount += 1;
+      const gA = mapA.get(appId);
+      const playtimeA = Number(gA.playtime_forever || 0);
+      const playtimeB = Number(gB.playtime_forever || 0);
+      const totalPlaytime = playtimeA + playtimeB;
+      const name = gA.name || gB.name || `App #${appId}`;
+
+      const badges = resolveMultiplayerBadges(appId, name, gA.categories || gB.categories);
+      const isCoopOrMultiplayer = badges.length > 0;
+
+      if (filterMode === 'coop' && !isCoopOrMultiplayer) {
+        continue;
+      }
+
+      matched.push({
+        appid: appId,
+        name,
+        playtimeA,
+        playtimeB,
+        totalPlaytime,
+        hoursA: (playtimeA / 60).toFixed(1),
+        hoursB: (playtimeB / 60).toFixed(1),
+        totalHours: (totalPlaytime / 60).toFixed(1),
+        badges: isCoopOrMultiplayer ? badges : ['Single-player'],
+        isCoop: isCoopOrMultiplayer,
+        isCoopOrMultiplayer,
+        img_icon_url: gA.img_icon_url || gB.img_icon_url || null,
+      });
+    }
+  }
+
+  // Sort descending by combined playtime, then alphabetically
+  matched.sort((a, b) => {
+    if (b.totalPlaytime !== a.totalPlaytime) {
+      return b.totalPlaytime - a.totalPlaytime;
+    }
+    return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
+  });
+
+  return {
+    success: true,
+    totalCommon: totalCommonCount,
+    matchedCount: matched.length,
+    filterMode,
+    games: matched,
+    matchingGames: matched,
+  };
+}
+
+/**
+ * End-to-end multi-library co-op & multiplayer game discovery coordinator.
+ *
+ * @param {string} steamIdA - Player A SteamID64
+ * @param {string} steamIdB - Player B SteamID64
+ * @param {string} [filterMode='coop'] - 'coop' or 'all'
+ * @param {string} apiKey - Steam Web API Key
+ * @returns {Promise<object>} Match results
+ */
+export async function findMatchingGames(steamIdA, steamIdB, filterMode = 'coop', apiKey) {
+  if (!steamIdA || !steamIdB || !apiKey) {
+    return { success: false, error: 'INVALID_PARAMS' };
+  }
+
+  const [libA, libB] = await Promise.all([
+    getPlayerLibraryDetailed(steamIdA, apiKey),
+    getPlayerLibraryDetailed(steamIdB, apiKey),
+  ]);
+
+  if (!libA || !libB) {
+    return { success: false, error: 'FETCH_ERROR' };
+  }
+
+  if (libA.isPrivate || libB.isPrivate) {
+    return {
+      success: false,
+      error: 'PRIVATE_LIBRARY',
+      privatePlayer: libA.isPrivate && libB.isPrivate ? 'BOTH' : libA.isPrivate ? 'A' : 'B',
+      countA: libA.gameCount,
+      countB: libB.gameCount,
+    };
+  }
+
+  const matchData = matchLibraryData(libA.games, libB.games, filterMode);
+
+  return {
+    success: true,
+    steamIdA,
+    steamIdB,
+    countA: libA.gameCount,
+    countB: libB.gameCount,
+    ...matchData,
+  };
+}
+
+/**
+ * Generates Discord Rich Embed and interactive pagination buttons for /game-match.
+ *
+ * @param {object} matchResult - Result from findMatchingGames or matchLibraryData
+ * @param {object} summaryA - Player A summary
+ * @param {object} summaryB - Player B summary
+ * @param {number} [page=1] - Requested 1-based page index
+ * @param {string} [filterMode='coop'] - 'coop' or 'all'
+ * @returns {object} { embed, embeds: [embed], components }
+ */
+export function buildGameMatchEmbedPayload(matchResult, summaryA, summaryB, page = 1, filterMode = 'coop') {
+  const PAGE_SIZE = 5;
+  const games = matchResult?.matchingGames || matchResult?.games || [];
+  const totalGames = games.length;
+  const totalPages = Math.max(1, Math.ceil(totalGames / PAGE_SIZE));
+  const requestedPage = typeof page === 'number' && page >= 1 ? page : 1;
+  const currentPage = Math.min(Math.max(1, requestedPage), totalPages);
+
+  const personaA = summaryA?.personaName || summaryA?.personaname || 'Player A';
+  const personaB = summaryB?.personaName || summaryB?.personaname || 'Player B';
+  const steamIdA = matchResult?.steamIdA || summaryA?.steamId || summaryA?.steamid || '';
+  const steamIdB = matchResult?.steamIdB || summaryB?.steamId || summaryB?.steamid || '';
+  const avatarA = summaryA?.avatarUrl || summaryA?.avatarfull || null;
+  const avatarB = summaryB?.avatarUrl || summaryB?.avatarfull || null;
+
+  const startIdx = (currentPage - 1) * PAGE_SIZE;
+  const pageGames = games.slice(startIdx, startIdx + PAGE_SIZE);
+
+  const filterLabel = filterMode === 'all' ? 'All Shared Games' : 'Co-op & Multiplayer Only';
+
+  const descriptionLines = [
+    `Shared Titles: **${matchResult.totalCommon ?? 0}** Games • Matched: **${matchResult.matchedCount ?? totalGames}** Titles`,
+    `Filter Mode: **${filterLabel}**`,
+  ];
+
+  let gameCardsText = '';
+  if (pageGames.length === 0) {
+    gameCardsText = filterMode === 'coop'
+      ? '*No common co-op or multiplayer titles found between these libraries. Try matching with filter: `all`.*'
+      : '*No shared games found between these libraries.*';
+  } else {
+    gameCardsText = pageGames
+      .map((g) => {
+        const badgeStr = g.badges.map((b) => `\`[${b}]\``).join(' ');
+        const storeLink = `https://store.steampowered.com/app/${g.appid}`;
+        return [
+          `❖ **${g.name}** ${badgeStr}`,
+          `  └─ Combined Playtime: \`${g.totalHours} hrs\` (${personaA}: ${g.hoursA}h • ${personaB}: ${g.hoursB}h) • [Steam Store](${storeLink})`,
+        ].join('\n');
+      })
+      .join('\n\n');
+  }
+
+  const fields = [
+    {
+      name: `Matched Titles [Page ${currentPage}/${totalPages}]`,
+      value: gameCardsText,
+      inline: false,
+    },
+  ];
+
+  const embed = {
+    author: {
+      name: `${personaA} ✖ ${personaB} • Game Match`,
+      icon_url: avatarA || undefined,
+    },
+    title: 'Steam Library Match',
+    description: descriptionLines.join('\n'),
+    color: 0x5865f2,
+    fields,
+    thumbnail: avatarB ? { url: avatarB } : undefined,
+    footer: {
+      text: `Page ${currentPage} of ${totalPages} • Filter: ${filterMode} • zT Radar Co-op Discovery`,
+    },
+    timestamp: new Date().toISOString(),
+  };
+
+  const components = totalPages > 1 ? [
+    {
+      type: 1, // Action Row
+      components: [
+        {
+          type: 2, // Button
+          style: 2, // Secondary
+          label: '◀ Prev',
+          custom_id: `match_p:${currentPage - 1}:${filterMode}:${steamIdA}:${steamIdB}`,
+          disabled: currentPage <= 1,
+        },
+        {
+          type: 2, // Button
+          style: 1, // Primary
+          label: 'Next ▶',
+          custom_id: `match_p:${currentPage + 1}:${filterMode}:${steamIdA}:${steamIdB}`,
+          disabled: currentPage >= totalPages,
+        },
+      ],
+    },
+  ] : [];
+
+  return { embed, embeds: [embed], components };
+}

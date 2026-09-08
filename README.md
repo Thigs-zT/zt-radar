@@ -28,7 +28,10 @@
 ### Core Capabilities
 * **Multi-Storefront Deal Intelligence**: Real-time cross-store price comparisons across a verified store whitelist: **Steam**, **Epic Games Store**, **GOG**, and **Nuuvem**.
 * **Historical All-Time Low Tracking**: Flags genuine all-time low prices powered by IsThereAnyDeal and CheapShark historical datasets.
-* **Steam Ecosystem Integration**: Resolve vanity URLs, inspect profile telemetry, audit VAC/community ban status, and synchronize monitored wishlists directly from Steam's official `IWishlistService`.
+* **Steam OpenID 2.0 Cryptographic Identity**: Zero-dependency official Valve OpenID authentication with single-click browser linking and 15-minute sliding CSRF state tokens.
+* **Multi-Library Co-op Discovery (`/game-match`)**: Cross-references two Steam libraries in memory to instantly pinpoint shared co-op, multiplayer, and split-screen titles for friend sessions.
+* **Steam Library Duels (`/steam-duel`)**: Visual head-to-head library comparison showing playtime dominance, achievement progress, and shared game catalog statistics.
+* **Steam Backlog & Telemetry (`/steam-backlog`)**: Audits unplayed paid games, calculates real backlog percentages, and computes wasted library value using regional ITAD pricing.
 * **Playtime & Value Analysis**: Native Node.js protocol emulation for HowLongToBeat playtime statistics cross-referenced with live prices to calculate dynamic **Cost-per-Hour ($/hr and R$/hr)** metrics.
 * **Dual-Currency Regional Awareness**: Native support for **US Dollars ($)** and official **Brazilian Reais (R$)** regional store pricing with zero synthetic currency conversion.
 * **Autonomous Deal Radar**: Hourly EventBridge scanner that curates top-tier promotions, respects quality heuristic filters (minimum review score and discount cut), and delivers server broadcasts and user direct messages.
@@ -97,7 +100,16 @@ To protect users from unverified key resellers, stolen credit card grey-market l
 Instead of relying on outdated, bloated, or vulnerable third-party npm libraries that pull in heavy HTTP clients, zT Radar implements a standalone native Node.js fetch utility (`src/utils/hltbNative.js`). It extracts dynamic frontend search tokens directly from HowLongToBeat's bundle, caches the token with a 1-hour sliding TTL, and queries completion durations with defensive 2500ms timeouts.
 
 #### 5. Paginated Interactive Navigation (Type 3 / Type 7 Components)
-Discord interaction responses impose a strict 4096-character limit on embed descriptions and a 3-second acknowledgement window. The `/wishlist list` command implements an in-memory 10-item pagination mechanism using Discord Message Component Buttons (`Type 3`) and direct message update responses (`Type 7`), guaranteeing payloads stay under 1500 characters and update within < 150ms.
+Discord interaction responses impose a strict 4096-character limit on embed descriptions and a 3-second acknowledgement window. The `/wishlist list`, `/game-match`, `/steam-duel`, and `/steam-backlog` commands implement in-memory pagination mechanisms using Discord Message Component Buttons (`Type 3`) and direct message update responses (`Type 7`), guaranteeing payloads stay under character limits and update within < 150ms.
+
+#### 6. Zero-Dependency Steam OpenID 2.0 Authentication
+To authenticate user ownership without asking for passwords or API tokens, zT Radar implements native OpenID 2.0 verification directly against `https://steamcommunity.com/openid/login`. It issues 256-bit cryptographically random CSRF state tokens stored in DynamoDB with a 15-minute TTL. Incoming callbacks are validated with Steam's `check_authentication` endpoint before setting `steam_verified: true`.
+
+#### 7. In-Memory Social Intelligence & Co-op Discovery
+Commands like `/game-match` and `/steam-duel` fetch both players' libraries concurrently via `Promise.all`. Game intersections, playtime comparisons, and multiplayer category classifications are computed entirely in-memory using optimized badge dictionaries and Steam Storefront category heuristics. This eliminates external per-game HTTP latency and comfortably complies with Discord's 3-second timeout.
+
+#### 8. Compact Custom ID Architecture
+Discord restricts component `custom_id` strings to 100 characters. For interactive pagination, state is serialized into compact micro-schemas such as `match_p:<page>:<filter>:<steamIdA>:<steamIdB>` (~49 characters) and `duel_p:<page>:<steamIdA>:<steamIdB>` (~44 characters), safely under the platform ceiling.
 
 ---
 
@@ -127,12 +139,15 @@ Discord interaction responses impose a strict 4096-character limit on embed desc
 | `/wishlist sync-steam`| `[target] [min_discount] [min_rating]` | Bulk-import your public Steam wishlist using Valve's `IWishlistService` with quality thresholds. |
 | `/free-radar-dm` | `<enabled>` | Toggle automated direct message alerts for all free games and free weekends independent of wishlist. |
 
-### 3. Steam Ecosystem Identity
+### 3. Steam Ecosystem Identity & Social Intelligence
 
 | Command | Arguments | Description |
 | :--- | :--- | :--- |
-| `/steam-link` | `<target>` | Link your Steam account via SteamID64, profile link, or custom vanity URL. |
+| `/steam-link` | `[target]` | Link your Steam account via Valve OpenID 2.0 single-click verification, SteamID64, profile link, or vanity URL. |
 | `/steam-profile` | `[user] [target]` | Display comprehensive profile metrics, live game activity, VAC/community ban status, and library metrics. |
+| `/game-match` | `<target1> <target2> [filter]` | Cross-reference two Steam libraries to find common games, filtered by Co-op & Multiplayer or All Shared. |
+| `/steam-duel` | `<target1> <target2>` | Duel two Steam libraries comparing playtime and achievement dominance on common games. |
+| `/steam-backlog` | `[target]` | Telemetry on unplayed paid games, backlog percentage, and estimated wasted library value. |
 
 ### 4. Server Deal Radar & Administration
 
@@ -278,7 +293,8 @@ zt-radar/
 │       ├── itadApi.js          # IsThereAnyDeal API v1-v3 client & normalization
 │       ├── platformStatus.js   # Live gaming platform status & latency probes
 │       ├── steamIntel.js       # Steam Storefront trending & hardware specs client
-│       └── steamWeb.js         # Valve Steam Web API, ban status & wishlist engine
+│       ├── steamOpenId.js      # Steam OpenID 2.0 auth, state token & verification engine
+│       └── steamWeb.js         # Valve Steam Web API, ban status, backlog & duel engine
 ├── .env.example                # Runtime environment variable template
 ├── .gitignore                  # Git exclusion rules for secrets, build artifacts, and directives
 ├── AGENTS.md                   # Core architecture guidelines (gitignored)

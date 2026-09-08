@@ -270,6 +270,34 @@ export const commands = [
     ],
   },
   {
+    name: 'game-match',
+    description: 'Find common games and co-op titles between two Steam libraries',
+    options: [
+      {
+        name: 'target1',
+        description: 'First Steam user (mention @user, SteamID64, or vanity custom URL)',
+        type: 3, // STRING
+        required: true,
+      },
+      {
+        name: 'target2',
+        description: 'Second Steam user (mention @user, SteamID64, or vanity custom URL)',
+        type: 3, // STRING
+        required: true,
+      },
+      {
+        name: 'filter',
+        description: 'Filter library match mode (default: co-op games)',
+        type: 3, // STRING
+        required: false,
+        choices: [
+          { name: 'Co-op & Multiplayer Only', value: 'coop' },
+          { name: 'All Shared Games', value: 'all' },
+        ],
+      },
+    ],
+  },
+  {
     name: 'steam-duel',
     description: 'Duel two Steam libraries comparing playtime and achievement dominance on common games',
     options: [

@@ -6,6 +6,9 @@ import {
   filterBacklogData,
   buildDuelEmbedPayload,
   buildBacklogEmbedPayload,
+  matchLibraryData,
+  buildGameMatchEmbedPayload,
+  resolveMultiplayerBadges,
   KNOWN_F2P_APP_IDS,
 } from '../src/utils/steamWeb.js';
 import { formatExpiryAvailability, formatPriceComparisonDiff, getMarketOverviewDeals } from '../src/utils/itadApi.js';
@@ -825,6 +828,89 @@ assert.ok(backlogPayload.embeds[0].fields[3].value.includes('Current Store: **$ 
 
 console.log('  Case 4 (Duel visual hierarchy & factual backlog valuation): Dual avatars, clean diffs & real store prices (PASS)');
 
+// Test 13: Phase 3 - /game-match Co-op Discovery & Social Suite Verification
+console.log('\n[Test 13] Phase 3: /game-match Co-op Discovery & Social Suite Verification');
+
+// Case 1: Library matching intersection and co-op tag filtering
+const mockLibraryA = [
+  { appid: 550, name: 'Left 4 Dead 2', playtime_forever: 3000 },
+  { appid: 105600, name: 'Terraria', playtime_forever: 1200 },
+  { appid: 400, name: 'Portal', playtime_forever: 300 },
+  { appid: 730, name: 'Counter-Strike 2', playtime_forever: 5000 },
+];
+
+const mockLibraryB = [
+  { appid: 550, name: 'Left 4 Dead 2', playtime_forever: 1500 },
+  { appid: 105600, name: 'Terraria', playtime_forever: 600 },
+  { appid: 400, name: 'Portal', playtime_forever: 400 },
+  { appid: 1086940, name: "Baldur's Gate 3", playtime_forever: 8000 },
+];
+
+const coopMatch = matchLibraryData(mockLibraryA, mockLibraryB, 'coop');
+assert.strictEqual(coopMatch.success, true, 'Match result must succeed');
+assert.strictEqual(coopMatch.totalCommon, 3, 'Total shared games must be 3 (L4D2, Terraria, Portal)');
+assert.strictEqual(coopMatch.matchingGames.length, 2, 'Co-op filter must only include L4D2 and Terraria');
+assert.strictEqual(coopMatch.matchingGames[0].appid, 550, 'First match must be L4D2 by combined playtime (4500m)');
+assert.ok(coopMatch.matchingGames[0].isCoop, 'L4D2 must be flagged as co-op');
+assert.ok(coopMatch.matchingGames[0].badges.includes('Online Co-op'), 'L4D2 must include Online Co-op badge');
+assert.strictEqual(coopMatch.matchingGames[1].appid, 105600, 'Second match must be Terraria');
+
+const allMatch = matchLibraryData(mockLibraryA, mockLibraryB, 'all');
+assert.strictEqual(allMatch.matchingGames.length, 3, 'All filter must include all 3 shared games');
+assert.ok(allMatch.matchingGames.some((g) => g.appid === 400), 'Portal must be included in all matches');
+console.log('  Case 1 (Library matching intersection & co-op tag filtering): Filtered 2 co-op titles and 3 total shared (PASS)');
+
+// Case 2: Custom ID length validation (< 100 chars)
+const steamId64A = '76561198012345678';
+const steamId64B = '76561198087654321';
+const customIdCoop = `match_p:1:coop:${steamId64A}:${steamId64B}`;
+const customIdAll = `match_p:99:all:${steamId64A}:${steamId64B}`;
+assert.ok(customIdCoop.length < 100, `custom_id ${customIdCoop} must be < 100 chars (was ${customIdCoop.length})`);
+assert.ok(customIdAll.length < 100, `custom_id ${customIdAll} must be < 100 chars (was ${customIdAll.length})`);
+console.log(`  Case 2 (Custom ID safety): match_p format is ${customIdCoop.length} chars (< 100 char limit) (PASS)`);
+
+// Case 3: Embed payload structure, dual avatar visualization, badges & pagination states
+const mockMatchSummaryA = { personaName: 'Alice', avatarUrl: 'https://steam.cdn/alice.jpg' };
+const mockMatchSummaryB = { personaName: 'Bob', avatarUrl: 'https://steam.cdn/bob.jpg' };
+
+const matchPayload = buildGameMatchEmbedPayload(coopMatch, mockMatchSummaryA, mockMatchSummaryB, 1, 'coop');
+assert.ok(matchPayload.embed, 'Must return embed');
+assert.strictEqual(matchPayload.embed.color, 0x5865f2, 'Embed color must be 0x5865F2');
+assert.strictEqual(matchPayload.embed.author.name, 'Alice ✖ Bob • Game Match', 'Dual author title must match');
+assert.strictEqual(matchPayload.embed.author.icon_url, 'https://steam.cdn/alice.jpg', 'Author icon must be Player A');
+assert.strictEqual(matchPayload.embed.thumbnail.url, 'https://steam.cdn/bob.jpg', 'Thumbnail must be Player B');
+assert.ok(matchPayload.embed.fields[0].value.includes('`[Online Co-op]`'), 'Field must include Online Co-op badge');
+
+// Multi-page test for Game Match (e.g. 8 matching games with 5/page)
+const multiGamesA = Array.from({ length: 8 }, (_, i) => ({
+  appid: 1000 + i,
+  name: `Co-op Game ${i + 1}`,
+  playtime_forever: (8 - i) * 100,
+}));
+const multiGamesB = Array.from({ length: 8 }, (_, i) => ({
+  appid: 1000 + i,
+  name: `Co-op Game ${i + 1}`,
+  playtime_forever: (8 - i) * 50,
+}));
+const multiMatch = {
+  ...matchLibraryData(multiGamesA, multiGamesB, 'all'),
+  steamIdA: steamId64A,
+  steamIdB: steamId64B,
+};
+const multiMatchPayloadP1 = buildGameMatchEmbedPayload(multiMatch, mockMatchSummaryA, mockMatchSummaryB, 1, 'all');
+assert.strictEqual(multiMatchPayloadP1.components.length, 1, 'Multi-page match must include action row');
+const [mPrev1, mNext1] = multiMatchPayloadP1.components[0].components;
+assert.strictEqual(mPrev1.disabled, true, 'Prev button on page 1 must be disabled');
+assert.strictEqual(mNext1.disabled, false, 'Next button on page 1 must be enabled');
+assert.strictEqual(mNext1.custom_id, `match_p:2:all:${steamId64A}:${steamId64B}`, 'Custom ID must match expected format');
+
+const multiMatchPayloadP2 = buildGameMatchEmbedPayload(multiMatch, mockMatchSummaryA, mockMatchSummaryB, 2, 'all');
+const [mPrev2, mNext2] = multiMatchPayloadP2.components[0].components;
+assert.strictEqual(mPrev2.disabled, false, 'Prev button on page 2 must be enabled');
+assert.strictEqual(mNext2.disabled, true, 'Next button on page 2 must be disabled');
+console.log('  Case 3 (Embed payload structure, dual avatars, badges & pagination): Verified author, thumbnail, badges & button states (PASS)');
+
 console.log('\nAll diagnostic verification checks PASSED successfully!');
+
 
 
