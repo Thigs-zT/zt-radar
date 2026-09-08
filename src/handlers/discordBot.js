@@ -590,7 +590,7 @@ export const handler = async (event) => {
           };
         }
 
-        const { embed, components } = buildBacklogEmbedPayload(telemetry, summary, targetPage);
+        const { embed, components } = await buildBacklogEmbedPayload(telemetry, summary, targetPage);
         return {
           statusCode: 200,
           headers: { 'Content-Type': 'application/json' },
@@ -2474,9 +2474,14 @@ export const handler = async (event) => {
               data: {
                 embeds: [
                   {
-                    title: `Steam Library Duel ❖ ${summaryA.personaName} vs ${summaryB.personaName}`,
+                    author: {
+                      name: `${summaryA.personaName} vs ${summaryB.personaName} • Steam Duel`,
+                      icon_url: summaryA.avatarUrl || undefined,
+                    },
+                    title: 'Steam Library Duel',
                     description: `No common titles found between **${summaryA.personaName}** (${comparison.countA} games) and **${summaryB.personaName}** (${comparison.countB} games).`,
                     color: 0x5865f2,
+                    thumbnail: summaryB.avatarUrl ? { url: summaryB.avatarUrl } : undefined,
                     footer: { text: 'zT Radar • Steam Duel Intelligence' },
                     timestamp: new Date().toISOString(),
                   },
@@ -2654,7 +2659,7 @@ export const handler = async (event) => {
           };
         }
 
-        const { embed, components } = buildBacklogEmbedPayload(telemetry, summary, 1);
+        const { embed, components } = await buildBacklogEmbedPayload(telemetry, summary, 1);
 
         return {
           statusCode: 200,

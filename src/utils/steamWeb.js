@@ -581,30 +581,6 @@ export const KNOWN_F2P_APP_IDS = new Set([
   1281930, // tCell
 ]);
 
-// Benchmark price catalog for institutional titles (USD)
-export const KNOWN_GAME_PRICES_USD = {
-  1086940: 59.99, // Baldur's Gate 3
-  1245620: 59.99, // ELDEN RING
-  1091500: 59.99, // Cyberpunk 2077
-  292030: 39.99,  // The Witcher 3: Wild Hunt
-  1174180: 59.99, // Red Dead Redemption 2
-  271590: 29.99,  // Grand Theft Auto V
-  252490: 39.99,  // Rust
-  105600: 9.99,   // Terraria
-  413150: 14.99,  // Stardew Valley
-  1145360: 24.99, // Hades
-  2379780: 14.99, // Balatro
-  1794680: 4.99,  // Vampire Survivors
-  646570: 24.99,  // Slay the Spire
-  1966720: 9.99,  // Lethal Company
-  367520: 14.99,  // Hollow Knight
-  2183900: 59.99, // Warhammer 40k: Space Marine 2
-  1623730: 29.99, // Palworld
-  1568590: 39.99, // Manor Lords
-  2358720: 59.99, // Black Myth: Wukong
-  1840080: 39.99, // HELLDIVERS 2
-};
-
 /**
  * Fetches detailed game library including AppID, name, playtime, and icon URL.
  * Excludes played free games at the Steam API level.
@@ -850,10 +826,12 @@ export function filterBacklogData(games, preferredCurrency = 'USD') {
       unplayedCount: 0,
       unplayedPaidCount: 0,
       playedCount: 0,
+      neverPlayedCount: 0,
+      neverOpenedCount: 0,
+      startedCount: 0,
+      abandonedCount: 0,
       backlogRatio: 0,
       backlogRatioPercent: 0,
-      estimatedWastedValue: 0,
-      estimatedInactiveValue: 0,
       currencySymbol: preferredCurrency === 'BRL' ? 'R$' : '$',
       preferredCurrency,
       backlogGames: [],
@@ -871,24 +849,28 @@ export function filterBacklogData(games, preferredCurrency = 'USD') {
 
   const playedGames = [];
   const backlogGames = [];
+  let neverPlayedCount = 0;
+  let startedCount = 0;
 
   for (const game of paidGames) {
     const mins = Number(game.playtime_forever || game.playtimeMinutes || 0);
     const appId = Number(game.appid || game.appId || 0);
     const name = game.name || `App #${appId}`;
-    const priceUsd = KNOWN_GAME_PRICES_USD[appId] || 19.99;
-    const price = preferredCurrency === 'BRL' ? Number((priceUsd * 4.5).toFixed(2)) : priceUsd;
 
     const gameRecord = {
       appid: appId,
       name,
       playtime_forever: mins,
       img_icon_url: game.img_icon_url || null,
-      estimatedPrice: price,
     };
 
     if (mins < 60) {
       backlogGames.push(gameRecord);
+      if (mins === 0) {
+        neverPlayedCount += 1;
+      } else {
+        startedCount += 1;
+      }
     } else {
       playedGames.push(gameRecord);
     }
@@ -901,8 +883,6 @@ export function filterBacklogData(games, preferredCurrency = 'USD') {
   const unplayedCount = backlogGames.length;
   const playedCount = playedGames.length;
   const backlogRatio = totalPaidCount > 0 ? Number(((unplayedCount / totalPaidCount) * 100).toFixed(1)) : 0;
-  const totalValue = backlogGames.reduce((acc, g) => acc + g.estimatedPrice, 0);
-  const estimatedWastedValue = Number(totalValue.toFixed(2));
   const currencySymbol = preferredCurrency === 'BRL' ? 'R$' : '$';
 
   return {
@@ -911,10 +891,12 @@ export function filterBacklogData(games, preferredCurrency = 'USD') {
     unplayedCount,
     unplayedPaidCount: unplayedCount,
     playedCount,
+    neverPlayedCount,
+    neverOpenedCount: neverPlayedCount,
+    startedCount,
+    abandonedCount: startedCount,
     backlogRatio,
     backlogRatioPercent: backlogRatio,
-    estimatedWastedValue,
-    estimatedInactiveValue: estimatedWastedValue,
     currencySymbol,
     preferredCurrency,
     backlogGames,
@@ -946,6 +928,55 @@ export async function calculateBacklogTelemetry(steamId64, apiKey, preferredCurr
 }
 
 /**
+ * Executes a lightweight lookup to the Steam Storefront API to retrieve real-time pricing.
+ * Employs a defensive 1200ms timeout using AbortController.
+ *
+ * @param {number|string} appId - Steam Application ID
+ * @param {string} countryCode - 'us' or 'br'
+ * @returns {Promise<string>} Formatted store price, 'Free / Included', or 'Delisted / Legacy'
+ */
+export async function fetchSteamAppStorePrice(appId, countryCode = 'us') {
+  if (!appId) return 'Delisted / Legacy';
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 1200);
+
+  try {
+    const url = `https://store.steampowered.com/api/appdetails?appids=${appId}&cc=${countryCode}&filters=price_overview`;
+    const res = await fetch(url, {
+      headers: { 'User-Agent': USER_AGENT },
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+
+    if (!res.ok) {
+      return 'Delisted / Legacy';
+    }
+
+    const data = await res.json();
+    const appData = data?.[appId];
+
+    if (!appData?.success || !appData?.data) {
+      return 'Delisted / Legacy';
+    }
+
+    if (appData.data.is_free) {
+      return 'Free / Included';
+    }
+
+    const priceOverview = appData.data.price_overview;
+    if (priceOverview?.final_formatted) {
+      return priceOverview.final_formatted;
+    }
+
+    return 'Delisted / Legacy';
+  } catch {
+    clearTimeout(timeoutId);
+    return 'Delisted / Legacy';
+  }
+}
+
+/**
  * Generates Discord interaction embed and pagination components for Steam Library Duel.
  */
 export function buildDuelEmbedPayload(comparison, summaryA, summaryB, page = 1) {
@@ -960,41 +991,16 @@ export function buildDuelEmbedPayload(comparison, summaryA, summaryB, page = 1) 
   const steamIdA = summaryA?.steamId || summaryA?.steamid || '';
   const steamIdB = summaryB?.steamId || summaryB?.steamid || '';
   const avatarA = summaryA?.avatarUrl || summaryA?.avatarfull || null;
+  const avatarB = summaryB?.avatarUrl || summaryB?.avatarfull || null;
 
   const startIdx = (currentPage - 1) * PAGE_SIZE;
   const pageGames = (comparison?.commonGames || []).slice(startIdx, startIdx + PAGE_SIZE);
-
-  let leaderText;
-  if (comparison.overallWinner === 'A') {
-    leaderText = `**${personaA}** leads by ${comparison.winsA - comparison.winsB} titles`;
-  } else if (comparison.overallWinner === 'B') {
-    leaderText = `**${personaB}** leads by ${comparison.winsB - comparison.winsA} titles`;
-  } else {
-    leaderText = 'Honorable Dead Heat (Tied)';
-  }
-
-  const scoreboardLines = [
-    `▸ **${personaA}**: **${comparison.winsA}** Dominance Wins (${comparison.totalHoursA} hrs)`,
-    `▸ **${personaB}**: **${comparison.winsB}** Dominance Wins (${comparison.totalHoursB} hrs)`,
-    `▸ **Tied Playtime**: **${comparison.ties}** Titles`,
-    `▸ **Shared Library**: **${comparison.commonCount ?? comparison.totalCommon}** Common Titles`,
-    `▸ **Dominance Leader**: ${leaderText}`,
-  ];
-
-  if (comparison.topAchievements) {
-    const ach = comparison.topAchievements;
-    scoreboardLines.push(
-      `▸ **${ach.gameName}** Achievement Dominance:`,
-      `  └─ ${personaA}: ${ach.achA.unlocked}/${ach.achA.total} (${ach.achA.percent}%)`,
-      `  └─ ${personaB}: ${ach.achB.unlocked}/${ach.achB.total} (${ach.achB.percent}%)`
-    );
-  }
 
   const diffBlocks = pageGames.map((g) => {
     if (g.winner === 'A') {
       return [
         '```diff',
-        `[ Common Title ❖ ${g.name} ]`,
+        `[ ${g.name} ]`,
         `- ${personaB}: ${g.hoursB} hrs`,
         `+ ${personaA}: ${g.hoursA} hrs ★ Dominant (+${g.diffHours} hrs)`,
         '```',
@@ -1002,7 +1008,7 @@ export function buildDuelEmbedPayload(comparison, summaryA, summaryB, page = 1) 
     } else if (g.winner === 'B') {
       return [
         '```diff',
-        `[ Common Title ❖ ${g.name} ]`,
+        `[ ${g.name} ]`,
         `- ${personaA}: ${g.hoursA} hrs`,
         `+ ${personaB}: ${g.hoursB} hrs ★ Dominant (+${g.diffHours} hrs)`,
         '```',
@@ -1010,7 +1016,7 @@ export function buildDuelEmbedPayload(comparison, summaryA, summaryB, page = 1) 
     } else {
       return [
         '```diff',
-        `[ Common Title ❖ ${g.name} ]`,
+        `[ ${g.name} ]`,
         `! ${personaA}: ${g.hoursA} hrs`,
         `! ${personaB}: ${g.hoursB} hrs (Tied Playtime)`,
         '```',
@@ -1018,25 +1024,30 @@ export function buildDuelEmbedPayload(comparison, summaryA, summaryB, page = 1) 
     }
   }).join('\n');
 
+  const commonCount = comparison.commonCount ?? comparison.totalCommon ?? 0;
+  const scoreboardDescription = [
+    `Dominance Score: **${comparison.winsA}** (${personaA}) vs **${comparison.winsB}** (${personaB})`,
+    `Total Time Invested: **${comparison.totalHoursA}h** vs **${comparison.totalHoursB}h** • **${commonCount}** Shared Titles`,
+  ].join('\n');
+
   const fields = [
     {
-      name: '❖ Duel Telemetry & Scoreboard',
-      value: scoreboardLines.join('\n'),
-      inline: false,
-    },
-    {
-      name: `❖ Shared Titles Playtime Comparison [Page ${currentPage}/${totalPages}]`,
+      name: `Shared Titles Playtime Comparison [Page ${currentPage}/${totalPages}]`,
       value: diffBlocks || '*No shared titles on this page.*',
       inline: false,
     },
   ];
 
   const embed = {
-    title: `Steam Library Duel ❖ ${personaA} vs ${personaB}`,
-    description: `Cross-library analysis comparing playtime dominance across **${comparison.commonCount ?? comparison.totalCommon}** shared Steam titles.`,
+    title: 'Steam Library Duel',
+    author: {
+      name: `${personaA} vs ${personaB} • Steam Duel`,
+      icon_url: avatarA || undefined,
+    },
+    description: scoreboardDescription,
     color: 0x5865f2,
     fields,
-    thumbnail: avatarA ? { url: avatarA } : undefined,
+    thumbnail: avatarB ? { url: avatarB } : undefined,
     footer: {
       text: `Page ${currentPage} of ${totalPages} • zT Radar • Steam Duel`,
     },
@@ -1071,7 +1082,7 @@ export function buildDuelEmbedPayload(comparison, summaryA, summaryB, page = 1) 
 /**
  * Generates Discord interaction embed and pagination components for Steam Library Backlog.
  */
-export function buildBacklogEmbedPayload(telemetry, summary, page = 1) {
+export async function buildBacklogEmbedPayload(telemetry, summary, page = 1, storePricesMap = null) {
   const PAGE_SIZE = 5;
   const totalUnplayed = telemetry.backlogGames.length;
   const totalPages = Math.max(1, Math.ceil(totalUnplayed / PAGE_SIZE));
@@ -1085,47 +1096,44 @@ export function buildBacklogEmbedPayload(telemetry, summary, page = 1) {
   const startIdx = (currentPage - 1) * PAGE_SIZE;
   const pageGames = telemetry.backlogGames.slice(startIdx, startIdx + PAGE_SIZE);
 
-  const overviewLines = [
-    `▸ **Total Paid Games**: **${telemetry.totalPaidCount}** Titles`,
-    `▸ **Unplayed / Under 1h**: **${telemetry.unplayedCount}** Games`,
-    `▸ **Played Titles (≥ 1h)**: **${telemetry.playedCount}** Games`,
-    `▸ **Backlog Score**: **${telemetry.backlogRatio}%** of paid library unplayed`,
-    `▸ **Estimated Value Inactive**: **${telemetry.currencySymbol} ${telemetry.estimatedWastedValue.toFixed(2)}**`,
-  ];
+  const countryCode = telemetry.preferredCurrency === 'BRL' ? 'br' : 'us';
 
-  let unplayedListText = '';
-  if (pageGames.length === 0) {
-    unplayedListText = '*No unplayed paid titles detected. 100% library completion rate!*';
-  } else {
-    unplayedListText = pageGames
-      .map((g) => {
-        const timeLabel = g.playtime_forever === 0 ? 'Never Played (0 mins)' : `${g.playtime_forever} mins`;
-        return [
-          `❖ **${g.name}**`,
-          `  └─ Playtime: \`${timeLabel}\` • Est. Value: **${telemetry.currencySymbol} ${g.estimatedPrice.toFixed(2)}**`,
-        ].join('\n');
-      })
-      .join('\n');
-  }
+  const unplayedList = await Promise.all(
+    pageGames.map(async (g) => {
+      const timeLabel = g.playtime_forever === 0 ? 'Never Opened (0m)' : `${g.playtime_forever}m played`;
+      let priceLabel = storePricesMap?.[g.appid];
+      if (!priceLabel) {
+        priceLabel = await fetchSteamAppStorePrice(g.appid, countryCode);
+      }
+      return [
+        `❖ **${g.name}**`,
+        `  └─ Playtime: \`${timeLabel}\` • Current Store: **${priceLabel}**`,
+      ].join('\n');
+    })
+  );
+
+  const unplayedListText = pageGames.length === 0
+    ? '*No unplayed paid titles detected. 100% library completion rate!*'
+    : unplayedList.join('\n');
 
   const fields = [
     {
-      name: '▸ Total Paid Games',
-      value: `**${telemetry.totalPaidCount}** Titles\n(${telemetry.playedCount} played ≥ 1h)`,
+      name: 'Paid Library',
+      value: `**${telemetry.totalPaidCount}** Titles\n(${telemetry.playedCount} active)`,
       inline: true,
     },
     {
-      name: '▸ Backlog Score',
+      name: 'Backlog Score',
       value: `**${telemetry.backlogRatio}%**\n(${telemetry.unplayedCount} unplayed)`,
       inline: true,
     },
     {
-      name: '▸ Estimated Inactive Value',
-      value: `**${telemetry.currencySymbol} ${telemetry.estimatedWastedValue.toFixed(2)}**\n(${telemetry.preferredCurrency})`,
+      name: 'Untouched Activity',
+      value: `**${telemetry.neverPlayedCount}** Never Opened (0m)\n**${telemetry.startedCount}** Abandoned (<1h)`,
       inline: true,
     },
     {
-      name: `❖ Unplayed Paid Titles [Page ${currentPage}/${totalPages}]`,
+      name: `Unplayed Paid Titles [Page ${currentPage}/${totalPages}]`,
       value: unplayedListText,
       inline: false,
     },
@@ -1133,7 +1141,7 @@ export function buildBacklogEmbedPayload(telemetry, summary, page = 1) {
 
   const embed = {
     title: `Steam Library Backlog Intelligence ❖ ${personaName}`,
-    description: `Paid library telemetry analysis detecting unplayed games, backlog percentage, and estimated inactive value.`,
+    description: `Paid library telemetry analysis detecting unplayed games, backlog percentage, and live store valuation.`,
     color: 0x5865f2,
     fields,
     thumbnail: avatarUrl ? { url: avatarUrl } : undefined,

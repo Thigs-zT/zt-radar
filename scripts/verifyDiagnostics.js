@@ -708,17 +708,25 @@ const sampleLibrary = [
 const backlogUsd = filterBacklogData(sampleLibrary, 'USD');
 assert.strictEqual(backlogUsd.totalPaidGames, 4, 'Must identify exactly 4 paid games (excluding F2P)');
 assert.strictEqual(backlogUsd.unplayedPaidCount, 2, 'Must identify exactly 2 unplayed paid games (<60 mins)');
+assert.strictEqual(backlogUsd.neverPlayedCount, 1, 'Must return exact integer count (1) for never opened (0m)');
+assert.strictEqual(backlogUsd.neverOpenedCount, 1, 'neverOpenedCount alias must match neverPlayedCount');
+assert.strictEqual(backlogUsd.startedCount, 1, 'Must return exact integer count (1) for abandoned (<1h)');
+assert.strictEqual(backlogUsd.abandonedCount, 1, 'abandonedCount alias must match startedCount');
 assert.strictEqual(backlogUsd.backlogRatioPercent, 50, 'Backlog ratio must be exactly 50% (2 / 4)');
 assert.strictEqual(backlogUsd.backlogGames[0].appid, 200, 'Lowest playtime game (0m) must be first');
 assert.strictEqual(backlogUsd.backlogGames[1].appid, 100, 'Second unplayed game (15m) must be second');
-assert.ok(backlogUsd.estimatedInactiveValue > 0, 'Estimated inactive value must be greater than zero');
+
+// Assert that backlog calculation does NOT use hardcoded fake price multipliers
+assert.strictEqual(backlogUsd.estimatedInactiveValue, undefined, 'Must eliminate fake estimated inactive value multiplier');
+assert.strictEqual(backlogUsd.estimatedWastedValue, undefined, 'Must eliminate fake estimated wasted value multiplier');
+assert.strictEqual(backlogUsd.backlogGames[0].estimatedPrice, undefined, 'Must not assign fake estimated price to backlog games');
 assert.strictEqual(backlogUsd.currencySymbol, '$', 'Currency symbol for USD must be $');
 
 const backlogBrl = filterBacklogData(sampleLibrary, 'BRL');
 assert.strictEqual(backlogBrl.currencySymbol, 'R$', 'Currency symbol for BRL must be R$');
-assert.ok(backlogBrl.estimatedInactiveValue > backlogUsd.estimatedInactiveValue, 'BRL estimated value must reflect regional pricing multiplier');
+assert.strictEqual(backlogBrl.neverPlayedCount, 1, 'BRL library must also return exact integer for never opened (0m)');
 
-console.log('  Case 2 (Backlog filtering & telemetry): F2P excluded, games >=60m excluded, backlog ratio=50% (PASS)');
+console.log('  Case 2 (Backlog filtering & factual metrics): F2P excluded, exact 0m/started counts, zero fake pricing (PASS)');
 
 // Case 3: Custom ID pagination boundaries (< 100 characters) and parsing
 const duelCustomId = `duel_p:999:76561198012345678:76561198087654321`;
@@ -742,11 +750,23 @@ console.log(`  Case 3 (Pagination custom_id limits): duel_p length=${duelCustomI
 const mockSummaryA = { personaname: 'Alice', avatarfull: 'https://steam.cdn/alice.jpg' };
 const mockSummaryB = { personaname: 'Bob', avatarfull: 'https://steam.cdn/bob.jpg' };
 
-const duelPayload = buildDuelEmbedPayload(duelComparison, mockSummaryA, mockSummaryB, 0);
+const duelPayload = buildDuelEmbedPayload(duelComparison, mockSummaryA, mockSummaryB, 1);
 assert.ok(duelPayload.embeds && duelPayload.embeds.length === 1, 'Must contain 1 embed');
 assert.strictEqual(duelPayload.embeds[0].color, 0x5865f2, 'Embed color must be 0x5865F2');
-assert.ok(duelPayload.embeds[0].title.includes('Steam Library Duel'), 'Title must reflect Steam Library Duel');
-// Pagination buttons: with 3 games and 5 games per page, totalPages is 1 (components should be empty)
+
+// Dual Profile Visualization assertion
+assert.ok(duelPayload.embeds[0].author, 'Duel embed must contain author field');
+assert.strictEqual(duelPayload.embeds[0].author.name, 'Alice vs Bob • Steam Duel', 'Author name must contain dual profile title');
+assert.strictEqual(duelPayload.embeds[0].author.icon_url, 'https://steam.cdn/alice.jpg', 'Author icon must be Player A avatar');
+assert.strictEqual(duelPayload.embeds[0].thumbnail.url, 'https://steam.cdn/bob.jpg', 'Thumbnail must be Player B avatar');
+
+// Purge sticky achievement header assertion
+assert.ok(!duelPayload.embeds[0].description.includes('Achievement Dominance'), 'Duel description must NOT repeat top game achievements across pages');
+assert.ok(!duelPayload.embeds[0].fields.some((f) => f.value.includes('Achievement Dominance')), 'Duel fields must NOT include sticky achievements');
+assert.ok(duelPayload.embeds[0].description.includes('Dominance Score:'), 'Description must contain verified aggregated dominance score');
+assert.ok(duelPayload.embeds[0].description.includes('Total Time Invested:'), 'Description must contain total time invested');
+
+// Pagination buttons: with 3 games and 4 games per page, totalPages is 1 (components should be empty)
 assert.strictEqual(duelPayload.components.length, 0, 'With 1 page, components should be empty');
 
 // Multi-page test for Duel
@@ -760,6 +780,7 @@ const multiPageComparison = {
     hoursA: '1.7',
     hoursB: '3.3',
     winner: 'B',
+    diffHours: '1.6',
     totalPlaytime: 300,
   })),
   totalCommon: 12,
@@ -771,19 +792,38 @@ const [prevBtn1, nextBtn1] = duelPage1.components[0].components;
 assert.strictEqual(prevBtn1.disabled, true, 'Prev button on page 1 must be disabled');
 assert.strictEqual(nextBtn1.disabled, false, 'Next button on page 1 must be enabled');
 
+// Streamlined markdown without glyph overload
+assert.ok(duelPage1.embeds[0].fields[0].value.includes('[ Game 1 ]'), 'Diff block should use clean [ Game Title ]');
+assert.ok(!duelPage1.embeds[0].fields[0].value.includes('[ Common Title ❖'), 'Diff block must not contain [ Common Title ❖ ]');
+
 const duelPage3 = buildDuelEmbedPayload(multiPageComparison, mockSummaryA, mockSummaryB, 3);
 const [prevBtn3, nextBtn3] = duelPage3.components[0].components;
 assert.strictEqual(prevBtn3.disabled, false, 'Prev button on last page must be enabled');
 assert.strictEqual(nextBtn3.disabled, true, 'Next button on last page must be disabled');
 
-// Backlog Embed Payload test
-const backlogPayload = buildBacklogEmbedPayload(backlogUsd, mockSummaryA, 0);
+// Backlog Embed Payload test with dynamic store pricing
+const mockStorePrices = {
+  100: '$ 14.99',
+  200: 'Delisted / Legacy',
+};
+const backlogPayload = await buildBacklogEmbedPayload(backlogUsd, mockSummaryA, 1, mockStorePrices);
 assert.ok(backlogPayload.embeds && backlogPayload.embeds.length === 1, 'Must contain 1 backlog embed');
 assert.strictEqual(backlogPayload.embeds[0].color, 0x5865f2, 'Backlog embed color must be 0x5865F2');
-assert.ok(backlogPayload.embeds[0].fields.some((f) => f.name.includes('Backlog Score')), 'Must include Backlog Score field');
-assert.ok(backlogPayload.embeds[0].fields.some((f) => f.name.includes('Estimated Inactive Value')), 'Must include Estimated Inactive Value field');
 
-console.log('  Case 4 (Embed and pagination payload structures): Valid embeds, diff blocks, and pagination state (PASS)');
+// Factual 3-Column Telemetry Header assertions
+assert.strictEqual(backlogPayload.embeds[0].fields[0].name, 'Paid Library', 'Field 1 must be Paid Library');
+assert.ok(backlogPayload.embeds[0].fields[0].value.includes('**4** Titles'), 'Field 1 must show total paid games');
+assert.strictEqual(backlogPayload.embeds[0].fields[1].name, 'Backlog Score', 'Field 2 must be Backlog Score');
+assert.ok(backlogPayload.embeds[0].fields[1].value.includes('50%'), 'Field 2 must show backlog percentage');
+assert.strictEqual(backlogPayload.embeds[0].fields[2].name, 'Untouched Activity', 'Field 3 must be Untouched Activity');
+assert.ok(backlogPayload.embeds[0].fields[2].value.includes('**1** Never Opened (0m)'), 'Field 3 must show never opened count');
+assert.ok(backlogPayload.embeds[0].fields[2].value.includes('**1** Abandoned (<1h)'), 'Field 3 must show abandoned count');
+
+// Real store prices in list
+assert.ok(backlogPayload.embeds[0].fields[3].value.includes('Current Store: **Delisted / Legacy**'), 'Game 200 must show Delisted / Legacy');
+assert.ok(backlogPayload.embeds[0].fields[3].value.includes('Current Store: **$ 14.99**'), 'Game 100 must show real store price');
+
+console.log('  Case 4 (Duel visual hierarchy & factual backlog valuation): Dual avatars, clean diffs & real store prices (PASS)');
 
 console.log('\nAll diagnostic verification checks PASSED successfully!');
 
