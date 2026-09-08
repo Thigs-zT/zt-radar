@@ -190,11 +190,11 @@ export const handler = async (event) => {
 
     try {
       const stateToken = await generateStateToken(userId, docClient, TABLE_NAME);
-      const loginUrl = buildSteamLoginUrl(stateToken, AUTH_CALLBACK_URL, userId);
+      const steamRedirectUrl = buildSteamLoginUrl(stateToken, AUTH_CALLBACK_URL, userId);
       return {
         statusCode: 302,
         headers: {
-          Location: loginUrl,
+          Location: steamRedirectUrl,
           'Cache-Control': 'no-store',
         },
         body: '',
@@ -1795,12 +1795,13 @@ export const handler = async (event) => {
         }
 
         try {
-          const stateToken = await generateStateToken(userId, docClient, TABLE_NAME);
-          const loginUrl = buildSteamLoginUrl(stateToken, AUTH_CALLBACK_URL, userId);
+          const authLoginUrl = AUTH_CALLBACK_URL.replace('/callback', '/login');
+          const loginUrl = `${authLoginUrl}?user_id=${encodeURIComponent(userId)}`;
+          const embedPayload = buildUnlinkedAccountEmbed(userId, loginUrl);
           return {
             statusCode: 200,
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(buildUnlinkedAccountEmbed(userId, loginUrl)),
+            body: JSON.stringify(embedPayload),
           };
         } catch (err) {
           console.error('Error initiating Steam OpenID flow for user', userId, ':', err);

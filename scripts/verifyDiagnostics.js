@@ -568,7 +568,8 @@ assert.ok(loginUrl.includes('openid.return_to='), 'Login URL must include openid
 assert.ok(loginUrl.includes('openid.realm='), 'Login URL must include openid.realm');
 assert.ok(loginUrl.includes(encodeURIComponent('987654321012345678')), 'Login URL return_to must include user_id');
 assert.ok(loginUrl.includes(encodeURIComponent(mockToken)), 'Login URL return_to must include state token');
-console.log(`  Case 2 (Steam login URL): correctly constructs OpenID 2.0 parameters (PASS)`);
+assert.ok(loginUrl.length > 512, `Full Steam OpenID URL should exceed 512 chars (${loginUrl.length}) to demonstrate necessity of 302 redirect route`);
+console.log(`  Case 2 (Steam login URL): correctly constructs OpenID 2.0 parameters (length=${loginUrl.length} > 512 chars) (PASS)`);
 
 // Case 3: Valid claimed_id SteamID64 extraction
 const validClaimedId = 'https://steamcommunity.com/openid/id/76561198012345678';
@@ -592,8 +593,12 @@ for (const badId of invalidClaimedIds) {
 console.log(`  Case 4 (Invalid claimed_id formats): all ${invalidClaimedIds.length} cases correctly return null (PASS)`);
 
 // Case 5: buildUnlinkedAccountEmbed returns valid Discord interaction response structure
-const mockLoginUrl = 'https://steamcommunity.com/openid/login?openid.ns=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0&openid.mode=checkid_setup';
-const embedResponse = buildUnlinkedAccountEmbed('123456789012345678', mockLoginUrl);
+const mockAuthCallbackUrl = 'https://abc123.execute-api.us-east-1.amazonaws.com/prod/auth/steam/callback';
+const mockAuthLoginUrl = mockAuthCallbackUrl.replace('/callback', '/login');
+const mockUserId = '123456789012345678';
+const lightweightLoginUrl = `${mockAuthLoginUrl}?user_id=${mockUserId}`;
+
+const embedResponse = buildUnlinkedAccountEmbed(mockUserId, lightweightLoginUrl);
 assert.strictEqual(embedResponse.type, 4, 'Response type must be 4 (CHANNEL_MESSAGE_WITH_SOURCE)');
 assert.strictEqual(embedResponse.data.flags, 64, 'Response data.flags must be 64 (EPHEMERAL)');
 assert.ok(Array.isArray(embedResponse.data.embeds), 'Response must include embeds array');
@@ -603,8 +608,17 @@ const linkButton = embedResponse.data.components[0]?.components?.[0];
 assert.ok(linkButton, 'Action Row must contain at least one component');
 assert.strictEqual(linkButton.type, 2, 'Button component must have type 2');
 assert.strictEqual(linkButton.style, 5, 'Link Button must have style 5');
-assert.strictEqual(linkButton.url, mockLoginUrl, 'Link Button URL must match the provided login URL');
-console.log(`  Case 5 (Unlinked account embed): correct interaction structure with Link Button (PASS)`);
+assert.strictEqual(linkButton.url, lightweightLoginUrl, 'Link Button URL must match the provided login URL');
+assert.ok(linkButton.url.length <= 512, `Link Button URL must be strictly <= 512 characters, got ${linkButton.url.length}`);
+assert.ok(!('custom_id' in linkButton), 'Link Button (style 5) must NOT have custom_id property');
+
+// Verify that buildUnlinkedAccountEmbed rejects URLs exceeding 512 characters
+assert.throws(
+  () => buildUnlinkedAccountEmbed(mockUserId, 'https://example.com/' + 'a'.repeat(510)),
+  /512/,
+  'buildUnlinkedAccountEmbed must throw when URL exceeds 512 characters'
+);
+console.log(`  Case 5 (Unlinked account embed): correct interaction structure with Link Button (length=${linkButton.url.length} <= 512, no custom_id) (PASS)`);
 
 
 console.log('\nAll diagnostic verification checks PASSED successfully!');

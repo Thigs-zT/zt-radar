@@ -216,13 +216,19 @@ export async function verifyOpenIdAssertion(params) {
 
 /**
  * Builds a Discord interaction response payload prompting the user to link their Steam account.
- * Includes a Discord Link Button (Type 2, Style 5) pointing to the Steam OpenID login URL.
+ * Includes a Discord Link Button (Type 2, Style 5) pointing to the lightweight login URL.
  *
- * @param {string} callerUserId - The Discord user ID requesting the link (for display only).
- * @param {string} loginUrl - The pre-built Steam OpenID redirect URL.
+ * @param {string} userId - The Discord user ID requesting the link.
+ * @param {string} loginUrl - The lightweight login initiation URL (must be <= 512 characters).
  * @returns {Object} A complete Discord interaction response body ready to be JSON.stringify'd.
  */
-export function buildUnlinkedAccountEmbed(callerUserId, loginUrl) {
+export function buildUnlinkedAccountEmbed(userId, loginUrl) {
+  if (!loginUrl || typeof loginUrl !== 'string' || loginUrl.length > 512) {
+    throw new Error(
+      `Login URL exceeds Discord 512-char limit for Link Buttons: ${loginUrl ? loginUrl.length : 'invalid'} chars`
+    );
+  }
+
   return {
     type: 4, // CHANNEL_MESSAGE_WITH_SOURCE
     data: {
