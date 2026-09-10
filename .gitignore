@@ -6,4 +6,4 @@ samconfig.toml
 response.json
 AGENTS.md
 .agents/
-.agent/
+.agent/coverage/
