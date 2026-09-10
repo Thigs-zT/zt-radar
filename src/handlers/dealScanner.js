@@ -251,7 +251,7 @@ export const handler = async () => {
           }
         }
 
-        const lastNotifiedPrice = item.last_notified_price !== undefined ? Number(item.last_notified_price) : null;
+        const lastNotifiedPrice = item.last_notified_price != null ? Number(item.last_notified_price) : null;
         const lastNotifiedAt = item.last_notified_at ? new Date(item.last_notified_at).getTime() : 0;
         const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -277,7 +277,7 @@ export const handler = async () => {
             },
           ];
 
-          if (deal.allTimeLowPrice !== null) {
+          if (deal.allTimeLowPrice !== null && deal.allTimeLowPrice !== undefined) {
             const atlText = (deal.isAllTimeLow && hasActiveDiscount)
               ? `**${primarySym} ${deal.allTimeLowPrice.toFixed(2)}** (★ Matches ATL)`
               : `**${primarySym} ${deal.allTimeLowPrice.toFixed(2)}**`;

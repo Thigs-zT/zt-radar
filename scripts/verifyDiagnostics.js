@@ -1,3 +1,8 @@
+/**
+ * @deprecated This script is retained for legacy verification fallback only.
+ * Formal automated test suites have migrated to Vitest under tests/unit/ and tests/integration/.
+ * Execute 'npm test' to run the primary test suite.
+ */
 // Unit test script for Deal Scanner, Wishlist Batch Operations, and Filter Verification
 import assert from 'node:assert';
 import {
