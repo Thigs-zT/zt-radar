@@ -34,14 +34,11 @@ jobs:
         run: npm audit
 
       # Step 5: Static syntax inspection across all JS source files
-      - name: Syntax check — src
-        run: node --check src/**/*.js
-
-      - name: Syntax check — scripts
-        run: node --check scripts/**/*.js
-
-      - name: Syntax check — tests
-        run: node --check tests/**/*.js
+      - name: Static syntax inspection
+        run: |
+          for file in $(find src scripts tests -name "*.js"); do
+            node --check "$file"
+          done
 
       # Step 6: Setup AWS SAM CLI
       - name: Setup AWS SAM CLI
