@@ -14,7 +14,7 @@
 export interface DiscordInteractionOption {
   name: string;
   type: number;
-  value?: string | number | boolean;
+  value?: any;
   options?: DiscordInteractionOption[];
   focused?: boolean;
 }
@@ -136,17 +136,17 @@ export interface GameDealInfo {
   /** Deal classification: FREE_TO_KEEP, FREE_PLAY_DAYS, or CURATED_DEAL. */
   dealType: 'FREE_TO_KEEP' | 'FREE_PLAY_DAYS' | 'CURATED_DEAL';
   /** Whether the effective price matches the historical all-time low. */
-  isAllTimeLow: boolean;
+  isAllTimeLow?: boolean;
   /** Historical all-time low price. Null if ITAD data is unavailable. */
-  allTimeLowPrice: number | null;
+  allTimeLowPrice?: number | null;
   /** Promotion expiry timestamp or null if perpetual. */
-  expiry: string | number | null;
+  expiry?: string | number | null;
   /** The primary monitored storefront offer (Steam by default). */
   primaryDeal: StoreDeal;
   /** A cheaper alternative offer from another authorized store, if present. */
-  cheaperAlternative: StoreDeal | null;
+  cheaperAlternative?: StoreDeal | null;
   /** Raw per-store breakdown keyed by store name. */
-  storeBreakdown: Record<string, StoreDeal>;
+  storeBreakdown?: Record<string, StoreDeal>;
 }
 
 // ---------------------------------------------------------------------------
@@ -510,5 +510,67 @@ export interface EmbedPayload {
   embed: DiscordEmbed;
   embeds: DiscordEmbed[];
   components: DiscordActionRow[];
+}
+
+// ---------------------------------------------------------------------------
+// HowLongToBeat Stats
+// ---------------------------------------------------------------------------
+
+/** Playtime completion stats returned by getHowLongToBeatStats. */
+export interface HltbStatsResult {
+  success: boolean;
+  error?: string;
+  gameId?: number;
+  gameTitle?: string;
+  mainStoryHours?: number;
+  mainExtraHours?: number;
+  completionistHours?: number;
+  allPlayStylesHours?: number;
+  imageUrl?: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Steam Intelligence (News & System Requirements)
+// ---------------------------------------------------------------------------
+
+/** News announcement item returned by fetchGameNews. */
+export interface SteamNewsItem {
+  title: string;
+  url: string;
+  author: string;
+  date: string;
+  snippet: string;
+}
+
+/** Hardware specifications record returned by fetchSystemRequirements. */
+export interface SystemRequirementsInfo {
+  title: string;
+  headerImage: string | null;
+  minimum: string;
+  recommended: string;
+}
+
+// ---------------------------------------------------------------------------
+// Discord Application Command Autocomplete
+// ---------------------------------------------------------------------------
+
+/** Single autocomplete choice item for Discord interactions. */
+export interface AutocompleteChoice {
+  name: string;
+  value: string;
+}
+
+// ---------------------------------------------------------------------------
+// DynamoDB Guild Configuration Item
+// ---------------------------------------------------------------------------
+
+/** Single-table guild configuration record (PK: GUILD#<guildId>, SK: CONFIG). */
+export interface GuildConfigItem {
+  PK: string;
+  SK: string;
+  channel_id?: string;
+  min_discount?: number;
+  created_at?: string;
+  updated_at?: string;
 }
 

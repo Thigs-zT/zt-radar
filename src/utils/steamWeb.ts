@@ -1241,8 +1241,8 @@ type PlayerSummaryLike = {
   personaname?: string;
   steamId?: string;
   steamid?: string;
-  avatarUrl?: string;
-  avatarfull?: string;
+  avatarUrl?: string | null;
+  avatarfull?: string | null;
 };
 
 /**

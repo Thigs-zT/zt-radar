@@ -75,7 +75,7 @@ Resources:
         Target: "node22"
         Sourcemap: true
         EntryPoints:
-          - src/handlers/discordBot.js
+          - src/handlers/discordBot.ts
     Properties:
       CodeUri: .
       Handler: src/handlers/discordBot.handler
@@ -121,7 +121,7 @@ Resources:
         Target: "node22"
         Sourcemap: true
         EntryPoints:
-          - src/handlers/dealScanner.js
+          - src/handlers/dealScanner.ts
     Properties:
       CodeUri: .
       Handler: src/handlers/dealScanner.handler
