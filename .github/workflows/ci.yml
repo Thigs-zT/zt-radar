@@ -1,0 +1,62 @@
+name: CI — Quality Gates & Test Suite
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  quality-and-tests:
+    name: Quality Gates & Vitest Suite
+    runs-on: ubuntu-latest
+
+    steps:
+      # Step 1: Checkout repository source
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Step 2: Setup Node.js 22.x runtime with npm dependency caching
+      - name: Setup Node.js 22.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: 'npm'
+
+      # Step 3: Install exact dependency tree from package-lock.json
+      - name: Install dependencies
+        run: npm ci
+
+      # Step 4: Security audit — fail on any vulnerability
+      - name: Audit dependencies
+        run: npm audit
+
+      # Step 5: Static syntax inspection across all JS source files
+      - name: Syntax check — src
+        run: node --check src/**/*.js
+
+      - name: Syntax check — scripts
+        run: node --check scripts/**/*.js
+
+      - name: Syntax check — tests
+        run: node --check tests/**/*.js
+
+      # Step 6: Setup AWS SAM CLI
+      - name: Setup AWS SAM CLI
+        uses: aws-actions/setup-sam@v2
+        with:
+          use-installer: true
+
+      # Step 7: Validate CloudFormation template syntax and SAM lint rules
+      - name: Validate SAM template
+        run: sam validate --lint
+
+      # Step 8: Execute Vitest unit and integration test suite
+      - name: Run test suite
+        run: npm test
+
+      # Step 9: Generate coverage report (V8 provider)
+      - name: Run test coverage
+        run: npm run test:coverage
