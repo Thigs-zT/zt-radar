@@ -2,8 +2,8 @@
  * zT Radar — Canonical Domain Type Definitions
  *
  * Shared TypeScript interfaces for Discord interactions, DynamoDB entities,
- * and Steam/ITAD telemetry models. All types are derived from the actual
- * runtime shapes observed in the live handlers and utilities.
+ * Steam/ITAD telemetry models, and platform status. All types are derived
+ * from the actual runtime shapes observed in the live handlers and utilities.
  */
 
 // ---------------------------------------------------------------------------
@@ -86,8 +86,12 @@ export interface SteamOwnedGame {
   img_icon_url: string | null;
   /** Whether this is a Free-to-Play title (not always present). */
   is_free?: boolean;
+  /** Whether this is a Free-to-Play title (Steam API alias). */
+  is_free_to_play?: boolean;
   /** Playtime in the last two weeks, in minutes. */
   playtime_2weeks?: number;
+  /** Steam categories array, if populated. */
+  categories?: Array<{ id?: number | string; description?: string }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -234,3 +238,277 @@ export interface DynamoDbWishlistItem {
   /** ISO 8601 last-update timestamp. */
   updated_at?: string;
 }
+
+// ---------------------------------------------------------------------------
+// Steam Player Profile Types
+// ---------------------------------------------------------------------------
+
+/** Normalized player summary from IPlayerService/GetPlayerSummaries. */
+export interface SteamPlayerSummary {
+  steamId: string;
+  personaName: string;
+  profileUrl: string;
+  avatarUrl: string | null;
+  visibilityState: number;
+  isPrivate: boolean;
+  personaState: number;
+  personaStateLabel: string;
+  currentlyPlaying: string | null;
+  currentlyPlayingId: string | null;
+  timeCreated: string | null;
+  countryCode: string | null;
+  realName: string | null;
+}
+
+/** VAC and community ban record from IPlayerService/GetPlayerBans. */
+export interface SteamPlayerBans {
+  communityBanned: boolean;
+  vacBanned: boolean;
+  vacBansCount: number;
+  gameBansCount: number;
+  daysSinceLastBan: number;
+  economyBan: string;
+}
+
+/** Compact top-games result from getPlayerOwnedGames. */
+export interface SteamTopGamesResult {
+  isPrivate: boolean;
+  gameCount: number;
+  totalPlaytimeHours: string;
+  topGames: Array<{
+    appId: number;
+    name: string;
+    playtimeHours: string;
+    playtimeMinutes: number;
+  }>;
+}
+
+/** Detailed library result from getPlayerLibraryDetailed. */
+export interface SteamDetailedLibrary {
+  isPrivate: boolean;
+  gameCount: number;
+  games: SteamOwnedGame[];
+}
+
+/** Full result from getCompletePlayerProfile. */
+export type SteamCompleteProfile =
+  | { success: false; error: string; steamId?: string }
+  | { success: true; steamId: string; summary: SteamPlayerSummary; bans: SteamPlayerBans | null; games: SteamTopGamesResult | null };
+
+/** Steam wishlist resolution result. */
+export type SteamWishlistResult =
+  | { success: false; error: string }
+  | { success: true; items: Array<{ appId: string; priority: number; dateAdded: number }> };
+
+// ---------------------------------------------------------------------------
+// Steam Price Info
+// ---------------------------------------------------------------------------
+
+/** Per-app price record produced by batchFetchSteamAppPrices. */
+export interface SteamAppPriceInfo {
+  initial?: number;
+  final?: number;
+  initialFormatted?: string;
+  finalFormatted?: string;
+  isFree?: boolean;
+  isDelisted?: boolean;
+  price?: number;
+  currency?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Library Comparison (compareLibraryData / compareLibraries)
+// ---------------------------------------------------------------------------
+
+/** A single game entry from the library intersection comparison. */
+export interface CommonGame {
+  appid: number;
+  name: string;
+  playtimeA: number;
+  playtimeB: number;
+  totalPlaytime: number;
+  winner: 'A' | 'B' | 'TIE';
+  diffMinutes: number;
+  hoursA: string;
+  hoursB: string;
+  diffHours: string;
+}
+
+/** Pure comparison analytics from compareLibraryData. */
+export interface LibraryComparisonResult {
+  commonCount: number;
+  totalCommon: number;
+  winsA: number;
+  winsB: number;
+  ties: number;
+  overallWinner: 'A' | 'B' | 'TIE';
+  totalHoursA: string;
+  totalHoursB: string;
+  commonGames: CommonGame[];
+}
+
+/** Achievement record for a specific game. */
+export interface AchievementResult {
+  total: number;
+  unlocked: number;
+  percent: number;
+  gameName: string | null;
+}
+
+/** Top-game achievement record within compareLibraries output. */
+export interface TopAchievements {
+  appId: number;
+  gameName: string;
+  achA: AchievementResult;
+  achB: AchievementResult;
+}
+
+/** Full result from compareLibraries. */
+export type LibraryCompareResult =
+  | { success: false; error: string; privatePlayer?: string; countA?: number; countB?: number }
+  | (LibraryComparisonResult & { success: true; countA: number; countB: number; topAchievements: TopAchievements | null });
+
+// ---------------------------------------------------------------------------
+// Game Match (findMatchingGames / matchLibraryData)
+// ---------------------------------------------------------------------------
+
+/** A game entry produced by matchLibraryData with multiplayer badge resolution. */
+export interface MatchedGame {
+  appid: number;
+  name: string;
+  playtimeA: number;
+  playtimeB: number;
+  totalPlaytime: number;
+  hoursA: string;
+  hoursB: string;
+  totalHours: string;
+  badges: string[];
+  isCoop: boolean;
+  isCoopOrMultiplayer: boolean;
+  img_icon_url: string | null;
+}
+
+/** Result from matchLibraryData. */
+export interface MatchLibraryResult {
+  success?: boolean;
+  totalCommon: number;
+  matchedCount: number;
+  filterMode: string;
+  games: MatchedGame[];
+  matchingGames: MatchedGame[];
+}
+
+/** Full result from findMatchingGames. */
+export type FindMatchingGamesResult =
+  | { success: false; error: string; privatePlayer?: string; countA?: number; countB?: number }
+  | (MatchLibraryResult & { success: true; steamIdA: string; steamIdB: string; countA: number; countB: number });
+
+// ---------------------------------------------------------------------------
+// Backlog MSRP Result
+// ---------------------------------------------------------------------------
+
+/** MSRP calculation result from calculateBacklogMsrp. */
+export interface BacklogMsrpResult {
+  totalMsrp: number;
+  pricedCount: number;
+  totalUnplayed: number;
+  totalBacklog: number;
+  currencySymbol: string;
+  msrpFormatted: string;
+  formattedTotalMsrp: string;
+  msrpSummary: string;
+}
+
+/** Full telemetry result from calculateBacklogTelemetry. */
+export type BacklogTelemetryResult =
+  | { success: false; error: string; gameCount?: number }
+  | (BacklogTelemetry & BacklogMsrpResult & { success: true; storePricesMap: Record<number, string> });
+
+// ---------------------------------------------------------------------------
+// Platform Status
+// ---------------------------------------------------------------------------
+
+/** Possible platform health status values. */
+export type PlatformStatusValue = 'ONLINE' | 'DEGRADED' | 'OUTAGE' | 'OFFLINE' | 'UNKNOWN';
+
+/** Status record for a single platform endpoint. */
+export interface PlatformStatusEntry {
+  name: string;
+  status: PlatformStatusValue;
+  latencyMs: number;
+}
+
+/** Aggregate result from checkPlatformStatuses(). */
+export interface PlatformStatusResult {
+  steam: PlatformStatusEntry;
+  epic: PlatformStatusEntry;
+  psn: PlatformStatusEntry;
+  xbox: PlatformStatusEntry;
+}
+
+/** A single ranked entry from getSteamMostPlayedGames(). */
+export interface SteamMostPlayedEntry {
+  rank: number;
+  appId: number;
+  name: string;
+  currentPlayers: number;
+  peakToday: number | null;
+}
+
+/** A single ranked entry from getSteamTrendingGames(). */
+export interface SteamTrendingEntry {
+  rank: number;
+  appId: number;
+  name: string;
+  currentPlayers: number | null;
+  priceText: string;
+  headerImage: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Discord Embed Components
+// ---------------------------------------------------------------------------
+
+/** A generic Discord embed field. */
+export interface DiscordEmbedField {
+  name: string;
+  value: string;
+  inline: boolean;
+}
+
+/** A Discord embed object. */
+export interface DiscordEmbed {
+  title?: string;
+  description?: string;
+  color?: number;
+  fields?: DiscordEmbedField[];
+  footer?: { text: string };
+  timestamp?: string;
+  thumbnail?: { url: string };
+  image?: { url: string };
+  author?: { name: string; icon_url?: string };
+}
+
+/** A Discord button component. */
+export interface DiscordButton {
+  type: 2;
+  style: number;
+  label: string;
+  custom_id?: string;
+  url?: string;
+  disabled?: boolean;
+}
+
+/** A Discord action row containing buttons. */
+export interface DiscordActionRow {
+  type: 1;
+  components: DiscordButton[];
+}
+
+/** Paginated embed payload returned by embed builder functions. */
+export interface EmbedPayload {
+  embed: DiscordEmbed;
+  embeds: DiscordEmbed[];
+  components: DiscordActionRow[];
+}
+

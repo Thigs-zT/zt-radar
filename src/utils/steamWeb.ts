@@ -1,11 +1,51 @@
+/**
+ * Steam Web Intelligence Utility
+ *
+ * Provides player profile resolution, library analysis, duel comparison,
+ * backlog telemetry, co-op game matching, and Discord embed builders.
+ * Uses native Node.js fetch with defensive AbortController timeouts.
+ */
+
+import type {
+  SteamOwnedGame,
+  SteamPlayerSummary,
+  SteamPlayerBans,
+  SteamTopGamesResult,
+  SteamDetailedLibrary,
+  SteamCompleteProfile,
+  SteamWishlistResult,
+  SteamAppPriceInfo,
+  CommonGame,
+  LibraryComparisonResult,
+  AchievementResult,
+  TopAchievements,
+  LibraryCompareResult,
+  MatchedGame,
+  MatchLibraryResult,
+  FindMatchingGamesResult,
+  BacklogTelemetry,
+  BacklogMsrpResult,
+  BacklogTelemetryResult,
+  EmbedPayload,
+  DiscordEmbed,
+} from '../types/index.js';
+
 const USER_AGENT = 'zT-Radar-Bot/1.0 (https://github.com/zt-radar)';
 const API_BASE = 'https://api.steampowered.com';
 const DEFAULT_TIMEOUT_MS = 2800;
 
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
+
 /**
  * Executes an HTTP fetch with an enforced timeout via AbortController.
  */
-async function fetchWithTimeout(url, options = {}, timeoutMs = DEFAULT_TIMEOUT_MS) {
+async function fetchWithTimeout(
+  url: string,
+  options: RequestInit = {},
+  timeoutMs: number = DEFAULT_TIMEOUT_MS,
+): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -14,7 +54,7 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = DEFAULT_TIMEOUT_M
       ...options,
       headers: {
         'User-Agent': USER_AGENT,
-        ...(options.headers || {}),
+        ...((options.headers as Record<string, string>) ?? {}),
       },
       signal: controller.signal,
     });
@@ -29,31 +69,27 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = DEFAULT_TIMEOUT_M
 /**
  * Maps Steam persona state integer to human-readable string.
  */
-function getPersonaStateText(state) {
+function getPersonaStateText(state: number): string {
   switch (state) {
-    case 0:
-      return 'Offline';
-    case 1:
-      return 'Online';
-    case 2:
-      return 'Busy';
-    case 3:
-      return 'Away';
-    case 4:
-      return 'Snooze';
-    case 5:
-      return 'Looking to Trade';
-    case 6:
-      return 'Looking to Play';
-    default:
-      return 'Offline';
+    case 0: return 'Offline';
+    case 1: return 'Online';
+    case 2: return 'Busy';
+    case 3: return 'Away';
+    case 4: return 'Snooze';
+    case 5: return 'Looking to Trade';
+    case 6: return 'Looking to Play';
+    default: return 'Offline';
   }
 }
+
+// ---------------------------------------------------------------------------
+// Steam ID Resolution
+// ---------------------------------------------------------------------------
 
 /**
  * Resolves a raw target string (SteamID64, profile URL, or custom vanity URL) into a 64-bit SteamID.
  */
-export async function resolveSteamId(rawTarget, apiKey) {
+export async function resolveSteamId(rawTarget: string, apiKey: string): Promise<string | null> {
   if (!rawTarget || typeof rawTarget !== 'string') {
     return null;
   }
@@ -94,22 +130,42 @@ export async function resolveSteamId(rawTarget, apiKey) {
       return null;
     }
 
-    const data = await res.json();
+    const data = await res.json() as { response?: { success?: number; steamid?: string } };
     if (data?.response?.success === 1 && data?.response?.steamid) {
       return data.response.steamid;
     }
 
     return null;
   } catch (err) {
-    console.error(`Error resolving Steam vanity URL '${vanityName}':`, err.message || err);
+    console.error(`Error resolving Steam vanity URL '${vanityName}':`, err instanceof Error ? err.message : err);
     return null;
   }
 }
 
+// ---------------------------------------------------------------------------
+// Player Summary & Bans
+// ---------------------------------------------------------------------------
+
+type RawSteamPlayer = {
+  steamid: string;
+  personaname?: string;
+  profileurl?: string;
+  avatarfull?: string;
+  avatarmedium?: string;
+  avatar?: string;
+  communityvisibilitystate?: number;
+  personastate?: number;
+  gameextrainfo?: string;
+  gameid?: string;
+  timecreated?: number;
+  loccountrycode?: string;
+  realname?: string;
+};
+
 /**
  * Fetches player summary (Persona name, online status, avatar, creation date) from Steam.
  */
-export async function getPlayerSummary(steamId64, apiKey) {
+export async function getPlayerSummary(steamId64: string, apiKey: string): Promise<SteamPlayerSummary | null> {
   if (!steamId64 || !apiKey) {
     return null;
   }
@@ -123,7 +179,7 @@ export async function getPlayerSummary(steamId64, apiKey) {
       return null;
     }
 
-    const data = await res.json();
+    const data = await res.json() as { response?: { players?: RawSteamPlayer[] } };
     const player = data?.response?.players?.[0];
 
     if (!player) {
@@ -132,29 +188,38 @@ export async function getPlayerSummary(steamId64, apiKey) {
 
     return {
       steamId: player.steamid,
-      personaName: player.personaname || 'Unknown Player',
-      profileUrl: player.profileurl || `https://steamcommunity.com/profiles/${player.steamid}`,
-      avatarUrl: player.avatarfull || player.avatarmedium || player.avatar || null,
-      visibilityState: player.communityvisibilitystate || 1,
+      personaName: player.personaname ?? 'Unknown Player',
+      profileUrl: player.profileurl ?? `https://steamcommunity.com/profiles/${player.steamid}`,
+      avatarUrl: player.avatarfull ?? player.avatarmedium ?? player.avatar ?? null,
+      visibilityState: player.communityvisibilitystate ?? 1,
       isPrivate: player.communityvisibilitystate !== 3,
       personaState: player.personastate ?? 0,
-      personaStateLabel: getPersonaStateText(player.personastate),
-      currentlyPlaying: player.gameextrainfo || null,
-      currentlyPlayingId: player.gameid || null,
+      personaStateLabel: getPersonaStateText(player.personastate ?? 0),
+      currentlyPlaying: player.gameextrainfo ?? null,
+      currentlyPlayingId: player.gameid ?? null,
       timeCreated: player.timecreated ? new Date(player.timecreated * 1000).toISOString().split('T')[0] : null,
-      countryCode: player.loccountrycode || null,
-      realName: player.realname || null,
+      countryCode: player.loccountrycode ?? null,
+      realName: player.realname ?? null,
     };
   } catch (err) {
-    console.error(`Error fetching player summary for SteamID ${steamId64}:`, err.message || err);
+    console.error(`Error fetching player summary for SteamID ${steamId64}:`, err instanceof Error ? err.message : err);
     return null;
   }
 }
 
+type RawBanRecord = {
+  CommunityBanned?: boolean;
+  VACBanned?: boolean;
+  NumberOfVACBans?: number;
+  NumberOfGameBans?: number;
+  DaysSinceLastBan?: number;
+  EconomyBan?: string;
+};
+
 /**
  * Fetches VAC and Community ban records for a player.
  */
-export async function getPlayerBans(steamId64, apiKey) {
+export async function getPlayerBans(steamId64: string, apiKey: string): Promise<SteamPlayerBans | null> {
   if (!steamId64 || !apiKey) {
     return null;
   }
@@ -168,7 +233,7 @@ export async function getPlayerBans(steamId64, apiKey) {
       return null;
     }
 
-    const data = await res.json();
+    const data = await res.json() as { players?: RawBanRecord[] };
     const banRecord = data?.players?.[0];
 
     if (!banRecord) {
@@ -178,21 +243,27 @@ export async function getPlayerBans(steamId64, apiKey) {
     return {
       communityBanned: Boolean(banRecord.CommunityBanned),
       vacBanned: Boolean(banRecord.VACBanned),
-      vacBansCount: Number(banRecord.NumberOfVACBans || 0),
-      gameBansCount: Number(banRecord.NumberOfGameBans || 0),
-      daysSinceLastBan: Number(banRecord.DaysSinceLastBan || 0),
-      economyBan: banRecord.EconomyBan || 'none',
+      vacBansCount: Number(banRecord.NumberOfVACBans ?? 0),
+      gameBansCount: Number(banRecord.NumberOfGameBans ?? 0),
+      daysSinceLastBan: Number(banRecord.DaysSinceLastBan ?? 0),
+      economyBan: banRecord.EconomyBan ?? 'none',
     };
   } catch (err) {
-    console.error(`Error fetching player bans for SteamID ${steamId64}:`, err.message || err);
+    console.error(`Error fetching player bans for SteamID ${steamId64}:`, err instanceof Error ? err.message : err);
     return null;
   }
 }
 
+type RawOwnedGame = {
+  appid: number;
+  name?: string;
+  playtime_forever?: number;
+};
+
 /**
  * Fetches player owned games library and computes playtime metrics.
  */
-export async function getPlayerOwnedGames(steamId64, apiKey) {
+export async function getPlayerOwnedGames(steamId64: string, apiKey: string): Promise<SteamTopGamesResult | null> {
   if (!steamId64 || !apiKey) {
     return null;
   }
@@ -206,29 +277,29 @@ export async function getPlayerOwnedGames(steamId64, apiKey) {
       return null;
     }
 
-    const data = await res.json();
+    const data = await res.json() as { response?: { games?: RawOwnedGame[]; game_count?: number } };
     const games = data?.response?.games;
 
     if (!games || !Array.isArray(games)) {
       return {
         isPrivate: true,
-        gameCount: data?.response?.game_count || 0,
+        gameCount: data?.response?.game_count ?? 0,
         totalPlaytimeHours: '0.0',
         topGames: [],
       };
     }
 
-    const totalMinutes = games.reduce((acc, game) => acc + (game.playtime_forever || 0), 0);
+    const totalMinutes = games.reduce((acc, game) => acc + (game.playtime_forever ?? 0), 0);
     const totalHours = (totalMinutes / 60).toFixed(1);
 
     const sortedGames = [...games]
-      .sort((a, b) => (b.playtime_forever || 0) - (a.playtime_forever || 0))
+      .sort((a, b) => (b.playtime_forever ?? 0) - (a.playtime_forever ?? 0))
       .slice(0, 5)
       .map((game) => ({
         appId: game.appid,
-        name: game.name || `App #${game.appid}`,
-        playtimeHours: ((game.playtime_forever || 0) / 60).toFixed(1),
-        playtimeMinutes: game.playtime_forever || 0,
+        name: game.name ?? `App #${game.appid}`,
+        playtimeHours: ((game.playtime_forever ?? 0) / 60).toFixed(1),
+        playtimeMinutes: game.playtime_forever ?? 0,
       }));
 
     return {
@@ -238,7 +309,7 @@ export async function getPlayerOwnedGames(steamId64, apiKey) {
       topGames: sortedGames,
     };
   } catch (err) {
-    console.error(`Error fetching owned games for SteamID ${steamId64}:`, err.message || err);
+    console.error(`Error fetching owned games for SteamID ${steamId64}:`, err instanceof Error ? err.message : err);
     return null;
   }
 }
@@ -246,13 +317,10 @@ export async function getPlayerOwnedGames(steamId64, apiKey) {
 /**
  * Coordinates end-to-end resolution and fetches summary, bans, and game library statistics.
  */
-export async function getCompletePlayerProfile(rawTarget, apiKey) {
+export async function getCompletePlayerProfile(rawTarget: string, apiKey: string): Promise<SteamCompleteProfile> {
   const steamId = await resolveSteamId(rawTarget, apiKey);
   if (!steamId) {
-    return {
-      success: false,
-      error: 'RESOLVE_FAILED',
-    };
+    return { success: false, error: 'RESOLVE_FAILED' };
   }
 
   const [summaryResult, bansResult, gamesResult] = await Promise.allSettled([
@@ -264,34 +332,34 @@ export async function getCompletePlayerProfile(rawTarget, apiKey) {
   const summary = summaryResult.status === 'fulfilled' ? summaryResult.value : null;
 
   if (!summary) {
-    return {
-      success: false,
-      error: 'PROFILE_NOT_FOUND',
-      steamId,
-    };
+    return { success: false, error: 'PROFILE_NOT_FOUND', steamId };
   }
 
   const bans = bansResult.status === 'fulfilled' ? bansResult.value : null;
   const games = gamesResult.status === 'fulfilled' ? gamesResult.value : null;
 
-  return {
-    success: true,
-    steamId,
-    summary,
-    bans,
-    games,
-  };
+  return { success: true, steamId, summary, bans, games };
 }
+
+// ---------------------------------------------------------------------------
+// Wishlist
+// ---------------------------------------------------------------------------
+
+type RawWishlistItem = {
+  appid?: number | string;
+  appId?: number | string;
+  priority?: number;
+  date_added?: number;
+};
 
 /**
  * Fetches the public Steam wishlist for a given SteamID64 using the official
  * Valve Steam Web API (IWishlistService/GetWishlist/v1).
- *
- * @param {string} steamId64 - 17-digit numeric SteamID
- * @param {string} [apiKey] - Valve Steam Web API Key
- * @returns {Promise<{ success: boolean, error?: string, items?: Array }>}
  */
-export async function fetchSteamWishlist(steamId64, apiKey = process.env.STEAM_API_KEY) {
+export async function fetchSteamWishlist(
+  steamId64: string,
+  apiKey: string = process.env['STEAM_API_KEY'] ?? '',
+): Promise<SteamWishlistResult> {
   if (!steamId64) {
     return { success: false, error: 'INVALID_ID' };
   }
@@ -305,11 +373,7 @@ export async function fetchSteamWishlist(steamId64, apiKey = process.env.STEAM_A
   try {
     const res = await fetchWithTimeout(
       url,
-      {
-        headers: {
-          'x-webapi-key': apiKey,
-        },
-      },
+      { headers: { 'x-webapi-key': apiKey } },
       2500
     );
 
@@ -320,9 +384,9 @@ export async function fetchSteamWishlist(steamId64, apiKey = process.env.STEAM_A
       return { success: false, error: 'FETCH_ERROR' };
     }
 
-    let data;
+    let data: { response?: { items?: RawWishlistItem[] } };
     try {
-      data = await res.json();
+      data = await res.json() as { response?: { items?: RawWishlistItem[] } };
     } catch {
       return { success: false, error: 'FETCH_ERROR' };
     }
@@ -333,14 +397,13 @@ export async function fetchSteamWishlist(steamId64, apiKey = process.env.STEAM_A
       // Verify if the profile itself is private or friends-only
       try {
         const summary = await getPlayerSummary(steamId64, apiKey);
-        if (summary && summary.communityVisibilityState !== 3) {
-          return { success: false, error: 'PRIVATE_OR_NOT_FOUND' };
+        if (summary && !summary.isPrivate) {
+          // Profile is public but wishlist may be empty
         }
       } catch {
         // Fallback to error check
       }
 
-      // Valve returns { response: {} } (undefined items) when wishlist privacy is private
       if (!rawItems) {
         return { success: false, error: 'PRIVATE_OR_NOT_FOUND' };
       }
@@ -352,20 +415,24 @@ export async function fetchSteamWishlist(steamId64, apiKey = process.env.STEAM_A
     const sortedItems = rawItems
       .map((item) => ({
         appId: String(item.appid ?? item.appId),
-        priority: Number(item.priority || 0),
-        dateAdded: Number(item.date_added || 0),
+        priority: Number(item.priority ?? 0),
+        dateAdded: Number(item.date_added ?? 0),
       }))
       .sort((a, b) => b.dateAdded - a.dateAdded);
 
     return { success: true, items: sortedItems };
   } catch (err) {
-    console.error(`Error fetching Steam wishlist for SteamID ${steamId64}:`, err.message || err);
+    console.error(`Error fetching Steam wishlist for SteamID ${steamId64}:`, err instanceof Error ? err.message : err);
     return { success: false, error: 'FETCH_ERROR' };
   }
 }
 
+// ---------------------------------------------------------------------------
+// App Title Resolution
+// ---------------------------------------------------------------------------
+
 // Verified Steam AppID to Name registry for top institutional titles
-const APP_DIRECTORY = {
+const APP_DIRECTORY: Record<string, string> = {
   730: 'Counter-Strike 2',
   570: 'Dota 2',
   578080: 'PUBG: BATTLEGROUNDS',
@@ -409,44 +476,44 @@ const APP_DIRECTORY = {
   1817070: "Marvel's Spider-Man Remastered",
   1817190: "Marvel's Spider-Man: Miles Morales",
   236850: 'Europa Universalis IV',
-  374320: 'DARK SOULS™ III',
+  374320: 'DARK SOULS\u2122 III',
   582010: 'MONSTER HUNTER: WORLD',
   252950: 'Rocket League',
   381210: 'Dead by Daylight',
   1203220: 'NARAKA: BLADEPOINT',
-  1938090: 'Call of Duty®',
+  1938090: 'Call of Duty\u00ae',
   2358720: 'Black Myth: Wukong',
-  1840080: 'HELLDIVERS™ 2',
+  1840080: 'HELLDIVERS\u2122 2',
   1172620: 'Sea of Thieves',
   945360: 'Among Us',
   1794680: 'Vampire Survivors',
   646570: 'Slay the Spire',
   883710: 'Resident Evil 2',
-  1151640: 'Horizon Zero Dawn™',
+  1151640: 'Horizon Zero Dawn\u2122',
   1593500: 'God of War',
   1888930: 'Armored Core VI Fires of Rubicon',
   2246340: 'Monster Hunter Wilds',
-  1222670: 'The Sims™ 4',
+  1222670: 'The Sims\u2122 4',
   489830: 'The Elder Scrolls V: Skyrim Special Edition',
-  359550: 'Tom Clancy\'s Rainbow Six® Siege',
+  359550: "Tom Clancy's Rainbow Six\u00ae Siege",
   108600: 'Project Zomboid',
   1675200: 'Tiny Glade',
   264710: 'Subnautica',
   2399830: 'ARK: Survival Ascended',
   2073850: 'THE FINALS',
-  2195250: 'EA SPORTS FC™ 24',
-  2669320: 'EA SPORTS FC™ 25',
+  2195250: 'EA SPORTS FC\u2122 24',
+  2669320: 'EA SPORTS FC\u2122 25',
   1568590: 'Manor Lords',
   2379780: 'Balatro',
-  2420110: 'Horizon Forbidden West™ Complete Edition',
+  2420110: 'Horizon Forbidden West\u2122 Complete Edition',
   960090: 'Bloons TD 6',
   1446780: 'MONSTER HUNTER RISE',
-  1238810: 'Battlefield™ 2042',
-  1238840: 'Battlefield™ V',
-  1238860: 'Battlefield™ 1',
+  1238810: 'Battlefield\u2122 2042',
+  1238840: 'Battlefield\u2122 V',
+  1238860: 'Battlefield\u2122 1',
   1235140: 'Yakuza: Like a Dragon',
-  1364780: 'Street Fighter™ 6',
-  1774580: 'STAR WARS Jedi: Survivor™',
+  1364780: 'Street Fighter\u2122 6',
+  1774580: 'STAR WARS Jedi: Survivor\u2122',
   1151340: 'Fallout 76',
   377160: 'Fallout 4',
   22320: 'Fallout 3',
@@ -458,7 +525,7 @@ const APP_DIRECTORY = {
   1326470: 'Sons Of The Forest',
   2124440: 'S.T.A.L.K.E.R. 2: Heart of Chornobyl',
   1966720: 'Lethal Company',
-  2215430: 'Ghost of Tsushima DIRECTOR\'S CUT',
+  2215430: "Ghost of Tsushima DIRECTOR'S CUT",
   1240440: 'Halo Infinite',
   976730: 'Halo: The Master Chief Collection',
   526870: 'Satisfactory',
@@ -475,19 +542,18 @@ const APP_DIRECTORY = {
 /**
  * Resolves Steam AppIDs to game titles via memory directory and bounded Steam appdetails API.
  * Uses bounded concurrency and defensive timeouts to comply with Discord limits.
- *
- * @param {string[]} appIds - Array of numeric Steam AppIDs
- * @param {number} [timeoutMs=1200] - Total timeout budget for resolution (capped at 1200ms)
- * @returns {Promise<Map<string, string>>} Map of appId -> game title
  */
-export async function resolveSteamAppTitles(appIds, timeoutMs = 1200) {
-  const titleMap = new Map();
+export async function resolveSteamAppTitles(
+  appIds: Array<string | number>,
+  timeoutMs: number = 1200,
+): Promise<Map<string | number, string>> {
+  const titleMap = new Map<string | number, string>();
   if (!appIds || appIds.length === 0) {
     return titleMap;
   }
 
   // 1. Resolve known titles instantly from memory (0ms)
-  const unmapped = [];
+  const unmapped: string[] = [];
   for (const appId of appIds) {
     const stringId = String(appId);
     if (APP_DIRECTORY[stringId]) {
@@ -519,7 +585,7 @@ export async function resolveSteamAppTitles(appIds, timeoutMs = 1200) {
             signal: controller.signal,
           });
           if (res.ok) {
-            const data = await res.json();
+            const data = await res.json() as Record<string, { data?: { name?: string } }>;
             const name = data?.[appId]?.data?.name;
             if (name) {
               titleMap.set(appId, name);
@@ -537,7 +603,7 @@ export async function resolveSteamAppTitles(appIds, timeoutMs = 1200) {
     clearTimeout(timer);
   }
 
-  // 3. Immediately fall back to 'Steam App #${appId}' for all remaining unmapped titles without blocking
+  // 3. Immediately fall back to 'Steam App #${appId}' for all remaining unmapped titles
   for (const appId of appIds) {
     const stringId = String(appId);
     if (!titleMap.has(stringId)) {
@@ -550,8 +616,12 @@ export async function resolveSteamAppTitles(appIds, timeoutMs = 1200) {
   return titleMap;
 }
 
+// ---------------------------------------------------------------------------
+// F2P Registry & Detailed Library
+// ---------------------------------------------------------------------------
+
 // Registry of known Free-to-Play institutional Steam AppIDs
-export const KNOWN_F2P_APP_IDS = new Set([
+export const KNOWN_F2P_APP_IDS = new Set<number>([
   730,     // Counter-Strike 2
   570,     // Dota 2
   440,     // Team Fortress 2
@@ -584,12 +654,8 @@ export const KNOWN_F2P_APP_IDS = new Set([
 /**
  * Fetches detailed game library including AppID, name, playtime, and icon URL.
  * Excludes played free games at the Steam API level.
- *
- * @param {string} steamId64 - 17-digit SteamID
- * @param {string} apiKey - Steam Web API Key
- * @returns {Promise<{ isPrivate: boolean, gameCount: number, games: Array }|null>}
  */
-export async function getPlayerLibraryDetailed(steamId64, apiKey) {
+export async function getPlayerLibraryDetailed(steamId64: string, apiKey: string): Promise<SteamDetailedLibrary | null> {
   if (!steamId64 || !apiKey) {
     return null;
   }
@@ -603,22 +669,27 @@ export async function getPlayerLibraryDetailed(steamId64, apiKey) {
       return null;
     }
 
-    const data = await res.json();
+    const data = await res.json() as {
+      response?: {
+        games?: Array<{ appid: number; name?: string; playtime_forever?: number; img_icon_url?: string }>;
+        game_count?: number;
+      };
+    };
     const games = data?.response?.games;
 
     if (!games || !Array.isArray(games)) {
       return {
         isPrivate: true,
-        gameCount: data?.response?.game_count || 0,
+        gameCount: data?.response?.game_count ?? 0,
         games: [],
       };
     }
 
-    const detailedGames = games.map((g) => ({
+    const detailedGames: SteamOwnedGame[] = games.map((g) => ({
       appid: g.appid,
-      name: g.name || `App #${g.appid}`,
-      playtime_forever: g.playtime_forever || 0,
-      img_icon_url: g.img_icon_url || null,
+      name: g.name ?? `App #${g.appid}`,
+      playtime_forever: g.playtime_forever ?? 0,
+      img_icon_url: g.img_icon_url ?? null,
     }));
 
     return {
@@ -627,24 +698,28 @@ export async function getPlayerLibraryDetailed(steamId64, apiKey) {
       games: detailedGames,
     };
   } catch (err) {
-    console.error(`Error fetching detailed library for SteamID ${steamId64}:`, err.message || err);
+    console.error(`Error fetching detailed library for SteamID ${steamId64}:`, err instanceof Error ? err.message : err);
     return null;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Library Comparison
+// ---------------------------------------------------------------------------
 
 /**
  * Computes the intersection of two player libraries, calculates dominance per title,
  * overall win tally, and sorts common titles by total combined playtime descending.
  * Pure function with zero external side effects.
- *
- * @param {Array} gamesA - Games list for Player A
- * @param {Array} gamesB - Games list for Player B
- * @returns {object} Comparison analytics
  */
-export function compareLibraryData(gamesA, gamesB) {
+export function compareLibraryData(
+  gamesA: SteamOwnedGame[],
+  gamesB: SteamOwnedGame[],
+): LibraryComparisonResult {
   if (!Array.isArray(gamesA) || !Array.isArray(gamesB)) {
     return {
       commonCount: 0,
+      totalCommon: 0,
       winsA: 0,
       winsB: 0,
       ties: 0,
@@ -655,14 +730,14 @@ export function compareLibraryData(gamesA, gamesB) {
     };
   }
 
-  const mapA = new Map();
+  const mapA = new Map<number, SteamOwnedGame>();
   for (const g of gamesA) {
     if (g?.appid) {
       mapA.set(Number(g.appid), g);
     }
   }
 
-  const commonGames = [];
+  const commonGames: CommonGame[] = [];
   let totalMinsA = 0;
   let totalMinsB = 0;
 
@@ -670,11 +745,11 @@ export function compareLibraryData(gamesA, gamesB) {
     if (!gB?.appid) continue;
     const appId = Number(gB.appid);
     if (mapA.has(appId)) {
-      const gA = mapA.get(appId);
-      const playtimeA = Number(gA.playtime_forever || 0);
-      const playtimeB = Number(gB.playtime_forever || 0);
+      const gA = mapA.get(appId)!;
+      const playtimeA = Number(gA.playtime_forever ?? 0);
+      const playtimeB = Number(gB.playtime_forever ?? 0);
       const totalPlaytime = playtimeA + playtimeB;
-      const winner = playtimeA > playtimeB ? 'A' : playtimeB > playtimeA ? 'B' : 'TIE';
+      const winner: 'A' | 'B' | 'TIE' = playtimeA > playtimeB ? 'A' : playtimeB > playtimeA ? 'B' : 'TIE';
       const diffMinutes = Math.abs(playtimeA - playtimeB);
 
       totalMinsA += playtimeA;
@@ -682,7 +757,7 @@ export function compareLibraryData(gamesA, gamesB) {
 
       commonGames.push({
         appid: appId,
-        name: gA.name || gB.name || `App #${appId}`,
+        name: gA.name ?? gB.name ?? `App #${appId}`,
         playtimeA,
         playtimeB,
         totalPlaytime,
@@ -701,7 +776,7 @@ export function compareLibraryData(gamesA, gamesB) {
   const winsA = commonGames.filter((g) => g.winner === 'A').length;
   const winsB = commonGames.filter((g) => g.winner === 'B').length;
   const ties = commonGames.filter((g) => g.winner === 'TIE').length;
-  const overallWinner = winsA > winsB ? 'A' : winsB > winsA ? 'B' : 'TIE';
+  const overallWinner: 'A' | 'B' | 'TIE' = winsA > winsB ? 'A' : winsB > winsA ? 'B' : 'TIE';
 
   return {
     commonCount: commonGames.length,
@@ -720,11 +795,18 @@ export function compareLibraryData(gamesA, gamesB) {
  * Safely fetches player achievement count and unlocked count for a specific title.
  * Returns null if achievements are private, unsupported, or error occurs.
  */
-export async function getPlayerAchievementsSafe(steamId64, appId, apiKey) {
+export async function getPlayerAchievementsSafe(
+  steamId64: string,
+  appId: number,
+  apiKey: string,
+): Promise<AchievementResult | null> {
   if (!steamId64 || !appId || !apiKey) return null;
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 800);
+
+  type RawAchievement = { achieved: number };
+  type AchievementsResponse = { playerstats?: { achievements?: RawAchievement[]; gameName?: string } };
 
   try {
     const url = `${API_BASE}/ISteamUserStats/GetPlayerAchievements/v1/?key=${apiKey}&steamid=${steamId64}&appid=${appId}`;
@@ -736,7 +818,7 @@ export async function getPlayerAchievementsSafe(steamId64, appId, apiKey) {
     clearTimeout(timer);
     if (!res.ok) return null;
 
-    const data = await res.json();
+    const data = await res.json() as AchievementsResponse;
     const achievements = data?.playerstats?.achievements;
     if (!Array.isArray(achievements) || achievements.length === 0) return null;
 
@@ -744,7 +826,7 @@ export async function getPlayerAchievementsSafe(steamId64, appId, apiKey) {
     const total = achievements.length;
     const percent = total > 0 ? Math.round((unlocked / total) * 100) : 0;
 
-    return { total, unlocked, percent, gameName: data?.playerstats?.gameName || null };
+    return { total, unlocked, percent, gameName: data?.playerstats?.gameName ?? null };
   } catch {
     clearTimeout(timer);
     return null;
@@ -754,7 +836,11 @@ export async function getPlayerAchievementsSafe(steamId64, appId, apiKey) {
 /**
  * End-to-end library comparison between two Steam IDs.
  */
-export async function compareLibraries(steamIdA, steamIdB, apiKey) {
+export async function compareLibraries(
+  steamIdA: string,
+  steamIdB: string,
+  apiKey: string,
+): Promise<LibraryCompareResult> {
   if (!steamIdA || !steamIdB || !apiKey) {
     return { success: false, error: 'INVALID_PARAMS' };
   }
@@ -780,7 +866,7 @@ export async function compareLibraries(steamIdA, steamIdB, apiKey) {
 
   const comparison = compareLibraryData(libA.games, libB.games);
 
-  let topAchievements = null;
+  let topAchievements: TopAchievements | null = null;
   if (comparison.commonGames.length > 0) {
     const topAppId = comparison.commonGames[0].appid;
     try {
@@ -810,15 +896,18 @@ export async function compareLibraries(steamIdA, steamIdB, apiKey) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Backlog Analysis
+// ---------------------------------------------------------------------------
+
 /**
  * Analyzes paid backlog games: filters out games >= 60 mins and all free-to-play games.
  * Pure function with zero external network side-effects.
- *
- * @param {Array} games - Owned games list
- * @param {string} preferredCurrency - 'USD' or 'BRL'
- * @returns {object} Backlog telemetry metrics
  */
-export function filterBacklogData(games, preferredCurrency = 'USD') {
+export function filterBacklogData(
+  games: SteamOwnedGame[],
+  preferredCurrency: string = 'USD',
+): BacklogTelemetry {
   if (!Array.isArray(games)) {
     return {
       totalPaidCount: 0,
@@ -841,27 +930,27 @@ export function filterBacklogData(games, preferredCurrency = 'USD') {
   // Filter out free-to-play games using known registry and metadata
   const paidGames = games.filter((g) => {
     if (!g) return false;
-    const appId = Number(g.appid || g.appId || 0);
+    const appId = Number(g.appid ?? 0);
     if (KNOWN_F2P_APP_IDS.has(appId)) return false;
     if (g.is_free || g.is_free_to_play) return false;
     return true;
   });
 
-  const playedGames = [];
-  const backlogGames = [];
+  const playedGames: SteamOwnedGame[] = [];
+  const backlogGames: SteamOwnedGame[] = [];
   let neverPlayedCount = 0;
   let startedCount = 0;
 
   for (const game of paidGames) {
-    const mins = Number(game.playtime_forever || game.playtimeMinutes || 0);
-    const appId = Number(game.appid || game.appId || 0);
-    const name = game.name || `App #${appId}`;
+    const mins = Number(game.playtime_forever ?? 0);
+    const appId = Number(game.appid ?? 0);
+    const name = game.name ?? `App #${appId}`;
 
-    const gameRecord = {
+    const gameRecord: SteamOwnedGame = {
       appid: appId,
       name,
       playtime_forever: mins,
-      img_icon_url: game.img_icon_url || null,
+      img_icon_url: game.img_icon_url ?? null,
     };
 
     if (mins < 60) {
@@ -907,13 +996,12 @@ export function filterBacklogData(games, preferredCurrency = 'USD') {
  * Pure function: Computes total base MSRP for unplayed backlog games from a price map.
  * Sums regular base retail prices (ignoring temporary discount cuts), skips free titles,
  * and tracks the count of successfully priced titles.
- *
- * @param {Array} backlogGames - Unplayed games list
- * @param {Map|object} priceMap - Map or object of appId -> price info
- * @param {string} [preferredCurrency='USD'] - 'USD' or 'BRL'
- * @returns {object} { totalMsrp: number, pricedCount: number, totalUnplayed: number, currencySymbol: string, msrpFormatted: string, msrpSummary: string }
  */
-export function calculateBacklogMsrp(backlogGames, priceMap, preferredCurrency = 'USD') {
+export function calculateBacklogMsrp(
+  backlogGames: SteamOwnedGame[],
+  priceMap: Map<number, SteamAppPriceInfo> | Record<number, SteamAppPriceInfo>,
+  preferredCurrency: string = 'USD',
+): BacklogMsrpResult {
   const sym = preferredCurrency === 'BRL' ? 'R$' : '$';
   const totalUnplayed = Array.isArray(backlogGames) ? backlogGames.length : 0;
   let totalMsrp = 0;
@@ -921,8 +1009,8 @@ export function calculateBacklogMsrp(backlogGames, priceMap, preferredCurrency =
 
   if (Array.isArray(backlogGames) && priceMap) {
     for (const g of backlogGames) {
-      const appId = Number(g.appid || g.appId || 0);
-      const priceInfo = priceMap instanceof Map ? priceMap.get(appId) : priceMap[appId];
+      const appId = Number(g.appid ?? 0);
+      const priceInfo = priceMap instanceof Map ? priceMap.get(appId) : (priceMap as Record<number, SteamAppPriceInfo>)[appId];
       if (!priceInfo) continue;
       if (priceInfo.isFree || priceInfo.isDelisted) continue;
 
@@ -953,28 +1041,39 @@ export function calculateBacklogMsrp(backlogGames, priceMap, preferredCurrency =
 /**
  * Batch fetches Steam Storefront price overview for multiple application IDs.
  * Divides IDs into chunks of 25 to respect URL and API limitations.
- * Employs a defensive 1800ms timeout with AbortController.
- *
- * @param {Array<number|string>} appIds - List of Steam app IDs
- * @param {string} countryCode - 'us' or 'br'
- * @param {number} [maxBatch=100] - Maximum total app IDs to query
- * @returns {Promise<Map<number, { initial: number, final: number, initialFormatted: string, finalFormatted: string, isFree: boolean, isDelisted?: boolean }>>}
  */
-export async function batchFetchSteamAppPrices(appIds, countryCode = 'us', maxBatch = 100) {
-  const priceMap = new Map();
+export async function batchFetchSteamAppPrices(
+  appIds: Array<number | string>,
+  countryCode: string = 'us',
+  maxBatch: number = 100,
+): Promise<Map<number, SteamAppPriceInfo>> {
+  const priceMap = new Map<number, SteamAppPriceInfo>();
   if (!Array.isArray(appIds) || appIds.length === 0) return priceMap;
 
   const targetIds = appIds.slice(0, maxBatch).map(Number).filter(Boolean);
   if (targetIds.length === 0) return priceMap;
 
   const CHUNK_SIZE = 25;
-  const chunks = [];
+  const chunks: number[][] = [];
   for (let i = 0; i < targetIds.length; i += CHUNK_SIZE) {
     chunks.push(targetIds.slice(i, i + CHUNK_SIZE));
   }
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 1800);
+
+  type AppDetailsResponse = Record<string, {
+    success: boolean;
+    data?: {
+      is_free?: boolean;
+      price_overview?: {
+        initial?: number;
+        final?: number;
+        initial_formatted?: string;
+        final_formatted?: string;
+      };
+    };
+  }>;
 
   try {
     await Promise.all(
@@ -986,7 +1085,7 @@ export async function batchFetchSteamAppPrices(appIds, countryCode = 'us', maxBa
             signal: controller.signal,
           });
           if (!res.ok) return;
-          const data = await res.json();
+          const data = await res.json() as AppDetailsResponse;
           if (!data || typeof data !== 'object') return;
 
           for (const [idStr, appObj] of Object.entries(data)) {
@@ -1001,13 +1100,13 @@ export async function batchFetchSteamAppPrices(appIds, countryCode = 'us', maxBa
             }
             const overview = appObj.data?.price_overview;
             if (overview) {
-              const initialCents = Number(overview.initial || overview.final || 0);
-              const finalCents = Number(overview.final || 0);
+              const initialCents = Number(overview.initial ?? overview.final ?? 0);
+              const finalCents = Number(overview.final ?? 0);
               priceMap.set(appId, {
                 initial: initialCents / 100,
                 final: finalCents / 100,
-                initialFormatted: overview.initial_formatted || '',
-                finalFormatted: overview.final_formatted || '',
+                initialFormatted: overview.initial_formatted ?? '',
+                finalFormatted: overview.final_formatted ?? '',
                 isFree: false,
               });
             }
@@ -1027,7 +1126,11 @@ export async function batchFetchSteamAppPrices(appIds, countryCode = 'us', maxBa
 /**
  * End-to-end backlog telemetry retrieval and analysis for a Steam ID.
  */
-export async function calculateBacklogTelemetry(steamId64, apiKey, preferredCurrency = 'USD') {
+export async function calculateBacklogTelemetry(
+  steamId64: string,
+  apiKey: string,
+  preferredCurrency: string = 'USD',
+): Promise<BacklogTelemetryResult> {
   if (!steamId64 || !apiKey) {
     return { success: false, error: 'INVALID_PARAMS' };
   }
@@ -1045,7 +1148,7 @@ export async function calculateBacklogTelemetry(steamId64, apiKey, preferredCurr
   const countryCode = preferredCurrency === 'BRL' ? 'br' : 'us';
 
   const backlogAppIds = telemetry.backlogGames.map((g) => g.appid);
-  let priceMap = new Map();
+  let priceMap = new Map<number, SteamAppPriceInfo>();
   try {
     priceMap = await batchFetchSteamAppPrices(backlogAppIds, countryCode, 100);
   } catch {
@@ -1054,7 +1157,7 @@ export async function calculateBacklogTelemetry(steamId64, apiKey, preferredCurr
 
   const msrpData = calculateBacklogMsrp(telemetry.backlogGames, priceMap, preferredCurrency);
 
-  const storePricesMap = {};
+  const storePricesMap: Record<number, string> = {};
   for (const [appId, p] of priceMap.entries()) {
     if (p.isFree) {
       storePricesMap[appId] = 'Free / Included';
@@ -1076,16 +1179,23 @@ export async function calculateBacklogTelemetry(steamId64, apiKey, preferredCurr
 /**
  * Executes a lightweight lookup to the Steam Storefront API to retrieve real-time pricing.
  * Employs a defensive 1200ms timeout using AbortController.
- *
- * @param {number|string} appId - Steam Application ID
- * @param {string} countryCode - 'us' or 'br'
- * @returns {Promise<string>} Formatted store price, 'Free / Included', or 'Delisted / Legacy'
  */
-export async function fetchSteamAppStorePrice(appId, countryCode = 'us') {
+export async function fetchSteamAppStorePrice(
+  appId: number | string,
+  countryCode: string = 'us',
+): Promise<string> {
   if (!appId) return 'Delisted / Legacy';
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 1200);
+
+  type AppDetailsSingle = Record<string | number, {
+    success?: boolean;
+    data?: {
+      is_free?: boolean;
+      price_overview?: { final_formatted?: string };
+    };
+  }>;
 
   try {
     const url = `https://store.steampowered.com/api/appdetails?appids=${appId}&cc=${countryCode}&filters=price_overview`;
@@ -1099,7 +1209,7 @@ export async function fetchSteamAppStorePrice(appId, countryCode = 'us') {
       return 'Delisted / Legacy';
     }
 
-    const data = await res.json();
+    const data = await res.json() as AppDetailsSingle;
     const appData = data?.[appId];
 
     if (!appData?.success || !appData?.data) {
@@ -1122,25 +1232,43 @@ export async function fetchSteamAppStorePrice(appId, countryCode = 'us') {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Embed Builders — Duel
+// ---------------------------------------------------------------------------
+
+type PlayerSummaryLike = {
+  personaName?: string;
+  personaname?: string;
+  steamId?: string;
+  steamid?: string;
+  avatarUrl?: string;
+  avatarfull?: string;
+};
+
 /**
  * Generates Discord interaction embed and pagination components for Steam Library Duel.
  */
-export function buildDuelEmbedPayload(comparison, summaryA, summaryB, page = 1) {
+export function buildDuelEmbedPayload(
+  comparison: LibraryComparisonResult,
+  summaryA: PlayerSummaryLike,
+  summaryB: PlayerSummaryLike,
+  page: number = 1,
+): EmbedPayload {
   const PAGE_SIZE = 4;
-  const totalGames = comparison?.commonGames?.length || 0;
+  const totalGames = comparison?.commonGames?.length ?? 0;
   const totalPages = Math.max(1, Math.ceil(totalGames / PAGE_SIZE));
   const requestedPage = typeof page === 'number' && page >= 1 ? page : 1;
   const currentPage = Math.min(Math.max(1, requestedPage), totalPages);
 
-  const personaA = summaryA?.personaName || summaryA?.personaname || 'Player A';
-  const personaB = summaryB?.personaName || summaryB?.personaname || 'Player B';
-  const steamIdA = summaryA?.steamId || summaryA?.steamid || '';
-  const steamIdB = summaryB?.steamId || summaryB?.steamid || '';
-  const avatarA = summaryA?.avatarUrl || summaryA?.avatarfull || null;
-  const avatarB = summaryB?.avatarUrl || summaryB?.avatarfull || null;
+  const personaA = summaryA?.personaName ?? summaryA?.personaname ?? 'Player A';
+  const personaB = summaryB?.personaName ?? summaryB?.personaname ?? 'Player B';
+  const steamIdA = summaryA?.steamId ?? summaryA?.steamid ?? '';
+  const steamIdB = summaryB?.steamId ?? summaryB?.steamid ?? '';
+  const avatarA = summaryA?.avatarUrl ?? summaryA?.avatarfull ?? null;
+  const avatarB = summaryB?.avatarUrl ?? summaryB?.avatarfull ?? null;
 
   const startIdx = (currentPage - 1) * PAGE_SIZE;
-  const pageGames = (comparison?.commonGames || []).slice(startIdx, startIdx + PAGE_SIZE);
+  const pageGames = (comparison?.commonGames ?? []).slice(startIdx, startIdx + PAGE_SIZE);
 
   const diffBlocks = pageGames.map((g) => {
     if (g.winner === 'A') {
@@ -1148,7 +1276,7 @@ export function buildDuelEmbedPayload(comparison, summaryA, summaryB, page = 1) 
         '```diff',
         `[ ${g.name} ]`,
         `- ${personaB}: ${g.hoursB} hrs`,
-        `+ ${personaA}: ${g.hoursA} hrs ★ Dominant (+${g.diffHours} hrs)`,
+        `+ ${personaA}: ${g.hoursA} hrs \u2605 Dominant (+${g.diffHours} hrs)`,
         '```',
       ].join('\n');
     } else if (g.winner === 'B') {
@@ -1156,7 +1284,7 @@ export function buildDuelEmbedPayload(comparison, summaryA, summaryB, page = 1) 
         '```diff',
         `[ ${g.name} ]`,
         `- ${personaA}: ${g.hoursA} hrs`,
-        `+ ${personaB}: ${g.hoursB} hrs ★ Dominant (+${g.diffHours} hrs)`,
+        `+ ${personaB}: ${g.hoursB} hrs \u2605 Dominant (+${g.diffHours} hrs)`,
         '```',
       ].join('\n');
     } else {
@@ -1173,13 +1301,13 @@ export function buildDuelEmbedPayload(comparison, summaryA, summaryB, page = 1) 
   const commonCount = comparison.commonCount ?? comparison.totalCommon ?? 0;
   const scoreboardDescription = [
     `Dominance Score: **${comparison.winsA}** (${personaA}) vs **${comparison.winsB}** (${personaB})`,
-    `Total Time Invested: **${comparison.totalHoursA}h** vs **${comparison.totalHoursB}h** • **${commonCount}** Shared Titles`,
+    `Total Time Invested: **${comparison.totalHoursA}h** vs **${comparison.totalHoursB}h** \u2022 **${commonCount}** Shared Titles`,
   ].join('\n');
 
-  const embed1 = {
+  const embed1: DiscordEmbed = {
     author: {
-      name: `${personaA} vs ${personaB} • Steam Duel`,
-      icon_url: avatarA || undefined,
+      name: `${personaA} vs ${personaB} \u2022 Steam Duel`,
+      icon_url: avatarA ?? undefined,
     },
     title: 'Steam Library Duel Overview',
     description: scoreboardDescription,
@@ -1187,32 +1315,32 @@ export function buildDuelEmbedPayload(comparison, summaryA, summaryB, page = 1) 
     thumbnail: avatarA ? { url: avatarA } : undefined,
   };
 
-  const embed2 = {
+  const embed2: DiscordEmbed = {
     title: `Shared Titles Playtime Comparison [Page ${currentPage}/${totalPages}]`,
     description: diffBlocks || '*No shared titles on this page.*',
     color: 0x5865f2,
     thumbnail: avatarB ? { url: avatarB } : undefined,
     footer: {
-      text: `Page ${currentPage} of ${totalPages} • zT Radar • Steam Duel`,
+      text: `Page ${currentPage} of ${totalPages} \u2022 zT Radar \u2022 Steam Duel`,
     },
     timestamp: new Date().toISOString(),
   };
 
   const components = totalPages > 1 ? [
     {
-      type: 1, // Action Row
+      type: 1 as const,
       components: [
         {
-          type: 2, // Button
-          style: 2, // Secondary
-          label: '◀ Prev',
+          type: 2 as const,
+          style: 2,
+          label: '\u25c4 Prev',
           custom_id: `duel_p:${currentPage - 1}:${steamIdA}:${steamIdB}`,
           disabled: currentPage <= 1,
         },
         {
-          type: 2, // Button
-          style: 1, // Primary
-          label: 'Next ▶',
+          type: 2 as const,
+          style: 1,
+          label: 'Next \u25ba',
           custom_id: `duel_p:${currentPage + 1}:${steamIdA}:${steamIdB}`,
           disabled: currentPage >= totalPages,
         },
@@ -1223,19 +1351,28 @@ export function buildDuelEmbedPayload(comparison, summaryA, summaryB, page = 1) 
   return { embed: embed1, embeds: [embed1, embed2], components };
 }
 
+// ---------------------------------------------------------------------------
+// Embed Builders — Backlog
+// ---------------------------------------------------------------------------
+
 /**
  * Generates Discord interaction embed and pagination components for Steam Library Backlog.
  */
-export async function buildBacklogEmbedPayload(telemetry, summary, page = 1, storePricesMap = null) {
+export async function buildBacklogEmbedPayload(
+  telemetry: BacklogTelemetry & Partial<BacklogMsrpResult> & { storePricesMap?: Record<number, string> },
+  summary: PlayerSummaryLike,
+  page: number = 1,
+  storePricesMap: Record<number, string> | null = null,
+): Promise<EmbedPayload> {
   const PAGE_SIZE = 5;
   const totalUnplayed = telemetry.backlogGames.length;
   const totalPages = Math.max(1, Math.ceil(totalUnplayed / PAGE_SIZE));
   const requestedPage = typeof page === 'number' && page >= 1 ? page : 1;
   const currentPage = Math.min(Math.max(1, requestedPage), totalPages);
 
-  const personaName = summary?.personaName || summary?.personaname || 'Player';
-  const steamId = summary?.steamId || summary?.steamid || '';
-  const avatarUrl = summary?.avatarUrl || summary?.avatarfull || null;
+  const personaName = summary?.personaName ?? summary?.personaname ?? 'Player';
+  const steamId = summary?.steamId ?? summary?.steamid ?? '';
+  const avatarUrl = summary?.avatarUrl ?? summary?.avatarfull ?? null;
 
   const startIdx = (currentPage - 1) * PAGE_SIZE;
   const pageGames = telemetry.backlogGames.slice(startIdx, startIdx + PAGE_SIZE);
@@ -1245,13 +1382,14 @@ export async function buildBacklogEmbedPayload(telemetry, summary, page = 1, sto
   const unplayedList = await Promise.all(
     pageGames.map(async (g) => {
       const timeLabel = g.playtime_forever === 0 ? 'Never Opened (0m)' : `${g.playtime_forever}m played`;
-      let priceLabel = storePricesMap?.[g.appid] || telemetry.storePricesMap?.[g.appid];
+      let priceLabel: string | undefined =
+        (storePricesMap ?? {})[g.appid] ?? (telemetry.storePricesMap ?? {})[g.appid];
       if (!priceLabel) {
         priceLabel = await fetchSteamAppStorePrice(g.appid, countryCode);
       }
       return [
-        `❖ **${g.name}**`,
-        `  └─ Playtime: \`${timeLabel}\` • Current Store: **${priceLabel}**`,
+        `\u2756 **${g.name}**`,
+        `  \u2514\u2500 Playtime: \`${timeLabel}\` \u2022 Current Store: **${priceLabel}**`,
       ].join('\n');
     })
   );
@@ -1287,39 +1425,40 @@ export async function buildBacklogEmbedPayload(telemetry, summary, page = 1, sto
     ? (telemetry.msrpSummary.startsWith('Total Inactive MSRP:')
       ? telemetry.msrpSummary.replace(/^Total Inactive MSRP:\s*/, '')
       : telemetry.msrpSummary)
-    : `${telemetry.currencySymbol || '$'} ${Number(telemetry.totalMsrp || 0).toFixed(2)} (${telemetry.pricedCount || 0}/${totalUnplayed} priced)`;
+    : `${telemetry.currencySymbol ?? '$'} ${Number(telemetry.totalMsrp ?? 0).toFixed(2)} (${telemetry.pricedCount ?? 0}/${totalUnplayed} priced)`;
+
   const descriptionLines = [
     `Paid library telemetry analysis detecting unplayed games, backlog percentage, and live store valuation.`,
-    `▸ **Total Inactive MSRP:** ${msrpText}`,
+    `\u25b8 **Total Inactive MSRP:** ${msrpText}`,
   ];
 
-  const embed = {
-    title: `Steam Library Backlog Intelligence ❖ ${personaName}`,
+  const embed: DiscordEmbed = {
+    title: `Steam Library Backlog Intelligence \u2756 ${personaName}`,
     description: descriptionLines.join('\n'),
     color: 0x5865f2,
     fields,
     thumbnail: avatarUrl ? { url: avatarUrl } : undefined,
     footer: {
-      text: `Page ${currentPage} of ${totalPages} • Currency: ${telemetry.preferredCurrency} • zT Radar Backlog Intelligence`,
+      text: `Page ${currentPage} of ${totalPages} \u2022 Currency: ${telemetry.preferredCurrency} \u2022 zT Radar Backlog Intelligence`,
     },
     timestamp: new Date().toISOString(),
   };
 
   const components = totalPages > 1 ? [
     {
-      type: 1, // Action Row
+      type: 1 as const,
       components: [
         {
-          type: 2, // Button
-          style: 2, // Secondary
-          label: '◀ Prev',
+          type: 2 as const,
+          style: 2,
+          label: '\u25c4 Prev',
           custom_id: `backlog_p:${currentPage - 1}:${steamId}`,
           disabled: currentPage <= 1,
         },
         {
-          type: 2, // Button
-          style: 1, // Primary
-          label: 'Next ▶',
+          type: 2 as const,
+          style: 1,
+          label: 'Next \u25ba',
           custom_id: `backlog_p:${currentPage + 1}:${steamId}`,
           disabled: currentPage >= totalPages,
         },
@@ -1330,11 +1469,12 @@ export async function buildBacklogEmbedPayload(telemetry, summary, page = 1, sto
   return { embed, embeds: [embed], components };
 }
 
-/**
- * Institutional registry of top Steam titles known to support multiplayer/co-op.
- * Maps AppID to specific badge tags.
- */
-export const KNOWN_MULTIPLAYER_APP_IDS = new Map([
+// ---------------------------------------------------------------------------
+// Multiplayer Badge Resolution & Game Match
+// ---------------------------------------------------------------------------
+
+/** Institutional registry of top Steam titles known to support multiplayer/co-op. */
+export const KNOWN_MULTIPLAYER_APP_IDS = new Map<number, string[]>([
   [105600, ['Online Co-op', 'Multiplayer', 'Shared Screen']], // Terraria
   [413150, ['Online Co-op', 'Multiplayer', 'Shared Screen']], // Stardew Valley
   [620, ['Online Co-op', 'Shared Screen']],                   // Portal 2
@@ -1380,21 +1520,22 @@ export const KNOWN_MULTIPLAYER_APP_IDS = new Map([
   [1063730, ['Online Co-op', 'Multiplayer']],                 // New World
 ]);
 
+type CategoryLike = { id: number } | number;
+
 /**
  * Resolves multiplayer badges for an AppID by combining institutional registry,
  * category IDs, and title keyword heuristics.
- *
- * @param {number} appId - Steam AppID
- * @param {string} [name=''] - Title name
- * @param {Array<number|object>} [categories=[]] - Category IDs or objects from Steam/ITAD
- * @returns {Array<string>} Array of badges (e.g. ['Online Co-op', 'Multiplayer'])
  */
-export function resolveMultiplayerBadges(appId, name = '', categories = []) {
+export function resolveMultiplayerBadges(
+  appId: number | string,
+  name: string = '',
+  categories: CategoryLike[] = [],
+): string[] {
   const numericId = Number(appId);
-  const badges = new Set();
+  const badges = new Set<string>();
 
   if (KNOWN_MULTIPLAYER_APP_IDS.has(numericId)) {
-    for (const b of KNOWN_MULTIPLAYER_APP_IDS.get(numericId)) {
+    for (const b of KNOWN_MULTIPLAYER_APP_IDS.get(numericId)!) {
       badges.add(b);
     }
   }
@@ -1428,30 +1569,30 @@ export function resolveMultiplayerBadges(appId, name = '', categories = []) {
 /**
  * Pure function: Computes library intersection between Player A and Player B,
  * resolves multiplayer tags, filters by mode, and sorts descending by combined playtime.
- *
- * @param {Array} gamesA - Player A owned games
- * @param {Array} gamesB - Player B owned games
- * @param {string} [filterMode='coop'] - 'coop' (Multiplayer/Co-op only) or 'all'
- * @returns {object} Matching telemetry and games list
  */
-export function matchLibraryData(gamesA, gamesB, filterMode = 'coop') {
+export function matchLibraryData(
+  gamesA: SteamOwnedGame[],
+  gamesB: SteamOwnedGame[],
+  filterMode: string = 'coop',
+): MatchLibraryResult {
   if (!Array.isArray(gamesA) || !Array.isArray(gamesB)) {
     return {
       totalCommon: 0,
       matchedCount: 0,
       filterMode,
       games: [],
+      matchingGames: [],
     };
   }
 
-  const mapA = new Map();
+  const mapA = new Map<number, SteamOwnedGame>();
   for (const g of gamesA) {
     if (g?.appid) {
       mapA.set(Number(g.appid), g);
     }
   }
 
-  const matched = [];
+  const matched: MatchedGame[] = [];
   let totalCommonCount = 0;
 
   for (const gB of gamesB) {
@@ -1459,13 +1600,15 @@ export function matchLibraryData(gamesA, gamesB, filterMode = 'coop') {
     const appId = Number(gB.appid);
     if (mapA.has(appId)) {
       totalCommonCount += 1;
-      const gA = mapA.get(appId);
-      const playtimeA = Number(gA.playtime_forever || 0);
-      const playtimeB = Number(gB.playtime_forever || 0);
+      const gA = mapA.get(appId)!;
+      const playtimeA = Number(gA.playtime_forever ?? 0);
+      const playtimeB = Number(gB.playtime_forever ?? 0);
       const totalPlaytime = playtimeA + playtimeB;
-      const name = gA.name || gB.name || `App #${appId}`;
+      const name = gA.name ?? gB.name ?? `App #${appId}`;
 
-      const badges = resolveMultiplayerBadges(appId, name, gA.categories || gB.categories);
+      const categoriesA = (gA.categories ?? []) as CategoryLike[];
+      const categoriesB = (gB.categories ?? []) as CategoryLike[];
+      const badges = resolveMultiplayerBadges(appId, name, [...categoriesA, ...categoriesB]);
       const isCoopOrMultiplayer = badges.length > 0;
 
       if (filterMode === 'coop' && !isCoopOrMultiplayer) {
@@ -1484,7 +1627,7 @@ export function matchLibraryData(gamesA, gamesB, filterMode = 'coop') {
         badges: isCoopOrMultiplayer ? badges : ['Single-player'],
         isCoop: isCoopOrMultiplayer,
         isCoopOrMultiplayer,
-        img_icon_url: gA.img_icon_url || gB.img_icon_url || null,
+        img_icon_url: gA.img_icon_url ?? gB.img_icon_url ?? null,
       });
     }
   }
@@ -1509,14 +1652,13 @@ export function matchLibraryData(gamesA, gamesB, filterMode = 'coop') {
 
 /**
  * End-to-end multi-library co-op & multiplayer game discovery coordinator.
- *
- * @param {string} steamIdA - Player A SteamID64
- * @param {string} steamIdB - Player B SteamID64
- * @param {string} [filterMode='coop'] - 'coop' or 'all'
- * @param {string} apiKey - Steam Web API Key
- * @returns {Promise<object>} Match results
  */
-export async function findMatchingGames(steamIdA, steamIdB, filterMode = 'coop', apiKey) {
+export async function findMatchingGames(
+  steamIdA: string,
+  steamIdB: string,
+  filterMode: string = 'coop',
+  apiKey: string,
+): Promise<FindMatchingGamesResult> {
   if (!steamIdA || !steamIdB || !apiKey) {
     return { success: false, error: 'INVALID_PARAMS' };
   }
@@ -1542,40 +1684,48 @@ export async function findMatchingGames(steamIdA, steamIdB, filterMode = 'coop',
 
   const matchData = matchLibraryData(libA.games, libB.games, filterMode);
 
-  return {
-    success: true,
+  const result: FindMatchingGamesResult = {
+    success: true as const,
     steamIdA,
     steamIdB,
     countA: libA.gameCount,
     countB: libB.gameCount,
-    ...matchData,
+    totalCommon: matchData.totalCommon,
+    matchedCount: matchData.matchedCount,
+    filterMode: matchData.filterMode,
+    games: matchData.games,
+    matchingGames: matchData.matchingGames,
   };
+  return result;
 }
+
+// ---------------------------------------------------------------------------
+// Embed Builders — Game Match
+// ---------------------------------------------------------------------------
 
 /**
  * Generates Discord Rich Embed and interactive pagination buttons for /game-match.
- *
- * @param {object} matchResult - Result from findMatchingGames or matchLibraryData
- * @param {object} summaryA - Player A summary
- * @param {object} summaryB - Player B summary
- * @param {number} [page=1] - Requested 1-based page index
- * @param {string} [filterMode='coop'] - 'coop' or 'all'
- * @returns {object} { embed, embeds: [embed], components }
  */
-export function buildGameMatchEmbedPayload(matchResult, summaryA, summaryB, page = 1, filterMode = 'coop') {
+export function buildGameMatchEmbedPayload(
+  matchResult: FindMatchingGamesResult | MatchLibraryResult,
+  summaryA: PlayerSummaryLike,
+  summaryB: PlayerSummaryLike,
+  page: number = 1,
+  filterMode: string = 'coop',
+): EmbedPayload {
   const PAGE_SIZE = 5;
-  const games = matchResult?.matchingGames || matchResult?.games || [];
+  const games = (matchResult as MatchLibraryResult)?.matchingGames ?? (matchResult as MatchLibraryResult)?.games ?? [];
   const totalGames = games.length;
   const totalPages = Math.max(1, Math.ceil(totalGames / PAGE_SIZE));
   const requestedPage = typeof page === 'number' && page >= 1 ? page : 1;
   const currentPage = Math.min(Math.max(1, requestedPage), totalPages);
 
-  const personaA = summaryA?.personaName || summaryA?.personaname || 'Player A';
-  const personaB = summaryB?.personaName || summaryB?.personaname || 'Player B';
-  const steamIdA = matchResult?.steamIdA || summaryA?.steamId || summaryA?.steamid || '';
-  const steamIdB = matchResult?.steamIdB || summaryB?.steamId || summaryB?.steamid || '';
-  const avatarA = summaryA?.avatarUrl || summaryA?.avatarfull || null;
-  const avatarB = summaryB?.avatarUrl || summaryB?.avatarfull || null;
+  const personaA = summaryA?.personaName ?? summaryA?.personaname ?? 'Player A';
+  const personaB = summaryB?.personaName ?? summaryB?.personaname ?? 'Player B';
+  const steamIdA = (matchResult as { steamIdA?: string })?.steamIdA ?? summaryA?.steamId ?? summaryA?.steamid ?? '';
+  const steamIdB = (matchResult as { steamIdB?: string })?.steamIdB ?? summaryB?.steamId ?? summaryB?.steamid ?? '';
+  const avatarA = summaryA?.avatarUrl ?? summaryA?.avatarfull ?? null;
+  const avatarB = summaryB?.avatarUrl ?? summaryB?.avatarfull ?? null;
 
   const startIdx = (currentPage - 1) * PAGE_SIZE;
   const pageGames = games.slice(startIdx, startIdx + PAGE_SIZE);
@@ -1583,7 +1733,7 @@ export function buildGameMatchEmbedPayload(matchResult, summaryA, summaryB, page
   const filterLabel = filterMode === 'all' ? 'All Shared Games' : 'Co-op & Multiplayer Only';
 
   const descriptionLines = [
-    `Shared Titles: **${matchResult.totalCommon ?? 0}** Games • Matched: **${matchResult.matchedCount ?? totalGames}** Titles`,
+    `Shared Titles: **${(matchResult as MatchLibraryResult).totalCommon ?? 0}** Games \u2022 Matched: **${(matchResult as MatchLibraryResult).matchedCount ?? totalGames}** Titles`,
     `Filter Mode: **${filterLabel}**`,
   ];
 
@@ -1598,17 +1748,17 @@ export function buildGameMatchEmbedPayload(matchResult, summaryA, summaryB, page
         const badgeStr = g.badges.map((b) => `\`[${b}]\``).join(' ');
         const storeLink = `https://store.steampowered.com/app/${g.appid}`;
         return [
-          `❖ **${g.name}** ${badgeStr}`,
-          `  └─ Combined Playtime: \`${g.totalHours} hrs\` (${personaA}: ${g.hoursA}h • ${personaB}: ${g.hoursB}h) • [Steam Store](${storeLink})`,
+          `\u2756 **${g.name}** ${badgeStr}`,
+          `  \u2514\u2500 Combined Playtime: \`${g.totalHours} hrs\` (${personaA}: ${g.hoursA}h \u2022 ${personaB}: ${g.hoursB}h) \u2022 [Steam Store](${storeLink})`,
         ].join('\n');
       })
       .join('\n\n');
   }
 
-  const embed1 = {
+  const embed1: DiscordEmbed = {
     author: {
-      name: `${personaA} ✖ ${personaB} • Game Match`,
-      icon_url: avatarA || undefined,
+      name: `${personaA} \u2716 ${personaB} \u2022 Game Match`,
+      icon_url: avatarA ?? undefined,
     },
     title: 'Steam Library Match Overview',
     description: descriptionLines.join('\n'),
@@ -1616,32 +1766,32 @@ export function buildGameMatchEmbedPayload(matchResult, summaryA, summaryB, page
     thumbnail: avatarA ? { url: avatarA } : undefined,
   };
 
-  const embed2 = {
+  const embed2: DiscordEmbed = {
     title: `Matched Titles [Page ${currentPage}/${totalPages}]`,
     description: gameCardsText,
     color: 0x5865f2,
     thumbnail: avatarB ? { url: avatarB } : undefined,
     footer: {
-      text: `Page ${currentPage} of ${totalPages} • Filter: ${filterMode} • zT Radar Co-op Discovery`,
+      text: `Page ${currentPage} of ${totalPages} \u2022 Filter: ${filterMode} \u2022 zT Radar Co-op Discovery`,
     },
     timestamp: new Date().toISOString(),
   };
 
   const components = totalPages > 1 ? [
     {
-      type: 1, // Action Row
+      type: 1 as const,
       components: [
         {
-          type: 2, // Button
-          style: 2, // Secondary
-          label: '◀ Prev',
+          type: 2 as const,
+          style: 2,
+          label: '\u25c4 Prev',
           custom_id: `match_p:${currentPage - 1}:${filterMode}:${steamIdA}:${steamIdB}`,
           disabled: currentPage <= 1,
         },
         {
-          type: 2, // Button
-          style: 1, // Primary
-          label: 'Next ▶',
+          type: 2 as const,
+          style: 1,
+          label: 'Next \u25ba',
           custom_id: `match_p:${currentPage + 1}:${filterMode}:${steamIdA}:${steamIdB}`,
           disabled: currentPage >= totalPages,
         },
