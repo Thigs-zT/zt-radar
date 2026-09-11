@@ -13,6 +13,7 @@
 
 import { randomBytes } from 'node:crypto';
 import { PutCommand, GetCommand, DeleteCommand } from '@aws-sdk/lib-dynamodb';
+import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 
 // Steam OpenID 2.0 provider endpoint
 const STEAM_OPENID_ENDPOINT = 'https://steamcommunity.com/openid/login';
@@ -24,17 +25,20 @@ const STEAM_CLAIMED_ID_PATTERN = /^https:\/\/steamcommunity\.com\/openid\/id\/(\
 const STATE_TOKEN_TTL_SECONDS = 600;
 
 const PALETTE_STEAM_ACCENT = 0x66c0f4;
-const PALETTE_DANGER = 0xed4245;
 
 /**
  * Generates a cryptographically secure 64-char hex state token and persists it to DynamoDB.
  *
- * @param {string} userId - The Discord user ID initiating the OAuth flow.
- * @param {import('@aws-sdk/lib-dynamodb').DynamoDBDocumentClient} docClient - DynamoDB document client.
- * @param {string} tableName - DynamoDB table name.
- * @returns {Promise<string>} The generated state token hex string.
+ * @param userId - The Discord user ID initiating the OAuth flow.
+ * @param docClient - DynamoDB document client.
+ * @param tableName - DynamoDB table name.
+ * @returns The generated state token hex string.
  */
-export async function generateStateToken(userId, docClient, tableName) {
+export async function generateStateToken(
+  userId: string,
+  docClient: DynamoDBDocumentClient,
+  tableName: string,
+): Promise<string> {
   const token = randomBytes(32).toString('hex');
   const expiresAt = Math.floor(Date.now() / 1000) + STATE_TOKEN_TTL_SECONDS;
 
@@ -57,16 +61,21 @@ export async function generateStateToken(userId, docClient, tableName) {
 /**
  * Validates a state token against DynamoDB and cleans it up after validation.
  *
- * @param {string} userId - The Discord user ID.
- * @param {string} token - The state token to validate.
- * @param {import('@aws-sdk/lib-dynamodb').DynamoDBDocumentClient} docClient
- * @param {string} tableName
- * @returns {Promise<boolean>} True if the token is valid and not expired.
+ * @param userId - The Discord user ID.
+ * @param token - The state token to validate.
+ * @param docClient - DynamoDB document client.
+ * @param tableName - DynamoDB table name.
+ * @returns True if the token is valid and not expired.
  */
-export async function validateAndConsumeStateToken(userId, token, docClient, tableName) {
-  let result;
+export async function validateAndConsumeStateToken(
+  userId: string,
+  token: string,
+  docClient: DynamoDBDocumentClient,
+  tableName: string,
+): Promise<boolean> {
+  let item: { state_token?: string; expires_at?: number } | undefined;
   try {
-    result = await docClient.send(
+    const result = await docClient.send(
       new GetCommand({
         TableName: tableName,
         Key: {
@@ -75,16 +84,15 @@ export async function validateAndConsumeStateToken(userId, token, docClient, tab
         },
       })
     );
+    item = result?.Item as { state_token?: string; expires_at?: number } | undefined;
   } catch (err) {
     console.error('Error retrieving state token from DynamoDB:', err);
     return false;
   }
-
-  const item = result?.Item;
   if (!item) return false;
 
   const now = Math.floor(Date.now() / 1000);
-  const isValid = item.state_token === token && item.expires_at > now;
+  const isValid = item.state_token === token && (item.expires_at ?? 0) > now;
 
   // Always delete the token after inspection to enforce single-use semantics
   try {
@@ -107,13 +115,16 @@ export async function validateAndConsumeStateToken(userId, token, docClient, tab
 /**
  * Constructs the full Steam OpenID 2.0 login redirect URL.
  *
- * @param {string} stateToken - The CSRF state token.
- * @param {string} baseCallbackUrl - The public HTTPS URL of the auth callback route
- *   (e.g. "https://<api-id>.execute-api.<region>.amazonaws.com/prod/auth/steam/callback").
- * @param {string} userId - The Discord user ID to embed in the return_to URL for callback lookup.
- * @returns {string} The fully encoded Steam OpenID redirect URL.
+ * @param stateToken - The CSRF state token.
+ * @param baseCallbackUrl - The public HTTPS URL of the auth callback route.
+ * @param userId - The Discord user ID to embed in the return_to URL for callback lookup.
+ * @returns The fully encoded Steam OpenID redirect URL.
  */
-export function buildSteamLoginUrl(stateToken, baseCallbackUrl, userId) {
+export function buildSteamLoginUrl(
+  stateToken: string,
+  baseCallbackUrl: string,
+  userId: string,
+): string {
   // Embed both user_id and state into return_to so the callback handler can resolve the user
   const returnTo = `${baseCallbackUrl}?user_id=${encodeURIComponent(userId)}&state=${encodeURIComponent(stateToken)}`;
 
@@ -136,10 +147,10 @@ export function buildSteamLoginUrl(stateToken, baseCallbackUrl, userId) {
 /**
  * Parses the SteamID64 from an OpenID claimed_id URL.
  *
- * @param {string} claimedId - The `openid.claimed_id` value from Steam's callback.
- * @returns {string|null} The 17-digit SteamID64 string, or null if invalid.
+ * @param claimedId - The `openid.claimed_id` value from Steam's callback.
+ * @returns The 17-digit SteamID64 string, or null if invalid.
  */
-export function parseSteamIdFromClaimedId(claimedId) {
+export function parseSteamIdFromClaimedId(claimedId: string): string | null {
   if (!claimedId || typeof claimedId !== 'string') return null;
   const match = claimedId.match(STEAM_CLAIMED_ID_PATTERN);
   return match ? match[1] : null;
@@ -148,14 +159,12 @@ export function parseSteamIdFromClaimedId(claimedId) {
 /**
  * Verifies a Steam OpenID 2.0 callback assertion using the check_authentication handshake.
  *
- * This performs a server-side POST to Steam's OpenID endpoint with all received
- * parameters, with `openid.mode` set to `check_authentication`. Steam responds
- * with `is_valid:true` if the signature is genuine.
- *
- * @param {Record<string, string>} params - Query parameters from Steam's callback URL.
- * @returns {Promise<string|null>} Validated SteamID64 string, or null on failure.
+ * @param params - Query parameters from Steam's callback URL.
+ * @returns Validated SteamID64 string, or null on failure.
  */
-export async function verifyOpenIdAssertion(params) {
+export async function verifyOpenIdAssertion(
+  params: Record<string, string>,
+): Promise<string | null> {
   // Step 1: Must be a positive assertion
   if (params['openid.mode'] !== 'id_res') {
     console.warn('OpenID assertion rejected: mode is not id_res, got:', params['openid.mode']);
@@ -203,7 +212,7 @@ export async function verifyOpenIdAssertion(params) {
 
     return steamId64;
   } catch (err) {
-    if (err.name === 'AbortError') {
+    if (err instanceof Error && err.name === 'AbortError') {
       console.error('Steam check_authentication request timed out');
     } else {
       console.error('Error during Steam OpenID check_authentication:', err);
@@ -218,11 +227,11 @@ export async function verifyOpenIdAssertion(params) {
  * Builds a Discord interaction response payload prompting the user to link their Steam account.
  * Includes a Discord Link Button (Type 2, Style 5) pointing to the lightweight login URL.
  *
- * @param {string} userId - The Discord user ID requesting the link.
- * @param {string} loginUrl - The lightweight login initiation URL (must be <= 512 characters).
- * @returns {Object} A complete Discord interaction response body ready to be JSON.stringify'd.
+ * @param userId - The Discord user ID requesting the link.
+ * @param loginUrl - The lightweight login initiation URL (must be <= 512 characters).
+ * @returns A complete Discord interaction response body ready to be JSON.stringify'd.
  */
-export function buildUnlinkedAccountEmbed(userId, loginUrl) {
+export function buildUnlinkedAccountEmbed(userId: string, loginUrl: string): object {
   if (!loginUrl || typeof loginUrl !== 'string' || loginUrl.length > 512) {
     throw new Error(
       `Login URL exceeds Discord 512-char limit for Link Buttons: ${loginUrl ? loginUrl.length : 'invalid'} chars`

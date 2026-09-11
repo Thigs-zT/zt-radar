@@ -1,7 +1,21 @@
+/**
+ * Platform Status Utility
+ *
+ * Probes connectivity across Steam, Epic Games, PSN, and Xbox.
+ * Fetches Top 10 Most Played and Trending game charts from Steam.
+ */
+
+import type {
+  PlatformStatusValue,
+  PlatformStatusResult,
+  SteamMostPlayedEntry,
+  SteamTrendingEntry,
+} from '../types/index.js';
+
 const USER_AGENT = 'zT-Radar-Bot/1.0 (https://github.com/zt-radar)';
 
 // Verified Steam AppID to Name registry for top institutional titles
-const APP_DIRECTORY = {
+const APP_DIRECTORY: Record<number, string> = {
   730: 'Counter-Strike 2',
   570: 'Dota 2',
   578080: 'PUBG: BATTLEGROUNDS',
@@ -25,15 +39,20 @@ const APP_DIRECTORY = {
 /**
  * Probes connectivity across Steam, Epic Games, PSN, and Xbox.
  */
-export async function checkPlatformStatuses() {
-  const results = {
+export async function checkPlatformStatuses(): Promise<PlatformStatusResult> {
+  const results: PlatformStatusResult = {
     steam: { name: 'Steam Network & Store', status: 'UNKNOWN', latencyMs: 0 },
     epic: { name: 'Epic Games Store', status: 'UNKNOWN', latencyMs: 0 },
     psn: { name: 'PlayStation Network', status: 'UNKNOWN', latencyMs: 0 },
     xbox: { name: 'Xbox Network (Live)', status: 'UNKNOWN', latencyMs: 0 },
   };
 
-  const probe = async (key, url, evalFn, method = 'GET') => {
+  const probe = async (
+    key: keyof PlatformStatusResult,
+    url: string,
+    evalFn: (res: Response) => Promise<PlatformStatusValue>,
+    method: string = 'GET',
+  ): Promise<void> => {
     const start = Date.now();
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 2000);
@@ -62,7 +81,7 @@ export async function checkPlatformStatuses() {
 
     probe('epic', 'https://status.epicgames.com/api/v2/status.json', async (res) => {
       if (!res.ok) return 'DEGRADED';
-      const data = await res.json();
+      const data = await res.json() as { status?: { indicator?: string } };
       const ind = data?.status?.indicator;
       if (ind === 'none') return 'ONLINE';
       if (ind === 'minor') return 'DEGRADED';
@@ -84,7 +103,7 @@ export async function checkPlatformStatuses() {
 /**
  * Resolves a game title from Steam Web API or internal fallback dictionary.
  */
-async function resolveGameTitle(appId, signal) {
+async function resolveGameTitle(appId: number, signal: AbortSignal): Promise<string> {
   if (APP_DIRECTORY[appId]) return APP_DIRECTORY[appId];
 
   try {
@@ -94,7 +113,7 @@ async function resolveGameTitle(appId, signal) {
       signal,
     });
     if (res.ok) {
-      const data = await res.json();
+      const data = await res.json() as Record<number, { data?: { name?: string } }>;
       const title = data?.[appId]?.data?.name;
       if (title) return title;
     }
@@ -108,7 +127,7 @@ async function resolveGameTitle(appId, signal) {
 /**
  * Fetches Top 10 Most Played Games on Steam ranked by live concurrent players (Official Valve API).
  */
-export async function getSteamMostPlayedGames() {
+export async function getSteamMostPlayedGames(): Promise<SteamMostPlayedEntry[]> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 4000);
 
@@ -124,19 +143,19 @@ export async function getSteamMostPlayedGames() {
       return [];
     }
 
-    const data = await res.json();
-    const rawRanks = data?.response?.ranks || [];
+    const data = await res.json() as { response?: { ranks?: Array<{ appid: number; concurrent_in_game?: number; peak_in_game?: number }> } };
+    const rawRanks = data?.response?.ranks ?? [];
     const topTen = rawRanks.slice(0, 10);
 
     const results = await Promise.all(
-      topTen.map(async (item, idx) => {
+      topTen.map(async (item, idx): Promise<SteamMostPlayedEntry> => {
         const title = await resolveGameTitle(item.appid, controller.signal);
         return {
           rank: idx + 1,
           appId: item.appid,
           name: title,
-          currentPlayers: item.concurrent_in_game || 0,
-          peakToday: item.peak_in_game || null,
+          currentPlayers: item.concurrent_in_game ?? 0,
+          peakToday: item.peak_in_game ?? null,
         };
       })
     );
@@ -145,7 +164,7 @@ export async function getSteamMostPlayedGames() {
     return results;
   } catch (err) {
     clearTimeout(timeoutId);
-    console.error('Error fetching Steam Most Played charts:', err.message || err);
+    console.error('Error fetching Steam Most Played charts:', err instanceof Error ? err.message : err);
     return [];
   }
 }
@@ -153,9 +172,18 @@ export async function getSteamMostPlayedGames() {
 /**
  * Fetches Top 10 Trending titles on Steam (Top sellers surging in activity).
  */
-export async function getSteamTrendingGames() {
+export async function getSteamTrendingGames(): Promise<SteamTrendingEntry[]> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 4000);
+
+  type TopSellerItem = {
+    id?: number;
+    name?: string;
+    final_price?: number;
+    discounted?: boolean;
+    discount_percent?: number;
+    header_image?: string;
+  };
 
   try {
     const featuredUrl = 'https://store.steampowered.com/api/featuredcategories/';
@@ -169,13 +197,13 @@ export async function getSteamTrendingGames() {
       return [];
     }
 
-    const data = await res.json();
-    const topSellers = data?.top_sellers?.items || [];
+    const data = await res.json() as { top_sellers?: { items?: TopSellerItem[] } };
+    const topSellers = data?.top_sellers?.items ?? [];
     const validItems = topSellers.filter((i) => i.id && i.name).slice(0, 10);
 
     const enriched = await Promise.all(
-      validItems.map(async (item, idx) => {
-        let players = null;
+      validItems.map(async (item, idx): Promise<SteamTrendingEntry> => {
+        let players: number | null = null;
         try {
           const playersUrl = `https://api.steampowered.com/ISteamUserStats/GetNumberOfCurrentPlayers/v1/?appid=${item.id}`;
           const playersRes = await fetch(playersUrl, {
@@ -183,25 +211,26 @@ export async function getSteamTrendingGames() {
             signal: controller.signal,
           });
           if (playersRes.ok) {
-            const pData = await playersRes.json();
+            const pData = await playersRes.json() as { response?: { player_count?: number } };
             players = pData?.response?.player_count ?? null;
           }
         } catch {
           // Ignored if single query fails
         }
 
+        const finalPrice = item.final_price ?? 0;
         const priceStr =
-          item.final_price === 0 || !item.final_price
+          finalPrice === 0
             ? 'Free to Play'
-            : `$ ${(item.final_price / 100).toFixed(2)}${item.discounted ? ` (-${item.discount_percent}%)` : ''}`;
+            : `$ ${(finalPrice / 100).toFixed(2)}${item.discounted ? ` (-${item.discount_percent}%)` : ''}`;
 
         return {
           rank: idx + 1,
-          appId: item.id,
-          name: item.name,
+          appId: item.id as number,
+          name: item.name as string,
           currentPlayers: players,
           priceText: priceStr,
-          headerImage: item.header_image || null,
+          headerImage: item.header_image ?? null,
         };
       })
     );
@@ -210,7 +239,7 @@ export async function getSteamTrendingGames() {
     return enriched;
   } catch (err) {
     clearTimeout(timeoutId);
-    console.error('Error fetching Steam trending games:', err.message || err);
+    console.error('Error fetching Steam trending games:', err instanceof Error ? err.message : err);
     return [];
   }
 }
