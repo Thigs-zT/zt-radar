@@ -1,3 +1,10 @@
+/**
+ * Scheduled Market Deal Scanner Handler
+ *
+ * Runs hourly via Amazon EventBridge schedule to scan wishlists and market deals,
+ * dispatching Direct Messages and Server Channel broadcasts for active promotions.
+ */
+
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, ScanCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import {
@@ -6,6 +13,14 @@ import {
   formatExpiryAvailability,
   formatPriceComparisonDiff,
 } from '../utils/itadApi.js';
+import type {
+  DynamoDbWishlistItem,
+  GameDealInfo,
+  DiscordEmbed,
+  DiscordActionRow,
+  DiscordButton,
+  DiscordEmbedField,
+} from '../types/index.js';
 
 const ddbClient = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(ddbClient);
@@ -18,10 +33,33 @@ const ALERT_PALETTE = {
   FREE_PLAY_DAYS: 0x9B59B6,  // Amethyst Purple
   CURATED_DEAL: 0x5865F2,    // Blurple
   ALL_TIME_LOW: 0xFEE75C,    // Gold Amber
-};
+} as const;
 
-function createStoreButtons(deal) {
-  const buttons = [];
+interface UserConfigRecord {
+  PK: string;
+  SK: string;
+  user_id?: string;
+  preferred_currency?: string;
+  alert_global_free?: boolean;
+  last_broadcasted_free_deals?: string[];
+  last_free_alert_at?: string;
+}
+
+interface GuildConfigRecord {
+  PK: string;
+  SK: string;
+  guild_id?: string;
+  alert_channel_id?: string;
+  currency?: string;
+  min_discount?: number;
+  free_only?: boolean;
+  min_rating?: number;
+  include_third_party?: boolean;
+  last_broadcasted_deals?: string[];
+}
+
+function createStoreButtons(deal: GameDealInfo): DiscordActionRow[] {
+  const buttons: DiscordButton[] = [];
 
   if (deal.primaryDeal?.url) {
     buttons.push({
@@ -67,7 +105,11 @@ function createStoreButtons(deal) {
   ];
 }
 
-async function sendDiscordDm(userId, embed, components = []) {
+async function sendDiscordDm(
+  userId: string,
+  embed: DiscordEmbed,
+  components: DiscordActionRow[] = [],
+): Promise<boolean> {
   try {
     const dmChannelRes = await fetch('https://discord.com/api/v10/users/@me/channels', {
       method: 'POST',
@@ -84,9 +126,9 @@ async function sendDiscordDm(userId, embed, components = []) {
       return false;
     }
 
-    const dmChannel = await dmChannelRes.json();
+    const dmChannel = (await dmChannelRes.json()) as { id: string };
 
-    const messagePayload = { embeds: [embed] };
+    const messagePayload: { embeds: DiscordEmbed[]; components?: DiscordActionRow[] } = { embeds: [embed] };
     if (components.length > 0) {
       messagePayload.components = components;
     }
@@ -108,15 +150,20 @@ async function sendDiscordDm(userId, embed, components = []) {
 
     console.log(`DM successfully sent to user ${userId}`);
     return true;
-  } catch (error) {
-    console.error(`Error sending DM to user ${userId}:`, error.message || error);
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : String(error);
+    console.error(`Error sending DM to user ${userId}:`, msg);
     return false;
   }
 }
 
-async function sendGuildChannelAlert(channelId, embed, components = []) {
+async function sendGuildChannelAlert(
+  channelId: string,
+  embed: DiscordEmbed,
+  components: DiscordActionRow[] = [],
+): Promise<boolean> {
   try {
-    const messagePayload = { embeds: [embed] };
+    const messagePayload: { embeds: DiscordEmbed[]; components?: DiscordActionRow[] } = { embeds: [embed] };
     if (components.length > 0) {
       messagePayload.components = components;
     }
@@ -138,13 +185,14 @@ async function sendGuildChannelAlert(channelId, embed, components = []) {
 
     console.log(`Guild alert successfully sent to channel ${channelId}`);
     return true;
-  } catch (error) {
-    console.error(`Error sending alert to channel ${channelId}:`, error.message || error);
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : String(error);
+    console.error(`Error sending alert to channel ${channelId}:`, msg);
     return false;
   }
 }
 
-export const handler = async () => {
+export const handler = async (): Promise<{ statusCode: number; body: string }> => {
   console.log('Starting zT Radar scheduled deal scanner...');
 
   try {
@@ -154,12 +202,20 @@ export const handler = async () => {
       })
     );
 
-    const allItems = scanResult.Items || [];
-    const wishlistItems = allItems.filter((item) => item.SK?.startsWith('GAME#'));
-    const guildConfigs = allItems.filter((item) => item.PK?.startsWith('GUILD#') && item.SK === 'CONFIG');
-    const userConfigs = allItems.filter((item) => item.PK?.startsWith('USER#') && item.SK === 'CONFIG');
+    const allItems = (scanResult.Items || []) as Array<Record<string, unknown>>;
+    const wishlistItems = allItems.filter(
+      (item) => typeof item.SK === 'string' && item.SK.startsWith('GAME#')
+    ) as unknown as DynamoDbWishlistItem[];
 
-    const userCurrencyMap = new Map();
+    const guildConfigs = allItems.filter(
+      (item) => typeof item.PK === 'string' && item.PK.startsWith('GUILD#') && item.SK === 'CONFIG'
+    ) as unknown as GuildConfigRecord[];
+
+    const userConfigs = allItems.filter(
+      (item) => typeof item.PK === 'string' && item.PK.startsWith('USER#') && item.SK === 'CONFIG'
+    ) as unknown as UserConfigRecord[];
+
+    const userCurrencyMap = new Map<string, string>();
     userConfigs.forEach((cfg) => {
       const uid = cfg.PK.replace('USER#', '');
       userCurrencyMap.set(uid, cfg.preferred_currency || 'USD');
@@ -167,12 +223,11 @@ export const handler = async () => {
 
     console.log(`Retrieved ${wishlistItems.length} wishlist items and ${guildConfigs.length} guild configs.`);
 
-    const userDmCountMap = new Map();
+    const userDmCountMap = new Map<string, number>();
     const MAX_DM_PER_USER = 3;
 
     // 1. Process Individual Wishlists (DMs)
     if (wishlistItems.length > 0) {
-
       for (const item of wishlistItems) {
         const userId = item.user_id || item.PK?.replace('USER#', '');
         const currentDmCount = userDmCountMap.get(userId) || 0;
@@ -185,7 +240,7 @@ export const handler = async () => {
         if (!deal) continue;
 
         // Auto-heal & clean resolved display title
-        const resolvedTitle = (deal.title && !deal.title.startsWith('Steam App #')) ? deal.title : item.game_title;
+        const resolvedTitle = deal.title && !deal.title.startsWith('Steam App #') ? deal.title : item.game_title;
 
         if (item.game_title?.startsWith('Steam App #') && deal.title && !deal.title.startsWith('Steam App #')) {
           try {
@@ -202,8 +257,9 @@ export const handler = async () => {
             );
             item.game_title = deal.title;
             console.log(`Auto-healed generic title for ${item.SK} -> "${deal.title}"`);
-          } catch (autoHealErr) {
-            console.error(`Failed to auto-heal generic title for ${item.SK}:`, autoHealErr.message || autoHealErr);
+          } catch (autoHealErr: unknown) {
+            const msg = autoHealErr instanceof Error ? autoHealErr.message : String(autoHealErr);
+            console.error(`Failed to auto-heal generic title for ${item.SK}:`, msg);
           }
         }
 
@@ -225,7 +281,7 @@ export const handler = async () => {
 
         let shouldAlert = false;
         let alertReason = '';
-        let embedColor = ALERT_PALETTE.CURATED_DEAL;
+        let embedColor: number = ALERT_PALETTE.CURATED_DEAL;
 
         if (deal.dealType === 'FREE_TO_KEEP' || (item.alert_free && effectivePrice === 0 && (effectiveCut > 0 || regularPrice > 0))) {
           shouldAlert = true;
@@ -258,7 +314,7 @@ export const handler = async () => {
         const isNewAlert =
           lastNotifiedPrice === null ||
           effectivePrice < lastNotifiedPrice ||
-          ((Date.now() - lastNotifiedAt) >= ONE_DAY_MS && effectivePrice <= lastNotifiedPrice);
+          (Date.now() - lastNotifiedAt >= ONE_DAY_MS && effectivePrice <= lastNotifiedPrice);
 
         if (shouldAlert && isNewAlert) {
           console.log(`DM Alert triggered for user ${userId} on ${resolvedTitle}: ${alertReason}`);
@@ -269,7 +325,7 @@ export const handler = async () => {
             ? `Storefront Comparison ❖ ${deal.primaryDeal.shopName} vs ${deal.cheaperAlternative.shopName}`
             : `Storefront Offer ❖ ${deal.primaryDeal.shopName}`;
 
-          const fields = [
+          const fields: DiscordEmbedField[] = [
             {
               name: fieldName,
               value: diffPricing,
@@ -278,9 +334,10 @@ export const handler = async () => {
           ];
 
           if (deal.allTimeLowPrice !== null && deal.allTimeLowPrice !== undefined) {
-            const atlText = (deal.isAllTimeLow && hasActiveDiscount)
-              ? `**${primarySym} ${deal.allTimeLowPrice.toFixed(2)}** (★ Matches ATL)`
-              : `**${primarySym} ${deal.allTimeLowPrice.toFixed(2)}**`;
+            const atlText =
+              deal.isAllTimeLow && hasActiveDiscount
+                ? `**${primarySym} ${deal.allTimeLowPrice.toFixed(2)}** (★ Matches ATL)`
+                : `**${primarySym} ${deal.allTimeLowPrice.toFixed(2)}**`;
             fields.push({
               name: 'Historical Low',
               value: atlText,
@@ -296,7 +353,7 @@ export const handler = async () => {
             });
           }
 
-          const embed = {
+          const embed: DiscordEmbed = {
             title: `zT Radar ❖ Wishlist Alert: ${resolvedTitle}`,
             description: `**${alertReason}**`,
             color: embedColor,
@@ -342,7 +399,7 @@ export const handler = async () => {
     if (freeAlertUsers.length > 0) {
       console.log(`Processing global free game alerts for ${freeAlertUsers.length} opted-in users.`);
 
-      const freeDealsByCurrency = new Map();
+      const freeDealsByCurrency = new Map<string, GameDealInfo[]>();
       const neededCurrencies = new Set(freeAlertUsers.map((u) => u.preferred_currency || 'USD'));
 
       for (const cur of neededCurrencies) {
@@ -352,8 +409,9 @@ export const handler = async () => {
             (d) => d.dealType === 'FREE_TO_KEEP' || d.dealType === 'FREE_PLAY_DAYS'
           );
           freeDealsByCurrency.set(cur, activeFree);
-        } catch (err) {
-          console.error(`Failed to fetch overview free deals for currency ${cur}:`, err.message || err);
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error(`Failed to fetch overview free deals for currency ${cur}:`, msg);
           freeDealsByCurrency.set(cur, []);
         }
       }
@@ -373,7 +431,7 @@ export const handler = async () => {
           ? userConfig.last_broadcasted_free_deals
           : [];
 
-        const newlySentDeals = [];
+        const newlySentDeals: string[] = [];
 
         for (const deal of deals) {
           if ((userDmCountMap.get(userId) || 0) >= MAX_DM_PER_USER) break;
@@ -387,7 +445,7 @@ export const handler = async () => {
           const alertReason = isFreeToKeep
             ? '100% FREE TO KEEP (Permanent Ownership)'
             : 'FREE PLAY EVENT (Play For Free This Weekend)';
-          const embedColor = isFreeToKeep ? ALERT_PALETTE.FREE_TO_KEEP : ALERT_PALETTE.FREE_PLAY_DAYS;
+          const embedColor: number = isFreeToKeep ? ALERT_PALETTE.FREE_TO_KEEP : ALERT_PALETTE.FREE_PLAY_DAYS;
           const sym = deal.primaryDeal?.currencySymbol || (userCurrency === 'BRL' ? 'R$' : '$');
 
           const diffPricing = [
@@ -397,7 +455,7 @@ export const handler = async () => {
             '```',
           ].join('\n');
 
-          const fields = [
+          const fields: DiscordEmbedField[] = [
             {
               name: `Storefront Offer ❖ ${deal.primaryDeal.shopName}`,
               value: diffPricing,
@@ -414,7 +472,7 @@ export const handler = async () => {
           }
 
           const expiryText = formatExpiryAvailability(deal.expiry || deal.primaryDeal?.expiry);
-          const embed = {
+          const embed: DiscordEmbed = {
             title: `zT Radar ❖ Free Game Alert: ${deal.title}`,
             description: `**${alertReason}**\nThis promotion was detected live on ${deal.primaryDeal.shopName}.\n${expiryText}`,
             color: embedColor,
@@ -475,7 +533,7 @@ export const handler = async () => {
         const marketDeals = await getMarketOverviewDeals(includeThirdParty, targetCurrency);
 
         let sentThisRun = 0;
-        const newlyBroadcastedKeys = [];
+        const newlyBroadcastedKeys: string[] = [];
 
         for (const deal of marketDeals) {
           if (sentThisRun >= 3) break;
@@ -499,7 +557,7 @@ export const handler = async () => {
 
           const sym = deal.primaryDeal.currencySymbol || (targetCurrency === 'BRL' ? 'R$' : '$');
 
-          let embedColor = ALERT_PALETTE.CURATED_DEAL;
+          let embedColor: number = ALERT_PALETTE.CURATED_DEAL;
           let bannerHeadline = `High-value promotion detected (**-${cut}%**)!`;
 
           let expiryNotice = '';
@@ -507,7 +565,7 @@ export const handler = async () => {
             expiryNotice = `\n${formatExpiryAvailability(deal.expiry || deal.primaryDeal?.expiry)}`;
           }
 
-          let diffPricing;
+          let diffPricing: string;
           if (isFreeToKeep) {
             embedColor = ALERT_PALETTE.FREE_TO_KEEP;
             bannerHeadline = 'Claim this game for **FREE** to keep permanently in your library!';
@@ -537,11 +595,11 @@ export const handler = async () => {
             ].join('\n');
           }
 
-          const fieldName = (!isFree && deal.cheaperAlternative)
+          const fieldName = !isFree && deal.cheaperAlternative
             ? `Storefront Comparison ❖ ${deal.primaryDeal.shopName} vs ${deal.cheaperAlternative.shopName}`
             : `Store Offer ❖ ${deal.primaryDeal.shopName}`;
 
-          const fields = [
+          const fields: DiscordEmbedField[] = [
             {
               name: fieldName,
               value: diffPricing,
@@ -557,7 +615,7 @@ export const handler = async () => {
             });
           }
 
-          const embed = {
+          const embed: DiscordEmbed = {
             title: `zT Radar ❖ ${deal.title}`,
             description: `${bannerHeadline}${expiryNotice}`,
             color: embedColor,

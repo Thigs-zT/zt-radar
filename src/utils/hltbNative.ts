@@ -5,19 +5,25 @@
  * Uses zero external npm dependencies, desktop browser headers, and defensive timeouts.
  */
 
+import type { HltbStatsResult } from '../types/index.js';
+
 const USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
 
-let authCache = null;
+interface HltbAuthTokens {
+  token: string;
+  hpKey: string;
+  hpVal: string;
+  timestamp: number;
+}
+
+let authCache: HltbAuthTokens | null = null;
 
 /**
  * Retrieves or refreshes security tokens required for HowLongToBeat search.
  * Cached in-memory for up to 10 minutes.
- *
- * @param {AbortSignal} signal
- * @returns {Promise<{ token: string, hpKey: string, hpVal: string, timestamp: number } | null>}
  */
-async function getAuthTokens(signal) {
+async function getAuthTokens(signal: AbortSignal): Promise<HltbAuthTokens | null> {
   if (authCache && Date.now() - authCache.timestamp < 10 * 60 * 1000) {
     return authCache;
   }
@@ -37,32 +43,42 @@ async function getAuthTokens(signal) {
       return null;
     }
 
-    const { token, hpKey, hpVal } = await initRes.json();
-    authCache = { token, hpKey, hpVal, timestamp: Date.now() };
+    const json = (await initRes.json()) as { token?: string; hpKey?: string; hpVal?: string };
+    if (!json.token) return null;
+
+    authCache = {
+      token: json.token,
+      hpKey: json.hpKey || '',
+      hpVal: json.hpVal || '',
+      timestamp: Date.now(),
+    };
     return authCache;
   } catch {
     return null;
   }
 }
 
+interface RawHltbGameItem {
+  game_id?: number;
+  game_name?: string;
+  game_image?: string;
+  comp_main?: number;
+  comp_plus?: number;
+  comp_100?: number;
+  comp_all?: number;
+}
+
+interface RawHltbSearchResponse {
+  data?: RawHltbGameItem[];
+}
+
 /**
  * Queries HowLongToBeat for average completion times of a video game title.
- *
- * @param {string} gameName - Video game title to search
- * @param {number} [timeoutMs=2500] - Defensive timeout in milliseconds (capped at 2500ms)
- * @returns {Promise<{
- *   success: boolean,
- *   error?: string,
- *   gameId?: number,
- *   gameTitle?: string,
- *   mainStoryHours?: number,
- *   mainExtraHours?: number,
- *   completionistHours?: number,
- *   allPlayStylesHours?: number,
- *   imageUrl?: string | null
- * }>}
  */
-export async function getHowLongToBeatStats(gameName, timeoutMs = 2500) {
+export async function getHowLongToBeatStats(
+  gameName: string,
+  timeoutMs: number = 2500,
+): Promise<HltbStatsResult> {
   if (!gameName || typeof gameName !== 'string' || gameName.trim().length === 0) {
     return { success: false, error: 'DATA_UNAVAILABLE' };
   }
@@ -81,8 +97,8 @@ export async function getHowLongToBeatStats(gameName, timeoutMs = 2500) {
       return { success: false, error: 'DATA_UNAVAILABLE' };
     }
 
-    const buildPayload = (tokens) => {
-      const payload = {
+    const buildPayload = (tokens: HltbAuthTokens): Record<string, unknown> => {
+      const payload: Record<string, unknown> = {
         searchType: 'games',
         searchTerms: cleanedQuery.split(/\s+/).filter(Boolean),
         searchPage: 1,
@@ -157,7 +173,7 @@ export async function getHowLongToBeatStats(gameName, timeoutMs = 2500) {
       return { success: false, error: 'DATA_UNAVAILABLE' };
     }
 
-    const data = await res.json();
+    const data = (await res.json()) as RawHltbSearchResponse;
     const games = data?.data;
 
     if (!games || !Array.isArray(games) || games.length === 0) {
@@ -172,7 +188,7 @@ export async function getHowLongToBeatStats(gameName, timeoutMs = 2500) {
 
     const match = exactMatch || games[0];
 
-    const toHours = (seconds) => {
+    const toHours = (seconds?: number): number => {
       if (!seconds || seconds <= 0) return 0;
       return Math.round((seconds / 3600) * 10) / 10;
     };

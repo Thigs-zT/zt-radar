@@ -1,9 +1,18 @@
+/**
+ * Steam Intelligence Utility (News & Hardware Specifications)
+ *
+ * Fetches official game news, patch notes, and hardware specs from Steam APIs.
+ * Uses native Node.js fetch with defensive AbortController timeouts.
+ */
+
+import type { SteamNewsItem, SystemRequirementsInfo } from '../types/index.js';
+
 const USER_AGENT = 'zT-Radar-Bot/1.0 (https://github.com/zt-radar)';
 
 /**
  * Strips HTML tags and common BBCode formatting to render clean text for Discord embeds.
  */
-function cleanFormatting(rawText) {
+function cleanFormatting(rawText: string): string {
   if (!rawText) return '';
   return rawText
     .replace(/<br\s*\/?>/gi, '\n')
@@ -20,10 +29,24 @@ function cleanFormatting(rawText) {
     .trim();
 }
 
+interface RawNewsItem {
+  title?: string;
+  url?: string;
+  author?: string;
+  date?: number;
+  contents?: string;
+}
+
+interface SteamNewsApiResponse {
+  appnews?: {
+    newsitems?: RawNewsItem[];
+  };
+}
+
 /**
  * Fetches official game news and patch notes directly from Valve Steam Web API.
  */
-export async function fetchGameNews(appId) {
+export async function fetchGameNews(appId: string | number): Promise<SteamNewsItem[]> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 3500);
 
@@ -39,17 +62,17 @@ export async function fetchGameNews(appId) {
       return [];
     }
 
-    const data = await res.json();
+    const data = (await res.json()) as SteamNewsApiResponse;
     const newsItems = data?.appnews?.newsitems || [];
 
-    const parsedNews = newsItems.map((item) => {
+    const parsedNews: SteamNewsItem[] = newsItems.map((item) => {
       const dateStr = item.date ? new Date(item.date * 1000).toISOString().split('T')[0] : 'Recent';
-      const cleanSnippet = cleanFormatting(item.contents);
+      const cleanSnippet = cleanFormatting(item.contents || '');
       const truncatedSnippet = cleanSnippet.length > 250 ? cleanSnippet.substring(0, 247) + '...' : cleanSnippet;
 
       return {
         title: item.title || 'Official Announcement',
-        url: item.url,
+        url: item.url || `https://store.steampowered.com/news/app/${appId}`,
         author: item.author || 'Developer',
         date: dateStr,
         snippet: truncatedSnippet,
@@ -58,17 +81,32 @@ export async function fetchGameNews(appId) {
 
     clearTimeout(timeoutId);
     return parsedNews;
-  } catch (err) {
+  } catch (err: unknown) {
     clearTimeout(timeoutId);
-    console.error(`Error fetching news for Steam AppID ${appId}:`, err.message || err);
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`Error fetching news for Steam AppID ${appId}:`, msg);
     return [];
   }
+}
+
+interface RawSteamAppDetailsResponse {
+  [appId: string]: {
+    success?: boolean;
+    data?: {
+      name?: string;
+      header_image?: string;
+      pc_requirements?: {
+        minimum?: string;
+        recommended?: string;
+      };
+    };
+  };
 }
 
 /**
  * Fetches official PC system requirements (minimum and recommended) from Steam Storefront API.
  */
-export async function fetchSystemRequirements(appId) {
+export async function fetchSystemRequirements(appId: string | number): Promise<SystemRequirementsInfo | null> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 3500);
 
@@ -84,8 +122,8 @@ export async function fetchSystemRequirements(appId) {
       return null;
     }
 
-    const data = await res.json();
-    const appData = data?.[appId]?.data;
+    const data = (await res.json()) as RawSteamAppDetailsResponse;
+    const appData = data?.[String(appId)]?.data;
 
     if (!appData) {
       clearTimeout(timeoutId);
@@ -109,9 +147,10 @@ export async function fetchSystemRequirements(appId) {
       minimum: minSpecs,
       recommended: recSpecs,
     };
-  } catch (err) {
+  } catch (err: unknown) {
     clearTimeout(timeoutId);
-    console.error(`Error fetching hardware specs for Steam AppID ${appId}:`, err.message || err);
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`Error fetching hardware specs for Steam AppID ${appId}:`, msg);
     return null;
   }
 }

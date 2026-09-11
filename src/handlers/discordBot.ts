@@ -43,14 +43,23 @@ import {
   verifyOpenIdAssertion,
   buildUnlinkedAccountEmbed,
 } from '../utils/steamOpenId.js';
+import type {
+  DiscordInteractionPayload,
+  DiscordInteractionOption,
+  DiscordEmbed,
+  DiscordEmbedField,
+  DiscordActionRow,
+  PlatformStatusEntry,
+  DynamoDbWishlistItem,
+} from '../types/index.js';
 
 const ddbClient = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(ddbClient);
 
-const TABLE_NAME = process.env.TABLE_NAME;
-const PUBLIC_KEY = process.env.DISCORD_PUBLIC_KEY;
-const STEAM_API_KEY = process.env.STEAM_API_KEY;
-const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
+const TABLE_NAME = process.env.TABLE_NAME || '';
+const PUBLIC_KEY = process.env.DISCORD_PUBLIC_KEY || '';
+const STEAM_API_KEY = process.env.STEAM_API_KEY || '';
+const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN || '';
 const AUTH_CALLBACK_URL = process.env.AUTH_CALLBACK_URL || '';
 
 const RESPONSE_TYPES = {
@@ -74,7 +83,12 @@ const PALETTE = {
   STEAM_ACCENT: 0x66C0F4,
 };
 
-function createEphemeralEmbed(title, description, color = PALETTE.BRAND, fields = []) {
+function createEphemeralEmbed(
+  title: string,
+  description: string,
+  color: number = PALETTE.BRAND,
+  fields: DiscordEmbedField[] = [],
+) {
   return {
     type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
     data: {
@@ -98,15 +112,14 @@ function createEphemeralEmbed(title, description, color = PALETTE.BRAND, fields 
 /**
  * Resolves a target parameter to a SteamID64, identifying whether it belongs to the caller
  * or a mentioned user, and whether an account is unlinked.
- *
- * @param {string|null|undefined} targetStr - Raw target input (mention, SteamID64, URL, vanity, or omitted)
- * @param {string} callerUserId - Discord ID of the command invoker
- * @param {object} [ddbDocClient] - DynamoDB document client
- * @param {string} [tableName] - DynamoDB table name
- * @param {string} [steamApiKey] - Valve Steam Web API key
- * @returns {Promise<object>} Resolution result: { success, steamId, isCaller, userId } or { unlinked, isCaller, userId } or { error }
  */
-export async function resolveSteamTarget(targetStr, callerUserId, ddbDocClient, tableName, steamApiKey) {
+export async function resolveSteamTarget(
+  targetStr: string | null | undefined,
+  callerUserId: string,
+  ddbDocClient?: any,
+  tableName?: string,
+  steamApiKey?: string,
+) {
   if (!targetStr) {
     // Target is the caller
     if (!ddbDocClient || !tableName) {
@@ -153,7 +166,7 @@ export async function resolveSteamTarget(targetStr, callerUserId, ddbDocClient, 
     return { success: true, steamId, isCaller, userId: mentionedId };
   }
 
-  const resolved = await resolveSteamId(targetStr, steamApiKey);
+  const resolved = await resolveSteamId(targetStr, steamApiKey || '');
   if (!resolved) {
     return {
       success: false,
@@ -171,7 +184,7 @@ export async function resolveSteamTarget(targetStr, callerUserId, ddbDocClient, 
  * @param {string} authLoginUrl - Base Steam OpenID login initiation URL
  * @returns {object} Discord interaction response payload
  */
-export function buildTargetUnlinkedResponse(targetResult, authLoginUrl) {
+export function buildTargetUnlinkedResponse(targetResult: any, authLoginUrl: string) {
   if (targetResult.isCaller) {
     const loginUrl = authLoginUrl ? `${authLoginUrl}?user_id=${encodeURIComponent(targetResult.userId)}` : '';
     return {
@@ -204,13 +217,12 @@ export function buildTargetUnlinkedResponse(targetResult, authLoginUrl) {
 
 /**
  * Constructs paginated embed and action row components for /wishlist list.
- *
- * @param {Array} items - Monitored game items from DynamoDB
- * @param {Object|null} userConfig - User configuration item from DynamoDB
- * @param {number} requestedPage - Target page number (1-indexed)
- * @returns {{ embeds: Array, components: Array }}
  */
-function buildWishlistPagePayload(items, userConfig, requestedPage = 1) {
+function buildWishlistPagePayload(
+  items: any[],
+  userConfig: any,
+  requestedPage: number = 1,
+): { embeds: DiscordEmbed[]; components: DiscordActionRow[] } {
   const totalItems = items.length;
   const ITEMS_PER_PAGE = 10;
   const totalPages = Math.max(1, Math.ceil(totalItems / ITEMS_PER_PAGE));
@@ -237,7 +249,7 @@ function buildWishlistPagePayload(items, userConfig, requestedPage = 1) {
     })
     .join('\n\n');
 
-  const listEmbed = {
+  const listEmbed: DiscordEmbed = {
     title: `Personal Radar Registry ❖ ${totalItems} Active`,
     description: formattedList,
     color: PALETTE.BRAND,
@@ -247,7 +259,7 @@ function buildWishlistPagePayload(items, userConfig, requestedPage = 1) {
     timestamp: new Date().toISOString(),
   };
 
-  const components = [
+  const components: DiscordActionRow[] = [
     {
       type: 1, // Action Row
       components: [
@@ -275,7 +287,9 @@ function buildWishlistPagePayload(items, userConfig, requestedPage = 1) {
   };
 }
 
-export const handler = async (event) => {
+export const handler = async (
+  event: any,
+): Promise<{ statusCode: number; headers?: Record<string, string>; body: string }> => {
   // HTTP routing guard — intercept GET requests for Steam OpenID auth routes
   // before Ed25519 signature verification (these are not Discord interactions).
   const httpMethod = (event.requestContext?.http?.method || event.httpMethod || '').toUpperCase();
@@ -311,6 +325,7 @@ export const handler = async (event) => {
           Location: steamRedirectUrl,
           'Cache-Control': 'no-cache, no-store, must-revalidate',
         },
+        body: '',
       };
     } catch (err) {
       console.error('Error generating Steam login redirect:', err);
@@ -376,8 +391,8 @@ export const handler = async (event) => {
             personaName = summary.personaName || steamId64;
             avatarUrl = summary.avatarUrl || '';
           }
-        } catch (profileErr) {
-          console.warn('Could not fetch Steam profile for callback confirmation:', profileErr.message);
+        } catch (profileErr: any) {
+          console.warn('Could not fetch Steam profile for callback confirmation:', profileErr?.message || profileErr);
         }
       }
 
@@ -471,7 +486,7 @@ export const handler = async (event) => {
     };
   }
 
-  const interaction = JSON.parse(rawBody);
+  const interaction: DiscordInteractionPayload = JSON.parse(rawBody);
 
   // Handshake PING (Type 1)
   if (interaction.type === 1) {
@@ -820,13 +835,13 @@ export const handler = async (event) => {
 
   // Autocomplete Handling (Type 4)
   if (interaction.type === 4) {
-    const { name, options } = interaction.data;
+    const { name, options } = interaction.data || {};
     const userId = interaction.member?.user?.id || interaction.user?.id;
 
     const autocompleteCommands = ['compare', 'can-it-run', 'game-news', 'wishlist', 'how-long-to-beat'];
 
-    if (autocompleteCommands.includes(name)) {
-      const subCommand = options?.[0];
+    if (autocompleteCommands.includes(name || '')) {
+      const subCommand: DiscordInteractionOption | undefined = options?.[0];
       const subCommandName = subCommand?.name;
       const focusedOption =
         name === 'wishlist'
@@ -918,7 +933,7 @@ export const handler = async (event) => {
 
   // Slash Command Interactions (Type 2)
   if (interaction.type === 2) {
-    const { name, options } = interaction.data;
+    const { name, options } = interaction.data || {};
     const userId = interaction.member?.user?.id || interaction.user?.id;
     const guildId = interaction.guild_id;
 
@@ -995,7 +1010,7 @@ export const handler = async (event) => {
           },
         ];
 
-        const embed = {
+        const embed: DiscordEmbed = {
           title: `zT Radar ❖ Hardware Benchmarks: ${specs.title}`,
           description: 'Official developer-specified PC system requirements from Steam.',
           color: PALETTE.BRAND,
@@ -1231,7 +1246,7 @@ export const handler = async (event) => {
 
         // Compute Cost-Per-Hour entertainment metric
         let cphValue = '';
-        if (bestPrice === null) {
+        if (bestPrice === null || !bestOffer) {
           cphValue = '▸ Storefront pricing currently unavailable to compute cost-per-hour.';
         } else if (bestPrice === 0) {
           cphValue = [
@@ -1275,7 +1290,7 @@ export const handler = async (event) => {
           });
         }
 
-        if (dealInfo && dealInfo.allTimeLowPrice !== null) {
+        if (dealInfo && dealInfo.allTimeLowPrice != null) {
           fields.push({
             name: 'Historical Low (ATL)',
             value: `▸ **${sym} ${dealInfo.allTimeLowPrice.toFixed(2)}**`,
@@ -1314,7 +1329,7 @@ export const handler = async (event) => {
 
         const components = buttons.length > 0 ? [{ type: 1, components: buttons.slice(0, 5) }] : [];
 
-        const embed = {
+        const embed: DiscordEmbed = {
           title: `HowLongToBeat ❖ ${hltbData.gameTitle || gameTitle}`,
           description: `Playtime intelligence & entertainment value analysis for **${hltbData.gameTitle || gameTitle}**.`,
           color: PALETTE.BRAND,
@@ -1463,7 +1478,7 @@ export const handler = async (event) => {
       try {
         const statuses = await checkPlatformStatuses();
 
-        const formatLine = (item) => {
+        const formatLine = (item: PlatformStatusEntry) => {
           let indicator = '● ONLINE';
           if (item.status === 'DEGRADED') indicator = '▲ DEGRADED';
           if (item.status === 'OUTAGE' || item.status === 'OFFLINE') indicator = '✖ OFFLINE';
@@ -1588,7 +1603,7 @@ export const handler = async (event) => {
           return `❖ **#${game.rank} ${game.name}**\n  └─ ${playersText} • Store: **${game.priceText}**`;
         });
 
-        const embed = {
+        const embed: DiscordEmbed = {
           title: 'zT Radar ❖ Steam Trending & Surging (Top 10)',
           description: `Titles currently experiencing surging sales & demand on the Steam Store:\n\n${lines.join('\n\n')}`,
           color: PALETTE.BRAND,
@@ -1711,7 +1726,7 @@ export const handler = async (event) => {
           });
         }
 
-        if (dealInfo.allTimeLowPrice !== null) {
+        if (dealInfo.allTimeLowPrice != null) {
           const isRealAtl = dealInfo.isAllTimeLow && bestOffer.cutPercent > 0 && bestOffer.salePrice < bestOffer.regularPrice;
           const diffFromAtl = bestOffer.salePrice - dealInfo.allTimeLowPrice;
           let atlStatus = '';
@@ -1769,7 +1784,7 @@ export const handler = async (event) => {
 
         const components = buttons.length > 0 ? [{ type: 1, components: buttons.slice(0, 5) }] : [];
 
-        const embed = {
+        const embed: DiscordEmbed = {
           title: `zT Radar ❖ Price Comparison: ${dealInfo.title}`,
           description: `Live price comparison in **${preferredCurrency} (${sym})**.`,
           color: (dealInfo.isAllTimeLow && bestOffer.cutPercent > 0 && bestOffer.salePrice < bestOffer.regularPrice) ? PALETTE.SUCCESS : PALETTE.BRAND,
@@ -1927,8 +1942,8 @@ export const handler = async (event) => {
           if (userConfigResult.Items?.[0]?.preferred_currency) {
             userCurrency = userConfigResult.Items[0].preferred_currency;
           }
-        } catch (cfgErr) {
-          console.warn('Could not query user config for /free-play-radar:', cfgErr.message || cfgErr);
+        } catch (cfgErr: any) {
+          console.warn('Could not query user config for /free-play-radar:', cfgErr?.message || cfgErr);
         }
 
         const marketDeals = await getMarketOverviewDeals(false, userCurrency);
@@ -2037,7 +2052,7 @@ export const handler = async (event) => {
         const components = buttons.length > 0 ? [{ type: 1, components: buttons.slice(0, 5) }] : [];
         const featuredImage = allFreeDeals.find((d) => d.imageUrl)?.imageUrl || null;
 
-        const embed = {
+        const embed: DiscordEmbed = {
           title: 'zT Radar ❖ Free Play & Giveaway Intelligence',
           description: 'Currently detected 100% free promotions and active Free Weekend events.',
           color: freeToKeep.length > 0 ? PALETTE.SUCCESS : 0x9B59B6,
@@ -2184,8 +2199,8 @@ export const handler = async (event) => {
 
         try {
           const authLoginUrl = AUTH_CALLBACK_URL.replace('/callback', '/login');
-          const loginUrl = `${authLoginUrl}?user_id=${encodeURIComponent(userId)}`;
-          const embedPayload = buildUnlinkedAccountEmbed(userId, loginUrl);
+          const loginUrl = `${authLoginUrl}?user_id=${encodeURIComponent(userId || '')}`;
+          const embedPayload = buildUnlinkedAccountEmbed(userId || '', loginUrl);
           return {
             statusCode: 200,
             headers: { 'Content-Type': 'application/json' },
@@ -2524,8 +2539,8 @@ export const handler = async (event) => {
 
       try {
         const [res1, res2] = await Promise.all([
-          resolveSteamTarget(target1Opt, userId, docClient, TABLE_NAME, STEAM_API_KEY),
-          resolveSteamTarget(target2Opt, userId, docClient, TABLE_NAME, STEAM_API_KEY),
+          resolveSteamTarget(target1Opt, userId || '', docClient, TABLE_NAME, STEAM_API_KEY),
+          resolveSteamTarget(target2Opt, userId || '', docClient, TABLE_NAME, STEAM_API_KEY),
         ]);
 
         if (res1.unlinked) {
@@ -2695,8 +2710,8 @@ export const handler = async (event) => {
 
       try {
         const [res1, res2] = await Promise.all([
-          resolveSteamTarget(target1Opt, userId, docClient, TABLE_NAME, STEAM_API_KEY),
-          resolveSteamTarget(target2Opt, userId, docClient, TABLE_NAME, STEAM_API_KEY),
+          resolveSteamTarget(target1Opt, userId || '', docClient, TABLE_NAME, STEAM_API_KEY),
+          resolveSteamTarget(target2Opt, userId || '', docClient, TABLE_NAME, STEAM_API_KEY),
         ]);
 
         if (res1.unlinked) {
@@ -2863,7 +2878,7 @@ export const handler = async (event) => {
       const authLoginUrl = AUTH_CALLBACK_URL ? AUTH_CALLBACK_URL.replace('/callback', '/login') : '';
 
       try {
-        const res = await resolveSteamTarget(targetOpt, userId, docClient, TABLE_NAME, STEAM_API_KEY);
+        const res = await resolveSteamTarget(targetOpt, userId || '', docClient, TABLE_NAME, STEAM_API_KEY);
         if (res.unlinked) {
           return buildTargetUnlinkedResponse(res, authLoginUrl);
         }
@@ -3215,7 +3230,7 @@ export const handler = async (event) => {
     }
 
     if (name === 'wishlist') {
-      const subCommand = options?.[0];
+      const subCommand: DiscordInteractionOption | undefined = options?.[0];
       const subCommandName = subCommand?.name;
 
       if (subCommandName === 'clear') {
@@ -3278,8 +3293,8 @@ export const handler = async (event) => {
       }
 
       if (subCommandName === 'add') {
-        const gameOption = subCommand.options?.find((opt) => opt.name === 'game');
-        const targetPriceOption = subCommand.options?.find((opt) => opt.name === 'target_price');
+        const gameOption = subCommand?.options?.find((opt) => opt.name === 'game');
+        const targetPriceOption = subCommand?.options?.find((opt) => opt.name === 'target_price');
 
         const rawGameValue = gameOption?.value;
         const targetPrice = targetPriceOption ? parseFloat(targetPriceOption.value) : null;
@@ -3393,7 +3408,7 @@ export const handler = async (event) => {
       }
 
       if (subCommandName === 'remove') {
-        const gameOption = subCommand.options?.find((opt) => opt.name === 'game');
+        const gameOption = subCommand?.options?.find((opt) => opt.name === 'game');
         const rawGameValue = gameOption?.value;
 
         let gameTitle = rawGameValue;
@@ -3780,7 +3795,7 @@ export const handler = async (event) => {
                 new BatchWriteCommand({
                   RequestItems: {
                     [TABLE_NAME]: chunk.map((item) => {
-                      const putItem = {
+                      const putItem: DynamoDbWishlistItem = {
                         PK: `USER#${userId}`,
                         SK: item.sk,
                         game_title: item.title,
@@ -3790,7 +3805,7 @@ export const handler = async (event) => {
                         alert_all_time_low: true,
                         alert_free: true,
                         alert_steep_discount: true,
-                        user_id: userId,
+                        user_id: userId || '',
                         created_at: now,
                       };
                       if (userMinRating !== null) {
