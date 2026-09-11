@@ -68,6 +68,14 @@ Resources:
   # Interactions Webhook Handler
   DiscordBotFunction:
     Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: "node22"
+        Sourcemap: true
+        EntryPoints:
+          - src/handlers/discordBot.js
     Properties:
       CodeUri: .
       Handler: src/handlers/discordBot.handler
@@ -106,6 +114,14 @@ Resources:
   # Scheduled Market Deal Scanner
   DealScannerFunction:
     Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: "node22"
+        Sourcemap: true
+        EntryPoints:
+          - src/handlers/dealScanner.js
     Properties:
       CodeUri: .
       Handler: src/handlers/dealScanner.handler

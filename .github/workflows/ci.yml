@@ -50,10 +50,14 @@ jobs:
       - name: Validate SAM template
         run: sam validate --lint
 
-      # Step 8: Execute Vitest unit and integration test suite
+      # Step 8: TypeScript compilation check — 0 diagnostic errors required
+      - name: Typecheck
+        run: npm run typecheck
+
+      # Step 9: Execute Vitest unit and integration test suite
       - name: Run test suite
         run: npm test
 
-      # Step 9: Generate coverage report (V8 provider)
+      # Step 10: Generate coverage report (V8 provider)
       - name: Run test coverage
         run: npm run test:coverage
