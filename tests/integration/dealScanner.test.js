@@ -332,7 +332,7 @@ describe('Deal Scanner Integration & In-Memory AWS Mocks', () => {
       expect(discordMessagesCall).toBeDefined();
     });
 
-    it('should re-alert at same price once 24 hours have elapsed', async () => {
+    it('should suppress alert at same price even after 24 hours have elapsed', async () => {
       const wishlistItem = {
         PK: `USER#${MOCK_USER_ID}`,
         SK: 'GAME#reminder_test',
@@ -342,6 +342,7 @@ describe('Deal Scanner Integration & In-Memory AWS Mocks', () => {
         min_discount: 50,
         alert_all_time_low: true,
         last_notified_price: 19.99,
+        last_notified_cut: 60,
         last_notified_at: TWENTY_FIVE_HOURS_AGO, // 25 hours elapsed
       };
 
@@ -369,7 +370,105 @@ describe('Deal Scanner Integration & In-Memory AWS Mocks', () => {
       const discordMessagesCall = globalThis.fetch.mock.calls.find((call) =>
         String(call[0]).includes('/messages')
       );
-      expect(discordMessagesCall).toBeDefined();
+      expect(discordMessagesCall).toBeUndefined();
+    });
+
+    it('should re-arm and alert when game returns to full retail and goes on sale again', async () => {
+      const wishlistItem = {
+        PK: `USER#${MOCK_USER_ID}`,
+        SK: 'GAME#rearm_test',
+        user_id: MOCK_USER_ID,
+        external_game_id: 'steam:400',
+        game_title: 'Rearm Game',
+        min_discount: 50,
+        alert_all_time_low: true,
+        last_notified_price: 19.99,
+        last_notified_cut: 60,
+        last_notified_at: TWENTY_FIVE_HOURS_AGO,
+      };
+
+      // Phase 1: Game returns to full retail price (cutPercent: 0, salePrice === regularPrice)
+      ddbMock.on(ScanCommand).resolves({
+        Items: [wishlistItem],
+      });
+      ddbMock.on(UpdateCommand).resolves({});
+
+      getGameDealInfo.mockResolvedValueOnce({
+        title: 'Rearm Game',
+        dealType: 'CURATED_DEAL',
+        isAllTimeLow: false,
+        reviewScore: 88,
+        primaryDeal: {
+          shopName: 'Steam',
+          salePrice: 49.99,
+          regularPrice: 49.99,
+          cutPercent: 0,
+        },
+      });
+
+      const response1 = await handler();
+      expect(response1.statusCode).toBe(200);
+
+      // Verify no notification was sent for full retail price
+      const discordMessagesCall1 = globalThis.fetch.mock.calls.find((call) =>
+        String(call[0]).includes('/messages')
+      );
+      expect(discordMessagesCall1).toBeUndefined();
+
+      // Verify promo state was reset in DynamoDB
+      const updateCallsPhase1 = ddbMock.commandCalls(UpdateCommand);
+      const resetCall = updateCallsPhase1.find((call) =>
+        call.args[0].input.UpdateExpression?.includes('SET last_notified_price = :nullVal, last_notified_cut = :zeroVal')
+      );
+      expect(resetCall).toBeDefined();
+      expect(resetCall.args[0].input.ExpressionAttributeValues[':nullVal']).toBeNull();
+      expect(resetCall.args[0].input.ExpressionAttributeValues[':zeroVal']).toBe(0);
+
+      // Phase 2: Game goes on sale again at promotional price with re-armed state
+      ddbMock.reset();
+      globalThis.fetch.mockClear();
+
+      ddbMock.on(ScanCommand).resolves({
+        Items: [
+          {
+            ...wishlistItem,
+            last_notified_price: null,
+            last_notified_cut: 0,
+          },
+        ],
+      });
+      ddbMock.on(UpdateCommand).resolves({});
+
+      getGameDealInfo.mockResolvedValueOnce({
+        title: 'Rearm Game',
+        dealType: 'CURATED_DEAL',
+        isAllTimeLow: true,
+        reviewScore: 88,
+        primaryDeal: {
+          shopName: 'Steam',
+          salePrice: 19.99,
+          regularPrice: 49.99,
+          cutPercent: 60,
+        },
+      });
+
+      const response2 = await handler();
+      expect(response2.statusCode).toBe(200);
+
+      // Verify Discord DM was dispatched for the new sale cycle
+      const discordMessagesCall2 = globalThis.fetch.mock.calls.find((call) =>
+        String(call[0]).includes('/messages')
+      );
+      expect(discordMessagesCall2).toBeDefined();
+
+      // Verify last_notified_price and last_notified_cut were persisted
+      const updateCallsPhase2 = ddbMock.commandCalls(UpdateCommand);
+      const alertUpdateCall = updateCallsPhase2.find((call) =>
+        call.args[0].input.UpdateExpression?.includes('SET last_notified_price = :price, last_notified_cut = :cut')
+      );
+      expect(alertUpdateCall).toBeDefined();
+      expect(alertUpdateCall.args[0].input.ExpressionAttributeValues[':price']).toBe(19.99);
+      expect(alertUpdateCall.args[0].input.ExpressionAttributeValues[':cut']).toBe(60);
     });
   });
 });

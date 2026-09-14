@@ -268,6 +268,38 @@ export const handler = async (): Promise<{ statusCode: number; body: string }> =
         const regularPrice = deal.cheaperAlternative?.regularPrice ?? deal.primaryDeal?.regularPrice ?? 0;
         const sym = deal.primaryDeal?.currencySymbol || (preferredCurrency === 'BRL' ? 'R$' : '$');
 
+        // Reset notification state if the game has returned to base retail price
+        const isBaseRetail =
+          (effectiveCut === 0 || effectivePrice >= regularPrice) &&
+          deal.dealType !== 'FREE_TO_KEEP' &&
+          deal.dealType !== 'FREE_PLAY_DAYS';
+
+        if (isBaseRetail) {
+          if (item.last_notified_price != null || (item.last_notified_cut != null && item.last_notified_cut > 0)) {
+            try {
+              await docClient.send(
+                new UpdateCommand({
+                  TableName: TABLE_NAME,
+                  Key: { PK: item.PK, SK: item.SK },
+                  UpdateExpression: 'SET last_notified_price = :nullVal, last_notified_cut = :zeroVal, updated_at = :now',
+                  ExpressionAttributeValues: {
+                    ':nullVal': null,
+                    ':zeroVal': 0,
+                    ':now': new Date().toISOString(),
+                  },
+                })
+              );
+              item.last_notified_price = null;
+              item.last_notified_cut = 0;
+              console.log(`Reset promo state for ${item.SK} (returned to base retail price).`);
+            } catch (resetErr: unknown) {
+              const msg = resetErr instanceof Error ? resetErr.message : String(resetErr);
+              console.error(`Failed to reset promo state for ${item.SK}:`, msg);
+            }
+          }
+          continue;
+        }
+
         // Enforce that promotional alerts strictly require an active discount
         const hasActiveDiscount = effectiveCut > 0 && effectivePrice < regularPrice;
 
@@ -308,13 +340,10 @@ export const handler = async (): Promise<{ statusCode: number; body: string }> =
         }
 
         const lastNotifiedPrice = item.last_notified_price != null ? Number(item.last_notified_price) : null;
-        const lastNotifiedAt = item.last_notified_at ? new Date(item.last_notified_at).getTime() : 0;
-        const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 
         const isNewAlert =
           lastNotifiedPrice === null ||
-          effectivePrice < lastNotifiedPrice ||
-          (Date.now() - lastNotifiedAt >= ONE_DAY_MS && effectivePrice <= lastNotifiedPrice);
+          effectivePrice < lastNotifiedPrice;
 
         if (shouldAlert && isNewAlert) {
           console.log(`DM Alert triggered for user ${userId} on ${resolvedTitle}: ${alertReason}`);
@@ -378,14 +407,17 @@ export const handler = async (): Promise<{ statusCode: number; body: string }> =
                 new UpdateCommand({
                   TableName: TABLE_NAME,
                   Key: { PK: item.PK, SK: item.SK },
-                  UpdateExpression: 'SET last_notified_price = :price, last_notified_at = :now, game_title = :title',
+                  UpdateExpression: 'SET last_notified_price = :price, last_notified_cut = :cut, last_notified_at = :now, game_title = :title',
                   ExpressionAttributeValues: {
                     ':price': effectivePrice,
+                    ':cut': effectiveCut,
                     ':now': new Date().toISOString(),
                     ':title': resolvedTitle,
                   },
                 })
               );
+              item.last_notified_price = effectivePrice;
+              item.last_notified_cut = effectiveCut;
             } catch (dbError) {
               console.error(`Failed to update notification state for ${item.SK}:`, dbError);
             }
@@ -542,7 +574,7 @@ export const handler = async (): Promise<{ statusCode: number; body: string }> =
           const cut = deal.primaryDeal?.cutPercent ?? 0;
           const isFreeWeekend = deal.dealType === 'FREE_PLAY_DAYS';
           const isFreeToKeep = deal.dealType === 'FREE_TO_KEEP';
-          const uniqueDealKey = `${deal.gameId}_${deal.primaryDeal.salePrice}_${deal.dealType}`;
+          const uniqueDealKey = `${deal.gameId}_${deal.primaryDeal.salePrice}`;
 
           if (broadcastedHistory.includes(uniqueDealKey) || newlyBroadcastedKeys.includes(uniqueDealKey)) {
             continue;

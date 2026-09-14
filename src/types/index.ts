@@ -231,6 +231,8 @@ export interface DynamoDbWishlistItem {
   alert_steep_discount?: boolean;
   /** Price at the time of the last sent notification. */
   last_notified_price?: number | null;
+  /** Discount cut percentage at the time of the last sent notification. */
+  last_notified_cut?: number | null;
   /** ISO 8601 timestamp of the last sent notification. */
   last_notified_at?: string | null;
   /** ISO 8601 creation timestamp. */
