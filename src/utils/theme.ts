@@ -252,9 +252,26 @@ export function formatStoreLabel(storeName: string): string {
 }
 
 /**
+ * Resolves a clean plain-text store header for use inside ANSI codeblocks.
+ * Excludes custom Discord application emoji tags (<:name:id>), which do not render inside codeblocks.
+ */
+export function getAnsiStoreHeader(storeName: string): string {
+  const rawKey = (storeName || '').toLowerCase().trim();
+  const normalized = normalizeStoreKey(rawKey);
+
+  if (normalized && STORE_FALLBACK_BADGES[normalized]) {
+    return STORE_FALLBACK_BADGES[normalized];
+  }
+
+  const canonical = getCanonicalStoreName(storeName);
+  const clean = canonical.replace(/<a?:\w+:\d+>/g, '').trim();
+  return `[${clean || 'Store'}]`;
+}
+
+/**
  * Formats a high-intensity, contrast-optimized ANSI price comparison code block for game deals.
- * Uses bold ANSI escapes (\u001b[1;36m, \u001b[1;37m, \u001b[1;32m, \u001b[1;33m) and prevents
- * redundant store name repetition.
+ * Uses bold ANSI escapes (\u001b[1;36m, \u001b[1;37m, \u001b[1;32m, \u001b[1;33m).
+ * Excludes raw Discord emoji tags to prevent unrendered string leakage inside literal codeblocks.
  */
 export function formatAnsiPriceDiff(
   primaryDeal: Partial<StoreDeal>,
@@ -262,25 +279,25 @@ export function formatAnsiPriceDiff(
   fallbackSym: string = '$',
 ): string {
   const pSym = primaryDeal?.currencySymbol || fallbackSym;
-  const pLabel = formatStoreLabel(primaryDeal?.shopName || 'Store');
+  const pHeader = getAnsiStoreHeader(primaryDeal?.shopName || 'Store');
   const pReg = `${pSym} ${Number(primaryDeal?.regularPrice || 0).toFixed(2)}`;
   const pSale = `${pSym} ${Number(primaryDeal?.salePrice || 0).toFixed(2)}`;
   const pCut = (primaryDeal?.cutPercent ?? 0) > 0 ? ` (-${primaryDeal?.cutPercent}%)` : '';
 
   const lines: string[] = [];
-  lines.push(`${ANSI_CODES.BOLD_CYAN}${pLabel}${ANSI_CODES.RESET}`);
+  lines.push(`${ANSI_CODES.BOLD_CYAN}${pHeader}${ANSI_CODES.RESET}`);
   lines.push(`  Regular: ${ANSI_CODES.BOLD_WHITE}${pReg}${ANSI_CODES.RESET}`);
   lines.push(`  Current: ${ANSI_CODES.BOLD_GREEN}${pSale}${pCut}${ANSI_CODES.RESET}`);
 
   if (cheaperAlternative) {
     const aSym = cheaperAlternative.currencySymbol || pSym;
-    const aLabel = formatStoreLabel(cheaperAlternative.shopName || 'Store');
+    const aHeader = getAnsiStoreHeader(cheaperAlternative.shopName || 'Store');
     const aReg = `${aSym} ${Number(cheaperAlternative.regularPrice || 0).toFixed(2)}`;
     const aSale = `${aSym} ${Number(cheaperAlternative.salePrice || 0).toFixed(2)}`;
     const aCut = (cheaperAlternative.cutPercent ?? 0) > 0 ? ` (-${cheaperAlternative.cutPercent}%)` : '';
 
     lines.push('');
-    lines.push(`${ANSI_CODES.BOLD_YELLOW}${aLabel} ★ Best Value${ANSI_CODES.RESET}`);
+    lines.push(`${ANSI_CODES.BOLD_YELLOW}${aHeader} ★ Best Value${ANSI_CODES.RESET}`);
     if (cheaperAlternative.regularPrice && cheaperAlternative.regularPrice > (cheaperAlternative.salePrice || 0)) {
       lines.push(`  Regular: ${ANSI_CODES.BOLD_WHITE}${aReg}${ANSI_CODES.RESET}`);
     }

@@ -12,6 +12,7 @@ import {
   formatAnsiPriceDiff,
   formatStoreLabel,
   getCanonicalStoreName,
+  getAnsiStoreHeader,
   CUSTOM_STORE_EMOJIS,
   APPLICATION_EMOJIS,
 } from '../../src/utils/theme.js';
@@ -123,6 +124,14 @@ describe('Centralized Theming Engine & Visual Formatting Utilities', () => {
       expect(getCanonicalStoreName('nuuvem')).toBe('Nuuvem');
       expect(getCanonicalStoreName('gog')).toBe('GOG');
     });
+
+    it('should resolve clean plain-text headers for ANSI codeblocks via getAnsiStoreHeader', () => {
+      expect(getAnsiStoreHeader('Steam')).toBe('[Steam]');
+      expect(getAnsiStoreHeader('Epic Games Store')).toBe('[Epic]');
+      expect(getAnsiStoreHeader('Nuuvem')).toBe('[Nuuvem]');
+      expect(getAnsiStoreHeader('GOG')).toBe('[GOG]');
+      expect(getAnsiStoreHeader('Itch.io')).toBe('[Itch.io]');
+    });
   });
 
   describe('resolveStoreBadge & formatStoreLabel with Official Emojis', () => {
@@ -184,7 +193,7 @@ describe('Centralized Theming Engine & Visual Formatting Utilities', () => {
       clearCustomStoreEmojis();
     });
 
-    it('should render high-intensity contrast single storefront price block with custom emoji icon', () => {
+    it('should render high-intensity contrast single storefront price block with clean header and no raw emojis', () => {
       const primaryDeal = {
         shopName: 'Steam',
         regularPrice: 59.99,
@@ -196,7 +205,10 @@ describe('Centralized Theming Engine & Visual Formatting Utilities', () => {
       const block = formatAnsiPriceDiff(primaryDeal, null, '$');
 
       expect(block).toContain('```ansi');
-      expect(block).toContain('<:store_steam:1549480215992995901> Steam');
+      expect(block).toContain('\u001b[1;36m[Steam]\u001b[0m');
+      // Assert raw emoji tags are completely excluded
+      expect(block).not.toContain('<:store_steam:');
+      expect(block).not.toContain('<:');
       // High-intensity white/gray for regular price
       expect(block).toContain('Regular: \u001b[1;37m$ 59.99\u001b[0m');
       // High-intensity green for current promotional price
@@ -204,7 +216,7 @@ describe('Centralized Theming Engine & Visual Formatting Utilities', () => {
       expect(block).toContain('```');
     });
 
-    it('should render dual storefront comparison with clean separation and bold yellow best value tag', () => {
+    it('should render dual storefront comparison with clean separation and bold yellow best value tag without emoji leakage', () => {
       const primaryDeal = {
         shopName: 'Steam',
         regularPrice: 69.99,
@@ -224,11 +236,12 @@ describe('Centralized Theming Engine & Visual Formatting Utilities', () => {
       const block = formatAnsiPriceDiff(primaryDeal, cheaperDeal, '$');
 
       expect(block).toContain('```ansi');
-      expect(block).toContain('<:store_steam:1549480215992995901> Steam');
+      expect(block).toContain('\u001b[1;36m[Steam]\u001b[0m');
+      expect(block).not.toContain('<:');
       // Clean blank line separating the store blocks
       expect(block).toContain('\n\n');
       // High-intensity bold yellow best value header
-      expect(block).toContain('\u001b[1;33m<:store_nuuvem:1549480214852145202> Nuuvem ★ Best Value\u001b[0m');
+      expect(block).toContain('\u001b[1;33m[Nuuvem] ★ Best Value\u001b[0m');
       // High-intensity green deal price
       expect(block).toContain('Deal:    \u001b[1;32m$ 34.99 (-50%)\u001b[0m');
       expect(block).toContain('```');
@@ -241,7 +254,22 @@ describe('Centralized Theming Engine & Visual Formatting Utilities', () => {
       const block = formatAnsiPriceDiff(primary, cheaper, '$');
       expect(block).toContain('[Itch.io]');
       expect(block).not.toContain('[Itch.io] Itch.io');
-      expect(block).toContain('<:store_gog:1549480213207973899> GOG ★ Best Value');
+      expect(block).toContain('\u001b[1;33m[GOG] ★ Best Value\u001b[0m');
+      expect(block).not.toContain('<:');
+    });
+
+    it('should strip custom emoji tags inside ANSI blocks even when dynamic custom emojis are registered', () => {
+      registerStoreEmoji('steam', '<:custom_steam:999999999999999999>');
+      registerStoreEmoji('epic', '<:custom_epic:888888888888888888>');
+
+      const primary = { shopName: 'Steam', regularPrice: 40, salePrice: 20, cutPercent: 50 };
+      const cheaper = { shopName: 'Epic Games Store', regularPrice: 40, salePrice: 15, cutPercent: 62 };
+
+      const block = formatAnsiPriceDiff(primary, cheaper, '$');
+      expect(block).toContain('\u001b[1;36m[Steam]\u001b[0m');
+      expect(block).toContain('\u001b[1;33m[Epic] ★ Best Value\u001b[0m');
+      expect(block).not.toContain('<:custom_steam:');
+      expect(block).not.toContain('<:custom_epic:');
     });
   });
 
