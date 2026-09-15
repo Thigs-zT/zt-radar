@@ -116,11 +116,11 @@ export function renderProgressBar(current: number, total: number, barLength: num
  * Centralized custom store emoji mapping from environment configurations.
  */
 export const CUSTOM_STORE_EMOJIS: Record<string, string> = {
-  steam: process.env.DISCORD_EMOJI_STEAM || '',
-  epic: process.env.DISCORD_EMOJI_EPIC || '',
-  nuuvem: process.env.DISCORD_EMOJI_NUUVEM || '',
-  gog: process.env.DISCORD_EMOJI_GOG || '',
-  steam_animated: process.env.DISCORD_EMOJI_STEAM_ANIMATED || '',
+  steam: process.env.DISCORD_EMOJI_STEAM || '<:store_steam:1549480215992995901>',
+  epic: process.env.DISCORD_EMOJI_EPIC || '<:store_epic:1549480211291308032>',
+  nuuvem: process.env.DISCORD_EMOJI_NUUVEM || '<:store_nuuvem:1549480214852145202>',
+  gog: process.env.DISCORD_EMOJI_GOG || '<:store_gog:1549480213207973899>',
+  steam_animated: process.env.DISCORD_EMOJI_STEAM_ANIMATED || '<a:store_steam_animated:1549480222812930099>',
 };
 
 /**
@@ -211,12 +211,7 @@ export function resolveStoreBadge(storeName: string): string {
     return customStoreEmojis.get(normalized)!;
   }
 
-  // 2. Check centralized custom emoji configuration
-  if (normalized && CUSTOM_STORE_EMOJIS[normalized] && CUSTOM_STORE_EMOJIS[normalized].trim().length > 0) {
-    return CUSTOM_STORE_EMOJIS[normalized].trim();
-  }
-
-  // 3. Check environment variables
+  // 2. Check environment variables
   const storeIdentifier = (normalized || rawKey).toUpperCase().replace(/[\s-]+/g, '_');
   const envCandidates = [
     `DISCORD_EMOJI_${storeIdentifier}`,
@@ -228,6 +223,11 @@ export function resolveStoreBadge(storeName: string): string {
     if (val && val.trim().length > 0) {
       return val.trim();
     }
+  }
+
+  // 3. Check centralized custom emoji configuration (with default application emojis)
+  if (normalized && CUSTOM_STORE_EMOJIS[normalized] && CUSTOM_STORE_EMOJIS[normalized].trim().length > 0) {
+    return CUSTOM_STORE_EMOJIS[normalized].trim();
   }
 
   // 4. Graceful ASCII fallback

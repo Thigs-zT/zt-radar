@@ -108,14 +108,13 @@ describe('Centralized Theming Engine & Visual Formatting Utilities', () => {
   });
 
   describe('Custom Store Emojis & Configuration', () => {
-    it('should export centralized custom emoji mapping and application emoji alias', () => {
-      expect(CUSTOM_STORE_EMOJIS).toBeDefined();
+    it('should export official Discord application store emoji identifiers by default', () => {
+      expect(CUSTOM_STORE_EMOJIS.steam).toBe('<:store_steam:1549480215992995901>');
+      expect(CUSTOM_STORE_EMOJIS.epic).toBe('<:store_epic:1549480211291308032>');
+      expect(CUSTOM_STORE_EMOJIS.nuuvem).toBe('<:store_nuuvem:1549480214852145202>');
+      expect(CUSTOM_STORE_EMOJIS.gog).toBe('<:store_gog:1549480213207973899>');
+      expect(CUSTOM_STORE_EMOJIS.steam_animated).toBe('<a:store_steam_animated:1549480222812930099>');
       expect(APPLICATION_EMOJIS).toBe(CUSTOM_STORE_EMOJIS);
-      expect(typeof CUSTOM_STORE_EMOJIS.steam).toBe('string');
-      expect(typeof CUSTOM_STORE_EMOJIS.epic).toBe('string');
-      expect(typeof CUSTOM_STORE_EMOJIS.nuuvem).toBe('string');
-      expect(typeof CUSTOM_STORE_EMOJIS.gog).toBe('string');
-      expect(typeof CUSTOM_STORE_EMOJIS.steam_animated).toBe('string');
     });
 
     it('should resolve canonical storefront names properly', () => {
@@ -126,7 +125,7 @@ describe('Centralized Theming Engine & Visual Formatting Utilities', () => {
     });
   });
 
-  describe('resolveStoreBadge & formatStoreLabel (No Redundancy)', () => {
+  describe('resolveStoreBadge & formatStoreLabel with Official Emojis', () => {
     beforeEach(() => {
       clearCustomStoreEmojis();
       delete process.env.DISCORD_EMOJI_STEAM;
@@ -139,40 +138,32 @@ describe('Centralized Theming Engine & Visual Formatting Utilities', () => {
       clearCustomStoreEmojis();
     });
 
-    it('should resolve supported digital storefronts cleanly to ASCII fallback tags', () => {
-      expect(resolveStoreBadge('Steam')).toBe('[Steam]');
-      expect(resolveStoreBadge('steam')).toBe('[Steam]');
-      expect(resolveStoreBadge('Epic Games Store')).toBe('[Epic]');
-      expect(resolveStoreBadge('Epic Games')).toBe('[Epic]');
-      expect(resolveStoreBadge('epic')).toBe('[Epic]');
-      expect(resolveStoreBadge('Nuuvem')).toBe('[Nuuvem]');
-      expect(resolveStoreBadge('nuuvem')).toBe('[Nuuvem]');
-      expect(resolveStoreBadge('GOG')).toBe('[GOG]');
-      expect(resolveStoreBadge('gog')).toBe('[GOG]');
+    it('should resolve supported digital storefronts to official Discord application emoji tags', () => {
+      expect(resolveStoreBadge('Steam')).toBe('<:store_steam:1549480215992995901>');
+      expect(resolveStoreBadge('steam')).toBe('<:store_steam:1549480215992995901>');
+      expect(resolveStoreBadge('Epic Games Store')).toBe('<:store_epic:1549480211291308032>');
+      expect(resolveStoreBadge('Epic Games')).toBe('<:store_epic:1549480211291308032>');
+      expect(resolveStoreBadge('epic')).toBe('<:store_epic:1549480211291308032>');
+      expect(resolveStoreBadge('Nuuvem')).toBe('<:store_nuuvem:1549480214852145202>');
+      expect(resolveStoreBadge('nuuvem')).toBe('<:store_nuuvem:1549480214852145202>');
+      expect(resolveStoreBadge('GOG')).toBe('<:store_gog:1549480213207973899>');
+      expect(resolveStoreBadge('gog')).toBe('<:store_gog:1549480213207973899>');
     });
 
-    it('should eliminate redundancy with formatStoreLabel for fallback tags', () => {
-      // Must return '[Steam]', NOT '[Steam] Steam'
-      expect(formatStoreLabel('Steam')).toBe('[Steam]');
-      expect(formatStoreLabel('Nuuvem')).toBe('[Nuuvem]');
-      expect(formatStoreLabel('GOG')).toBe('[GOG]');
+    it('should format store labels with custom emoji icons followed by store names without redundancy', () => {
+      expect(formatStoreLabel('Steam')).toBe('<:store_steam:1549480215992995901> Steam');
+      expect(formatStoreLabel('Epic Games Store')).toBe('<:store_epic:1549480211291308032> Epic Games Store');
+      expect(formatStoreLabel('Nuuvem')).toBe('<:store_nuuvem:1549480214852145202> Nuuvem');
+      expect(formatStoreLabel('GOG')).toBe('<:store_gog:1549480213207973899> GOG');
     });
 
-    it('should output `<:emoji:id> StoreName` with formatStoreLabel when custom emoji is configured', () => {
-      registerStoreEmoji('steam', '<:steam_logo:102030405060708090>');
-      registerStoreEmoji('nuuvem', '<:nuuvem_badge:987654321098765432>');
-
-      expect(resolveStoreBadge('Steam')).toBe('<:steam_logo:102030405060708090>');
-      expect(formatStoreLabel('Steam')).toBe('<:steam_logo:102030405060708090> Steam');
-
-      expect(resolveStoreBadge('Nuuvem')).toBe('<:nuuvem_badge:987654321098765432>');
-      expect(formatStoreLabel('Nuuvem')).toBe('<:nuuvem_badge:987654321098765432> Nuuvem');
-
-      // Unregistered store retains clean fallback without redundancy
-      expect(formatStoreLabel('GOG')).toBe('[GOG]');
+    it('should allow dynamic override of store emojis via registry', () => {
+      registerStoreEmoji('steam', '<:custom_steam:999999999999999999>');
+      expect(resolveStoreBadge('Steam')).toBe('<:custom_steam:999999999999999999>');
+      expect(formatStoreLabel('Steam')).toBe('<:custom_steam:999999999999999999> Steam');
     });
 
-    it('should resolve custom Discord application emojis from environment variables', () => {
+    it('should resolve environment variable overrides for store emojis', () => {
       process.env.DISCORD_EMOJI_STEAM = '<:steam_env:111222333444555666>';
       process.env.EMOJI_EPIC = '<:epic_env:222333444555666777>';
 
@@ -180,9 +171,11 @@ describe('Centralized Theming Engine & Visual Formatting Utilities', () => {
       expect(resolveStoreBadge('Epic Games Store')).toBe('<:epic_env:222333444555666777>');
     });
 
-    it('should handle unlisted or unknown store names gracefully', () => {
+    it('should handle unlisted or unknown store names with clean bracketed fallback tags', () => {
       expect(resolveStoreBadge('Humble Bundle')).toBe('[Humble Bundle]');
+      expect(formatStoreLabel('Humble Bundle')).toBe('[Humble Bundle]');
       expect(resolveStoreBadge('')).toBe('[Store]');
+      expect(formatStoreLabel('')).toBe('[Store]');
     });
   });
 
@@ -191,7 +184,7 @@ describe('Centralized Theming Engine & Visual Formatting Utilities', () => {
       clearCustomStoreEmojis();
     });
 
-    it('should render high-intensity contrast single storefront price block with zero redundancy', () => {
+    it('should render high-intensity contrast single storefront price block with custom emoji icon', () => {
       const primaryDeal = {
         shopName: 'Steam',
         regularPrice: 59.99,
@@ -203,9 +196,7 @@ describe('Centralized Theming Engine & Visual Formatting Utilities', () => {
       const block = formatAnsiPriceDiff(primaryDeal, null, '$');
 
       expect(block).toContain('```ansi');
-      // Must contain '[Steam]' and NOT duplicate '[Steam] Steam'
-      expect(block).toContain('\u001b[1;36m[Steam]\u001b[0m');
-      expect(block).not.toContain('[Steam] Steam');
+      expect(block).toContain('<:store_steam:1549480215992995901> Steam');
       // High-intensity white/gray for regular price
       expect(block).toContain('Regular: \u001b[1;37m$ 59.99\u001b[0m');
       // High-intensity green for current promotional price
@@ -233,28 +224,24 @@ describe('Centralized Theming Engine & Visual Formatting Utilities', () => {
       const block = formatAnsiPriceDiff(primaryDeal, cheaperDeal, '$');
 
       expect(block).toContain('```ansi');
-      expect(block).toContain('\u001b[1;36m[Steam]\u001b[0m');
-      expect(block).not.toContain('[Steam] Steam');
+      expect(block).toContain('<:store_steam:1549480215992995901> Steam');
       // Clean blank line separating the store blocks
       expect(block).toContain('\n\n');
       // High-intensity bold yellow best value header
-      expect(block).toContain('\u001b[1;33m[Nuuvem] ★ Best Value\u001b[0m');
-      expect(block).not.toContain('[Nuuvem] Nuuvem');
+      expect(block).toContain('\u001b[1;33m<:store_nuuvem:1549480214852145202> Nuuvem ★ Best Value\u001b[0m');
       // High-intensity green deal price
       expect(block).toContain('Deal:    \u001b[1;32m$ 34.99 (-50%)\u001b[0m');
       expect(block).toContain('```');
     });
 
-    it('should render emoji store tags when custom emojis are registered', () => {
-      registerStoreEmoji('steam', '<:steam_logo:123>');
-      registerStoreEmoji('epic', '<:epic_badge:456>');
-
-      const primary = { shopName: 'Steam', regularPrice: 40, salePrice: 20, cutPercent: 50 };
-      const cheaper = { shopName: 'Epic Games Store', regularPrice: 40, salePrice: 15, cutPercent: 62 };
+    it('should render clean bracketed fallback tags without repetition when store is unlisted', () => {
+      const primary = { shopName: 'Itch.io', regularPrice: 20, salePrice: 10, cutPercent: 50 };
+      const cheaper = { shopName: 'GOG', regularPrice: 20, salePrice: 5, cutPercent: 75 };
 
       const block = formatAnsiPriceDiff(primary, cheaper, '$');
-      expect(block).toContain('<:steam_logo:123> Steam');
-      expect(block).toContain('<:epic_badge:456> Epic Games Store ★ Best Value');
+      expect(block).toContain('[Itch.io]');
+      expect(block).not.toContain('[Itch.io] Itch.io');
+      expect(block).toContain('<:store_gog:1549480213207973899> GOG ★ Best Value');
     });
   });
 
