@@ -60,6 +60,7 @@ import {
   formatAnsiPriceDiff,
   renderProgressBar,
   resolveStoreBadge,
+  formatStoreLabel,
 } from '../utils/theme.js';
 
 const ddbClient = new DynamoDBClient({});
@@ -1736,12 +1737,12 @@ export const handler = async (
         const bestOffer = dealInfo.cheaperAlternative || dealInfo.primaryDeal;
 
         const ansiPriceBlock = formatAnsiPriceDiff(dealInfo.primaryDeal, dealInfo.cheaperAlternative, sym);
-        const primaryBadge = resolveStoreBadge(dealInfo.primaryDeal.shopName);
-        const altBadge = dealInfo.cheaperAlternative ? resolveStoreBadge(dealInfo.cheaperAlternative.shopName) : '';
+        const primaryLabel = formatStoreLabel(dealInfo.primaryDeal.shopName);
+        const altLabel = dealInfo.cheaperAlternative ? formatStoreLabel(dealInfo.cheaperAlternative.shopName) : '';
 
         const fieldName = dealInfo.cheaperAlternative
-          ? `❖ Price Matrix: ${primaryBadge} ${dealInfo.primaryDeal.shopName} vs ${altBadge} ${dealInfo.cheaperAlternative.shopName}`
-          : `❖ Price Intelligence: ${primaryBadge} ${dealInfo.primaryDeal.shopName}`;
+          ? `❖ Price Matrix: ${primaryLabel} vs ${altLabel}`
+          : `❖ Price Intelligence: ${primaryLabel}`;
 
         const fields = [
           {
@@ -1754,8 +1755,9 @@ export const handler = async (
         if (dealInfo.storeBreakdown && Object.keys(dealInfo.storeBreakdown).length > 0) {
           const breakdownList = Object.values(dealInfo.storeBreakdown).map((s) => {
             const badge = resolveStoreBadge(s.shopName);
+            const storeLabel = badge.startsWith('<') ? `${badge} **${s.shopName}**` : `**${badge}**`;
             const cutTxt = s.cutPercent > 0 ? ` **(-${s.cutPercent}%)**` : '';
-            return `▸ ${badge} **${s.shopName}**: ${sym} ${s.salePrice.toFixed(2)}${cutTxt}`;
+            return `▸ ${storeLabel}: ${sym} ${s.salePrice.toFixed(2)}${cutTxt}`;
           });
 
           fields.push({

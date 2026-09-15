@@ -40,12 +40,14 @@ export const UNICODE_ICONS = {
 } as const;
 
 /**
- * Standard ANSI escape sequences supported by Discord markdown code blocks (` ```ansi `).
+ * Standard & High-Intensity ANSI escape sequences supported by Discord markdown code blocks (` ```ansi `).
  */
 export const ANSI_CODES = {
   RESET: '\u001b[0m',
   BOLD: '\u001b[1m',
   UNDERLINE: '\u001b[4m',
+
+  // Standard Colors
   GRAY: '\u001b[30m',
   RED: '\u001b[31m',
   GREEN: '\u001b[32m',
@@ -54,6 +56,16 @@ export const ANSI_CODES = {
   PINK: '\u001b[35m',
   CYAN: '\u001b[36m',
   WHITE: '\u001b[37m',
+
+  // High-Intensity Bold Colors (optimized for Discord dark theme readability)
+  BOLD_GRAY: '\u001b[1;30m',
+  BOLD_RED: '\u001b[1;31m',
+  BOLD_GREEN: '\u001b[1;32m',
+  BOLD_YELLOW: '\u001b[1;33m',
+  BOLD_BLUE: '\u001b[1;34m',
+  BOLD_PINK: '\u001b[1;35m',
+  BOLD_CYAN: '\u001b[1;36m',
+  BOLD_WHITE: '\u001b[1;37m',
 } as const;
 
 export type AnsiColorCode = keyof typeof ANSI_CODES;
@@ -101,7 +113,23 @@ export function renderProgressBar(current: number, total: number, barLength: num
 }
 
 /**
- * In-memory registry for Discord custom application emojis (<:name:id>).
+ * Centralized custom store emoji mapping from environment configurations.
+ */
+export const CUSTOM_STORE_EMOJIS: Record<string, string> = {
+  steam: process.env.DISCORD_EMOJI_STEAM || '',
+  epic: process.env.DISCORD_EMOJI_EPIC || '',
+  nuuvem: process.env.DISCORD_EMOJI_NUUVEM || '',
+  gog: process.env.DISCORD_EMOJI_GOG || '',
+  steam_animated: process.env.DISCORD_EMOJI_STEAM_ANIMATED || '',
+};
+
+/**
+ * Centralized application emoji mapping alias with fallback awareness.
+ */
+export const APPLICATION_EMOJIS = CUSTOM_STORE_EMOJIS;
+
+/**
+ * In-memory registry for dynamic Discord custom application emojis (<:name:id>).
  */
 const customStoreEmojis: Map<string, string> = new Map();
 
@@ -146,13 +174,26 @@ function normalizeStoreKey(rawStore: string): string | null {
 }
 
 /**
+ * Resolves canonical storefront display name.
+ */
+export function getCanonicalStoreName(rawStore: string): string {
+  const s = (rawStore || '').toLowerCase().trim();
+  if (s.includes('steam') || s === '1') return 'Steam';
+  if (s.includes('epic') || s === '25') return 'Epic Games Store';
+  if (s.includes('nuuvem') || s === '35') return 'Nuuvem';
+  if (s.includes('gog') || s === '7') return 'GOG';
+  return rawStore.trim() || 'Store';
+}
+
+/**
  * Resolves a storefront name to either a Discord Application Emoji (<:name:id>)
  * or a graceful branded ASCII fallback tag ([Steam], [Epic], [Nuuvem], [GOG]).
  *
  * Checks in order:
  * 1. Registered custom emoji map.
- * 2. Environment variables (e.g. `DISCORD_EMOJI_STEAM`, `EMOJI_STEAM`).
- * 3. Graceful ASCII fallback tag.
+ * 2. Centralized CUSTOM_STORE_EMOJIS configuration.
+ * 3. Environment variables (e.g. `DISCORD_EMOJI_STEAM`, `EMOJI_STEAM`).
+ * 4. Graceful ASCII fallback tag.
  */
 export function resolveStoreBadge(storeName: string): string {
   if (!storeName || typeof storeName !== 'string') {
@@ -170,7 +211,12 @@ export function resolveStoreBadge(storeName: string): string {
     return customStoreEmojis.get(normalized)!;
   }
 
-  // 2. Check environment variables
+  // 2. Check centralized custom emoji configuration
+  if (normalized && CUSTOM_STORE_EMOJIS[normalized] && CUSTOM_STORE_EMOJIS[normalized].trim().length > 0) {
+    return CUSTOM_STORE_EMOJIS[normalized].trim();
+  }
+
+  // 3. Check environment variables
   const storeIdentifier = (normalized || rawKey).toUpperCase().replace(/[\s-]+/g, '_');
   const envCandidates = [
     `DISCORD_EMOJI_${storeIdentifier}`,
@@ -184,17 +230,31 @@ export function resolveStoreBadge(storeName: string): string {
     }
   }
 
-  // 3. Graceful ASCII fallback
+  // 4. Graceful ASCII fallback
   if (normalized && STORE_FALLBACK_BADGES[normalized]) {
     return STORE_FALLBACK_BADGES[normalized];
   }
 
-  return `[${storeName.trim()}]`;
+  return `[${getCanonicalStoreName(storeName)}]`;
 }
 
 /**
- * Formats a high-contrast ANSI price comparison code block for game deals.
- * Incorporates storefront badges, Cyan titles, Green promotional prices, and Yellow best offer tags.
+ * Formats a storefront label avoiding redundancy:
+ * - When a custom Discord emoji is resolved: `<:name:id> StoreName`
+ * - When a fallback bracketed tag is resolved: `[StoreName]`
+ */
+export function formatStoreLabel(storeName: string): string {
+  const badge = resolveStoreBadge(storeName);
+  if (badge.startsWith('<')) {
+    return `${badge} ${getCanonicalStoreName(storeName)}`;
+  }
+  return badge;
+}
+
+/**
+ * Formats a high-intensity, contrast-optimized ANSI price comparison code block for game deals.
+ * Uses bold ANSI escapes (\u001b[1;36m, \u001b[1;37m, \u001b[1;32m, \u001b[1;33m) and prevents
+ * redundant store name repetition.
  */
 export function formatAnsiPriceDiff(
   primaryDeal: Partial<StoreDeal>,
@@ -202,31 +262,29 @@ export function formatAnsiPriceDiff(
   fallbackSym: string = '$',
 ): string {
   const pSym = primaryDeal?.currencySymbol || fallbackSym;
-  const pBadge = resolveStoreBadge(primaryDeal?.shopName || 'Store');
-  const pShop = primaryDeal?.shopName || 'Store';
+  const pLabel = formatStoreLabel(primaryDeal?.shopName || 'Store');
   const pReg = `${pSym} ${Number(primaryDeal?.regularPrice || 0).toFixed(2)}`;
   const pSale = `${pSym} ${Number(primaryDeal?.salePrice || 0).toFixed(2)}`;
   const pCut = (primaryDeal?.cutPercent ?? 0) > 0 ? ` (-${primaryDeal?.cutPercent}%)` : '';
 
   const lines: string[] = [];
-  lines.push(`${ANSI_CODES.CYAN}${pBadge} ${pShop}${ANSI_CODES.RESET}`);
-  lines.push(`  Regular: ${pReg}`);
-  lines.push(`  Current: ${ANSI_CODES.GREEN}${pSale}${pCut}${ANSI_CODES.RESET}`);
+  lines.push(`${ANSI_CODES.BOLD_CYAN}${pLabel}${ANSI_CODES.RESET}`);
+  lines.push(`  Regular: ${ANSI_CODES.BOLD_WHITE}${pReg}${ANSI_CODES.RESET}`);
+  lines.push(`  Current: ${ANSI_CODES.BOLD_GREEN}${pSale}${pCut}${ANSI_CODES.RESET}`);
 
   if (cheaperAlternative) {
     const aSym = cheaperAlternative.currencySymbol || pSym;
-    const aBadge = resolveStoreBadge(cheaperAlternative.shopName || 'Store');
-    const aShop = cheaperAlternative.shopName || 'Store';
+    const aLabel = formatStoreLabel(cheaperAlternative.shopName || 'Store');
     const aReg = `${aSym} ${Number(cheaperAlternative.regularPrice || 0).toFixed(2)}`;
     const aSale = `${aSym} ${Number(cheaperAlternative.salePrice || 0).toFixed(2)}`;
     const aCut = (cheaperAlternative.cutPercent ?? 0) > 0 ? ` (-${cheaperAlternative.cutPercent}%)` : '';
 
     lines.push('');
-    lines.push(`${ANSI_CODES.YELLOW}${aBadge} ${aShop} ★ Best Value${ANSI_CODES.RESET}`);
+    lines.push(`${ANSI_CODES.BOLD_YELLOW}${aLabel} ★ Best Value${ANSI_CODES.RESET}`);
     if (cheaperAlternative.regularPrice && cheaperAlternative.regularPrice > (cheaperAlternative.salePrice || 0)) {
-      lines.push(`  Regular: ${aReg}`);
+      lines.push(`  Regular: ${ANSI_CODES.BOLD_WHITE}${aReg}${ANSI_CODES.RESET}`);
     }
-    lines.push(`  Deal:    ${ANSI_CODES.GREEN}${aSale}${aCut}${ANSI_CODES.RESET}`);
+    lines.push(`  Deal:    ${ANSI_CODES.BOLD_GREEN}${aSale}${aCut}${ANSI_CODES.RESET}`);
   }
 
   return formatAnsiBlock(lines.join('\n'));

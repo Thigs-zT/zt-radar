@@ -10,6 +10,10 @@ import {
   registerStoreEmoji,
   clearCustomStoreEmojis,
   formatAnsiPriceDiff,
+  formatStoreLabel,
+  getCanonicalStoreName,
+  CUSTOM_STORE_EMOJIS,
+  APPLICATION_EMOJIS,
 } from '../../src/utils/theme.js';
 
 describe('Centralized Theming Engine & Visual Formatting Utilities', () => {
@@ -51,7 +55,6 @@ describe('Centralized Theming Engine & Visual Formatting Utilities', () => {
 
     it('should respect custom barLength parameter', () => {
       const bar = renderProgressBar(3, 4, 8);
-      // 75% of 8 = 6 filled, 2 empty
       expect(bar).toBe('██████░░ 75%');
     });
 
@@ -83,21 +86,47 @@ describe('Centralized Theming Engine & Visual Formatting Utilities', () => {
       const greenText = colorAnsi('Active Promotion', 'GREEN');
       expect(greenText).toBe('\u001b[32mActive Promotion\u001b[0m');
 
-      const cyanText = colorAnsi('System Telemetry', ANSI_CODES.CYAN);
-      expect(cyanText).toBe('\u001b[36mSystem Telemetry\u001b[0m');
+      const boldCyanText = colorAnsi('System Telemetry', ANSI_CODES.BOLD_CYAN);
+      expect(boldCyanText).toBe('\u001b[1;36mSystem Telemetry\u001b[0m');
+    });
+
+    it('should support high-intensity bold ANSI escape codes for dark theme readability', () => {
+      expect(ANSI_CODES.BOLD_GREEN).toBe('\u001b[1;32m');
+      expect(ANSI_CODES.BOLD_YELLOW).toBe('\u001b[1;33m');
+      expect(ANSI_CODES.BOLD_CYAN).toBe('\u001b[1;36m');
+      expect(ANSI_CODES.BOLD_WHITE).toBe('\u001b[1;37m');
     });
 
     it('should inject valid ANSI escape headers inside an ANSI block', () => {
-      const content = `${ANSI_CODES.YELLOW}Notice: Promotion Expiring Soon${ANSI_CODES.RESET}`;
+      const content = `${ANSI_CODES.BOLD_YELLOW}Notice: Promotion Expiring Soon${ANSI_CODES.RESET}`;
       const block = formatAnsiBlock(content);
 
       expect(block).toContain('```ansi');
-      expect(block).toContain('\u001b[33m');
+      expect(block).toContain('\u001b[1;33m');
       expect(block).toContain('\u001b[0m');
     });
   });
 
-  describe('resolveStoreBadge', () => {
+  describe('Custom Store Emojis & Configuration', () => {
+    it('should export centralized custom emoji mapping and application emoji alias', () => {
+      expect(CUSTOM_STORE_EMOJIS).toBeDefined();
+      expect(APPLICATION_EMOJIS).toBe(CUSTOM_STORE_EMOJIS);
+      expect(typeof CUSTOM_STORE_EMOJIS.steam).toBe('string');
+      expect(typeof CUSTOM_STORE_EMOJIS.epic).toBe('string');
+      expect(typeof CUSTOM_STORE_EMOJIS.nuuvem).toBe('string');
+      expect(typeof CUSTOM_STORE_EMOJIS.gog).toBe('string');
+      expect(typeof CUSTOM_STORE_EMOJIS.steam_animated).toBe('string');
+    });
+
+    it('should resolve canonical storefront names properly', () => {
+      expect(getCanonicalStoreName('steam')).toBe('Steam');
+      expect(getCanonicalStoreName('epic games store')).toBe('Epic Games Store');
+      expect(getCanonicalStoreName('nuuvem')).toBe('Nuuvem');
+      expect(getCanonicalStoreName('gog')).toBe('GOG');
+    });
+  });
+
+  describe('resolveStoreBadge & formatStoreLabel (No Redundancy)', () => {
     beforeEach(() => {
       clearCustomStoreEmojis();
       delete process.env.DISCORD_EMOJI_STEAM;
@@ -122,14 +151,25 @@ describe('Centralized Theming Engine & Visual Formatting Utilities', () => {
       expect(resolveStoreBadge('gog')).toBe('[GOG]');
     });
 
-    it('should resolve custom Discord application emojis when registered in registry', () => {
+    it('should eliminate redundancy with formatStoreLabel for fallback tags', () => {
+      // Must return '[Steam]', NOT '[Steam] Steam'
+      expect(formatStoreLabel('Steam')).toBe('[Steam]');
+      expect(formatStoreLabel('Nuuvem')).toBe('[Nuuvem]');
+      expect(formatStoreLabel('GOG')).toBe('[GOG]');
+    });
+
+    it('should output `<:emoji:id> StoreName` with formatStoreLabel when custom emoji is configured', () => {
       registerStoreEmoji('steam', '<:steam_logo:102030405060708090>');
       registerStoreEmoji('nuuvem', '<:nuuvem_badge:987654321098765432>');
 
       expect(resolveStoreBadge('Steam')).toBe('<:steam_logo:102030405060708090>');
+      expect(formatStoreLabel('Steam')).toBe('<:steam_logo:102030405060708090> Steam');
+
       expect(resolveStoreBadge('Nuuvem')).toBe('<:nuuvem_badge:987654321098765432>');
-      // Unregistered store retains fallback
-      expect(resolveStoreBadge('GOG')).toBe('[GOG]');
+      expect(formatStoreLabel('Nuuvem')).toBe('<:nuuvem_badge:987654321098765432> Nuuvem');
+
+      // Unregistered store retains clean fallback without redundancy
+      expect(formatStoreLabel('GOG')).toBe('[GOG]');
     });
 
     it('should resolve custom Discord application emojis from environment variables', () => {
@@ -147,7 +187,11 @@ describe('Centralized Theming Engine & Visual Formatting Utilities', () => {
   });
 
   describe('formatAnsiPriceDiff', () => {
-    it('should render high-contrast single storefront price block', () => {
+    beforeEach(() => {
+      clearCustomStoreEmojis();
+    });
+
+    it('should render high-intensity contrast single storefront price block with zero redundancy', () => {
       const primaryDeal = {
         shopName: 'Steam',
         regularPrice: 59.99,
@@ -159,13 +203,17 @@ describe('Centralized Theming Engine & Visual Formatting Utilities', () => {
       const block = formatAnsiPriceDiff(primaryDeal, null, '$');
 
       expect(block).toContain('```ansi');
-      expect(block).toContain('[Steam] Steam');
-      expect(block).toContain('Regular: $ 59.99');
-      expect(block).toContain('Current: \u001b[32m$ 29.99 (-50%)\u001b[0m');
+      // Must contain '[Steam]' and NOT duplicate '[Steam] Steam'
+      expect(block).toContain('\u001b[1;36m[Steam]\u001b[0m');
+      expect(block).not.toContain('[Steam] Steam');
+      // High-intensity white/gray for regular price
+      expect(block).toContain('Regular: \u001b[1;37m$ 59.99\u001b[0m');
+      // High-intensity green for current promotional price
+      expect(block).toContain('Current: \u001b[1;32m$ 29.99 (-50%)\u001b[0m');
       expect(block).toContain('```');
     });
 
-    it('should render dual storefront comparison with best value highlight', () => {
+    it('should render dual storefront comparison with clean separation and bold yellow best value tag', () => {
       const primaryDeal = {
         shopName: 'Steam',
         regularPrice: 69.99,
@@ -185,10 +233,28 @@ describe('Centralized Theming Engine & Visual Formatting Utilities', () => {
       const block = formatAnsiPriceDiff(primaryDeal, cheaperDeal, '$');
 
       expect(block).toContain('```ansi');
-      expect(block).toContain('[Steam] Steam');
-      expect(block).toContain('[Nuuvem] Nuuvem ★ Best Value');
-      expect(block).toContain('Deal:    \u001b[32m$ 34.99 (-50%)\u001b[0m');
+      expect(block).toContain('\u001b[1;36m[Steam]\u001b[0m');
+      expect(block).not.toContain('[Steam] Steam');
+      // Clean blank line separating the store blocks
+      expect(block).toContain('\n\n');
+      // High-intensity bold yellow best value header
+      expect(block).toContain('\u001b[1;33m[Nuuvem] ★ Best Value\u001b[0m');
+      expect(block).not.toContain('[Nuuvem] Nuuvem');
+      // High-intensity green deal price
+      expect(block).toContain('Deal:    \u001b[1;32m$ 34.99 (-50%)\u001b[0m');
       expect(block).toContain('```');
+    });
+
+    it('should render emoji store tags when custom emojis are registered', () => {
+      registerStoreEmoji('steam', '<:steam_logo:123>');
+      registerStoreEmoji('epic', '<:epic_badge:456>');
+
+      const primary = { shopName: 'Steam', regularPrice: 40, salePrice: 20, cutPercent: 50 };
+      const cheaper = { shopName: 'Epic Games Store', regularPrice: 40, salePrice: 15, cutPercent: 62 };
+
+      const block = formatAnsiPriceDiff(primary, cheaper, '$');
+      expect(block).toContain('<:steam_logo:123> Steam');
+      expect(block).toContain('<:epic_badge:456> Epic Games Store ★ Best Value');
     });
   });
 
