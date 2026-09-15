@@ -52,6 +52,15 @@ import type {
   PlatformStatusEntry,
   DynamoDbWishlistItem,
 } from '../types/index.js';
+import {
+  BRAND_COLORS,
+  UNICODE_ICONS,
+  ANSI_CODES,
+  formatAnsiBlock,
+  formatAnsiPriceDiff,
+  renderProgressBar,
+  resolveStoreBadge,
+} from '../utils/theme.js';
 
 const ddbClient = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(ddbClient);
@@ -73,14 +82,14 @@ const MESSAGE_FLAGS = {
   EPHEMERAL: 64,
 };
 
-const PALETTE = {
-  BRAND: 0x5865F2,
-  SUCCESS: 0x57F287,
-  WARNING: 0xFEE75C,
-  DANGER: 0xED4245,
-  NEUTRAL: 0x2B2D31,
-  STEAM: 0x1B2838,
-  STEAM_ACCENT: 0x66C0F4,
+const PALETTE: Record<string, number> = {
+  BRAND: BRAND_COLORS.DISCORD_BLURPLE,
+  SUCCESS: BRAND_COLORS.SUCCESS,
+  WARNING: BRAND_COLORS.ATL_GOLD,
+  DANGER: BRAND_COLORS.ALERT_CRIMSON,
+  NEUTRAL: BRAND_COLORS.TERMINAL_SLATE,
+  STEAM: BRAND_COLORS.STEAM,
+  STEAM_ACCENT: BRAND_COLORS.STEAM_ACCENT,
 };
 
 function createEphemeralEmbed(
@@ -239,22 +248,30 @@ function buildWishlistPagePayload(
   const sym = userCurrency === 'BRL' ? 'R$' : '$';
 
   const formattedList = pageItems
-    .map((item) => {
-      const target = item.target_price
-        ? `\n  └─ Target Price: **${sym} ${Number(item.target_price).toFixed(2)}**`
-        : item.min_discount
-          ? `\n  └─ Threshold: **≥ -${item.min_discount}% off**${item.min_rating ? ` (Score ≥ ${item.min_rating})` : ''}`
-          : '\n  └─ Target Price: **Any promotional drop**';
-      return `❖ **${item.game_title}**${target}`;
+    .map((item, index) => {
+      const itemNum = String(startIndex + index + 1).padStart(2, '0');
+      let statusTag = '`[ANY SALE]`';
+      let ruleDetail = 'Rule: Any promotional drop';
+
+      if (item.target_price) {
+        statusTag = '`[TARGET]`';
+        ruleDetail = `Target Price: **${sym} ${Number(item.target_price).toFixed(2)}**`;
+      } else if (item.min_discount) {
+        statusTag = '`[THRESHOLD]`';
+        const ratingPart = item.min_rating ? ` • Rating: **≥ ${item.min_rating}/100**` : '';
+        ruleDetail = `Discount: **≥ -${item.min_discount}% off**${ratingPart}`;
+      }
+
+      return `▸ \`${itemNum}\` ${statusTag} **${item.game_title}**\n   └─ ${ruleDetail}`;
     })
     .join('\n\n');
 
   const listEmbed: DiscordEmbed = {
-    title: `Personal Radar Registry ❖ ${totalItems} Active`,
+    title: `Personal Radar Registry ❖ ${totalItems} Monitored Titles`,
     description: formattedList,
-    color: PALETTE.BRAND,
+    color: BRAND_COLORS.DISCORD_BLURPLE,
     footer: {
-      text: `Page ${page} of ${totalPages} ❖ ${totalItems} tracked titles (Display Currency: ${userCurrency})`,
+      text: `Page ${page} of ${totalPages} • ${totalItems} tracked titles • Currency: ${userCurrency}`,
     },
     timestamp: new Date().toISOString(),
   };
@@ -1398,10 +1415,14 @@ export const handler = async (
           .sort((a, b) => b[1] - a[1])
           .slice(0, 5);
 
-        let communityTelemetry = 'No titles monitored by the community yet.';
+        const maxWishlistCount = sortedTitles.length > 0 ? sortedTitles[0][1] : 1;
+        let communityTelemetry = '*No titles monitored by the community yet.*';
         if (sortedTitles.length > 0) {
           communityTelemetry = sortedTitles
-            .map(([title, count], idx) => `▸ **#${idx + 1} ${title}** — \`${count}\` tracker${count > 1 ? 's' : ''}`)
+            .map(([title, count], idx) => {
+              const bar = renderProgressBar(count, maxWishlistCount, 8);
+              return `▸ **#${idx + 1} ${title}**\n   └─ \`${bar}\` (${count} tracker${count > 1 ? 's' : ''})`;
+            })
             .join('\n');
         }
 
@@ -1409,37 +1430,51 @@ export const handler = async (
         const thirdPartyStatus = guildConfig?.include_third_party ? 'Enabled (Nuuvem & GOG)' : 'Disabled (Steam & Epic Only)';
         const serverSummary = guildId
           ? guildConfig
-            ? `▸ Channel: <#${guildConfig.alert_channel_id}>\n▸ Currency: **${serverCurrency}** (${serverCurrency === 'BRL' ? 'R$' : '$'})\n▸ Store Coverage: **${thirdPartyStatus}**\n▸ Thresholds: **≥ ${guildConfig.min_discount || 70}% off** | **≥ ${guildConfig.min_rating || 80}/100 score**\n▸ Mode: **${guildConfig.free_only ? 'Free Promotions Only' : 'Full Curated Radar'}**`
+            ? `▸ Channel: <#${guildConfig.alert_channel_id}>\n▸ Currency: **${serverCurrency}** (${serverCurrency === 'BRL' ? 'R$' : '$'})\n▸ Store Coverage: **${thirdPartyStatus}**\n▸ Thresholds: **≥ ${guildConfig.min_discount || 70}% off** • **≥ ${guildConfig.min_rating || 80}/100 score**\n▸ Mode: **${guildConfig.free_only ? 'Free Promotions Only' : 'Full Curated Radar'}**`
             : 'No alert channel active for this guild. Use `/config-channel` to configure.'
           : 'Direct Message session. Guild-level configurations do not apply.';
+
+        const registryDensityBar = renderProgressBar(wishlistItems.length, Math.max(allItems.length, 1), 10);
+
+        const runtimeTelemetry = formatAnsiBlock(
+          [
+            `${ANSI_CODES.CYAN}Platform:${ANSI_CODES.RESET}      AWS Lambda (Graviton arm64)`,
+            `${ANSI_CODES.CYAN}Engine:${ANSI_CODES.RESET}        Node.js 22.x LTS (ESM Strict)`,
+            `${ANSI_CODES.GREEN}Operational:${ANSI_CODES.RESET}   100% Nominal (Sub-300ms Cold)`,
+          ].join('\n')
+        );
 
         const statusEmbed = {
           title: 'zT Radar ❖ System Telemetry & Community Intelligence',
           description: 'High-precision game deal tracking engine hosted on AWS Serverless infrastructure.',
-          color: PALETTE.BRAND,
+          color: BRAND_COLORS.DISCORD_BLURPLE,
           fields: [
             {
-              name: 'Compute & Runtime Architecture',
-              value: '```yaml\nRuntime: Node.js 22.x LTS\nArchitecture: AWS Graviton (arm64)\nLatency: Sub-second (Cold: ~300ms)\n```',
+              name: '❖ Compute & Runtime Architecture',
+              value: runtimeTelemetry,
               inline: false,
             },
             {
-              name: 'Database & Registry Metrics',
-              value: `▸ Total Database Items: **${allItems.length}**\n▸ Active User Wishlists: **${wishlistItems.length} titles** tracked`,
+              name: '❖ Database & Registry Density',
+              value: [
+                `▸ Density: \`${registryDensityBar}\``,
+                `▸ Active Wishlists: **${wishlistItems.length}** tracked titles`,
+                `▸ Total Storage Records: **${allItems.length}** items`,
+              ].join('\n'),
               inline: true,
             },
             {
-              name: 'Guild Context',
+              name: '❖ Guild Context',
               value: `▸ Target Guild: **${guildId || 'Direct Message'}**`,
               inline: true,
             },
             {
-              name: 'Community Top 5 Most-Wished Titles (Anonymous)',
+              name: '❖ Community Top 5 Tracked Titles (Anonymous)',
               value: communityTelemetry,
               inline: false,
             },
             {
-              name: 'Guild Broadcast Scope',
+              name: '❖ Guild Broadcast Scope',
               value: serverSummary,
               inline: false,
             },
@@ -1700,27 +1735,31 @@ export const handler = async (
         const sym = dealInfo.primaryDeal.currencySymbol || (preferredCurrency === 'BRL' ? 'R$' : '$');
         const bestOffer = dealInfo.cheaperAlternative || dealInfo.primaryDeal;
 
-        const diffBlock = formatPriceComparisonDiff(dealInfo.primaryDeal, dealInfo.cheaperAlternative, sym);
+        const ansiPriceBlock = formatAnsiPriceDiff(dealInfo.primaryDeal, dealInfo.cheaperAlternative, sym);
+        const primaryBadge = resolveStoreBadge(dealInfo.primaryDeal.shopName);
+        const altBadge = dealInfo.cheaperAlternative ? resolveStoreBadge(dealInfo.cheaperAlternative.shopName) : '';
+
         const fieldName = dealInfo.cheaperAlternative
-          ? `Price Comparison ❖ ${dealInfo.primaryDeal.shopName} vs ${dealInfo.cheaperAlternative.shopName}`
-          : `Price Overview ❖ ${dealInfo.primaryDeal.shopName}`;
+          ? `❖ Price Matrix: ${primaryBadge} ${dealInfo.primaryDeal.shopName} vs ${altBadge} ${dealInfo.cheaperAlternative.shopName}`
+          : `❖ Price Intelligence: ${primaryBadge} ${dealInfo.primaryDeal.shopName}`;
 
         const fields = [
           {
             name: fieldName,
-            value: diffBlock,
+            value: ansiPriceBlock,
             inline: false,
           },
         ];
 
         if (dealInfo.storeBreakdown && Object.keys(dealInfo.storeBreakdown).length > 0) {
           const breakdownList = Object.values(dealInfo.storeBreakdown).map((s) => {
-            const cutTxt = s.cutPercent > 0 ? ` (-${s.cutPercent}%)` : '';
-            return `▸ **${s.shopName}**: ${sym} ${s.salePrice.toFixed(2)}${cutTxt}`;
+            const badge = resolveStoreBadge(s.shopName);
+            const cutTxt = s.cutPercent > 0 ? ` **(-${s.cutPercent}%)**` : '';
+            return `▸ ${badge} **${s.shopName}**: ${sym} ${s.salePrice.toFixed(2)}${cutTxt}`;
           });
 
           fields.push({
-            name: 'Storefront Availability',
+            name: '❖ Storefront Availability',
             value: breakdownList.join('\n'),
             inline: false,
           });
@@ -1732,15 +1771,15 @@ export const handler = async (
           let atlStatus = '';
 
           if (isRealAtl) {
-            atlStatus = `▸ **${sym} ${dealInfo.allTimeLowPrice.toFixed(2)}**\n└─ **MATCHES LOWEST PRICE EVER!**`;
+            atlStatus = `▸ **${sym} ${dealInfo.allTimeLowPrice.toFixed(2)}**\n└─ ★ **MATCHES HISTORICAL RECORD LOW!**`;
           } else if (diffFromAtl > 0) {
-            atlStatus = `▸ **${sym} ${dealInfo.allTimeLowPrice.toFixed(2)}**\n└─ Current price is ${sym} ${diffFromAtl.toFixed(2)} above record low.`;
+            atlStatus = `▸ **${sym} ${dealInfo.allTimeLowPrice.toFixed(2)}**\n└─ Current offer is +${sym} ${diffFromAtl.toFixed(2)} above record low.`;
           } else {
-            atlStatus = `▸ **${sym} ${dealInfo.allTimeLowPrice.toFixed(2)}**\n└─ Standard retail price.`;
+            atlStatus = `▸ **${sym} ${dealInfo.allTimeLowPrice.toFixed(2)}**\n└─ Standard catalog retail benchmark.`;
           }
 
           fields.push({
-            name: 'Historical Low (ATL)',
+            name: '❖ Historical Low (ATL)',
             value: atlStatus,
             inline: true,
           });
@@ -1748,8 +1787,8 @@ export const handler = async (
 
         if (dealInfo.reviewScore) {
           fields.push({
-            name: 'Community Approval',
-            value: `▸ **${dealInfo.reviewScore}/100** score`,
+            name: '❖ Steam Community Approval',
+            value: `▸ **${dealInfo.reviewScore}/100** Rating Score`,
             inline: true,
           });
         }
@@ -1784,13 +1823,20 @@ export const handler = async (
 
         const components = buttons.length > 0 ? [{ type: 1, components: buttons.slice(0, 5) }] : [];
 
+        const isAtlDeal = dealInfo.isAllTimeLow && bestOffer.cutPercent > 0 && bestOffer.salePrice < bestOffer.regularPrice;
+        const compareColor = isAtlDeal
+          ? BRAND_COLORS.ATL_GOLD
+          : bestOffer.cutPercent > 0
+            ? BRAND_COLORS.SUCCESS
+            : BRAND_COLORS.DISCORD_BLURPLE;
+
         const embed: DiscordEmbed = {
           title: `zT Radar ❖ Price Comparison: ${dealInfo.title}`,
-          description: `Live price comparison in **${preferredCurrency} (${sym})**.`,
-          color: (dealInfo.isAllTimeLow && bestOffer.cutPercent > 0 && bestOffer.salePrice < bestOffer.regularPrice) ? PALETTE.SUCCESS : PALETTE.BRAND,
+          description: `Live cross-store price comparison in **${preferredCurrency} (${sym})**.`,
+          color: compareColor,
           fields,
           footer: {
-            text: `Currency: ${preferredCurrency} • Authorized: Steam, Epic, Nuuvem, GOG`,
+            text: `Display Currency: ${preferredCurrency} • Authorized: Steam, Epic, Nuuvem, GOG`,
           },
           timestamp: new Date().toISOString(),
         };
@@ -1871,37 +1917,49 @@ export const handler = async (
       const helpEmbed = {
         title: 'zT Radar ❖ Command Directory',
         description: 'Comprehensive directory of gaming intelligence, price monitoring, and server broadcast commands.',
-        color: PALETTE.BRAND,
+        color: BRAND_COLORS.DISCORD_BLURPLE,
         fields: [
           {
-            name: '❖ Personal & Market Intelligence [DM & Server]',
+            name: '❖ Core Deal & Market Intelligence',
             value: [
-              '▸ `/compare <game>`\n  └─ Price check across Steam, Epic, Nuuvem & GOG with ATL.',
-              '▸ `/can-it-run <game>`\n  └─ Minimum & recommended PC specs from Steam.',
-              '▸ `/game-news <game>`\n  └─ Patch notes, news, and developer dispatches.',
-              '▸ `/how-long-to-beat <game>`\n  └─ Completion times and cost-per-hour metrics.',
-              '▸ `/steam-most-played`\n  └─ Top 10 most-played Steam titles by players.',
-              '▸ `/steam-trending`\n  └─ Top 10 surging games on the Steam Store.',
-              '▸ `/platform-status`\n  └─ Service availability for Steam, Epic, PSN & Xbox.',
-              '▸ `/wishlist <add|list|clear|remove|sync-steam>`\n  └─ Track deals & price targets.',
-              '▸ `/currency <choice>`\n  └─ Set personal currency between USD ($) and BRL (R$).',
-              '▸ `/steam-link [target]`\n  └─ Link Steam account (Valve OpenID one-click, SteamID64, or vanity).',
-              '▸ `/steam-profile [user] [target]`\n  └─ View profile overview, VAC status, and stats.',
-              '▸ `/game-match <target1> <target2> [filter]`\n  └─ Discover shared co-op & multiplayer games across two libraries.',
-              '▸ `/steam-duel <target1> <target2>`\n  └─ Compare playtime and achievement dominance on common games.',
-              '▸ `/steam-backlog [target]`\n  └─ Telemetry on unplayed games, backlog percentage & wasted value.',
-              '▸ `/free-play-radar`\n  └─ Browse active free giveaways and Free Weekends.',
-              '▸ `/free-radar-dm <enabled>`\n  └─ Toggle automated DM alerts for free games.',
+              '▸ `/compare <game>`\n  └─ Price check across Steam, Epic, Nuuvem & GOG with ATL & ANSI contrast.',
+              '▸ `/can-it-run <game>`\n  └─ Minimum & recommended PC specifications from Steam.',
+              '▸ `/game-news <game>`\n  └─ Official patch notes, news dispatches, and developer updates.',
+              '▸ `/how-long-to-beat <game>`\n  └─ Campaign completion times and cost-per-hour metrics.',
+              '▸ `/free-play-radar`\n  └─ Active 100% off promotions, giveaways, and Free Weekends.',
             ].join('\n'),
             inline: false,
           },
           {
-            name: '❖ Server Administration & Curated Radar [Server Only • Requires Manage Server]',
+            name: '❖ Steam Social & Identity Analytics',
+            value: [
+              '▸ `/steam-link [target]`\n  └─ Link Steam account via Valve OpenID 2.0 or SteamID64.',
+              '▸ `/steam-profile [user] [target]`\n  └─ Steam profile summary, VAC status, and library telemetry.',
+              '▸ `/game-match <target1> <target2> [filter]`\n  └─ Discover shared co-op & multiplayer games across two libraries.',
+              '▸ `/steam-duel <target1> <target2>`\n  └─ Compare playtime and achievement dominance on common titles.',
+              '▸ `/steam-backlog [target]`\n  └─ Telemetry on unplayed titles, backlog percentage & wasted value.',
+              '▸ `/steam-most-played`\n  └─ Top 10 most-played Steam titles by concurrent players.',
+              '▸ `/steam-trending`\n  └─ Top 10 surging games on the Steam Store.',
+            ].join('\n'),
+            inline: false,
+          },
+          {
+            name: '❖ Personal Preferences & Radar Monitoring',
+            value: [
+              '▸ `/wishlist <add|list|clear|remove|sync-steam>`\n  └─ Track deals, set target prices, and sync Steam wishlist.',
+              '▸ `/currency <choice>`\n  └─ Set personal currency between USD ($) and BRL (R$).',
+              '▸ `/free-radar-dm <enabled>`\n  └─ Toggle automated DM notifications for free game promotions.',
+            ].join('\n'),
+            inline: false,
+          },
+          {
+            name: '❖ Server Broadcast & Administration [Manage Server]',
             value: [
               '▸ `/config-channel <channel> [currency] [include_third_party] [free_only]`\n  └─ Route curated deals and free game broadcasts into a server channel.',
               '▸ `/config-channel-experimental [min_discount] [min_rating]`\n  └─ Configure minimum discount and community rating broadcast filters.',
               '▸ `/config-channel-remove`\n  └─ Deactivate automatic deal and giveaway broadcasts for this server.',
-              '▸ `/radar-status`\n  └─ Display server broadcast configuration and system operational status.',
+              '▸ `/radar-status`\n  └─ Display server broadcast configuration and system operational telemetry.',
+              '▸ `/platform-status`\n  └─ Real-time service health check for Steam, Epic, PSN & Xbox Live.',
             ].join('\n'),
             inline: false,
           },
@@ -1909,6 +1967,7 @@ export const handler = async (
         footer: {
           text: 'zT Radar • Gaming Intelligence & Deal Radar',
         },
+        timestamp: new Date().toISOString(),
       };
 
       return {
