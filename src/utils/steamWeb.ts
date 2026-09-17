@@ -342,8 +342,68 @@ export async function getCompletePlayerProfile(rawTarget: string, apiKey: string
 }
 
 // ---------------------------------------------------------------------------
-// Wishlist
+// Steam Level & Badge Count
 // ---------------------------------------------------------------------------
+
+/**
+ * Fetches the current Steam Level for a given SteamID64.
+ * Returns null if the profile is private or the API call fails.
+ */
+export async function getSteamLevel(steamId64: string, apiKey: string): Promise<number | null> {
+  if (!steamId64 || !apiKey) return null;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 1800);
+
+  try {
+    const url = `${API_BASE}/IPlayerService/GetSteamLevel/v1/?key=${apiKey}&steamid=${steamId64}`;
+    const res = await fetch(url, {
+      headers: { 'User-Agent': USER_AGENT },
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+
+    if (!res.ok) return null;
+
+    const data = await res.json() as { response?: { player_level?: number } };
+    const level = data?.response?.player_level;
+    return typeof level === 'number' ? level : null;
+  } catch {
+    clearTimeout(timer);
+    return null;
+  }
+}
+
+/**
+ * Fetches the total badge count for a given SteamID64.
+ * Returns null if the profile is private or the API call fails.
+ */
+export async function getPlayerBadgeCount(steamId64: string, apiKey: string): Promise<number | null> {
+  if (!steamId64 || !apiKey) return null;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 1800);
+
+  try {
+    const url = `${API_BASE}/IPlayerService/GetBadges/v1/?key=${apiKey}&steamid=${steamId64}`;
+    const res = await fetch(url, {
+      headers: { 'User-Agent': USER_AGENT },
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+
+    if (!res.ok) return null;
+
+    const data = await res.json() as { response?: { badges?: unknown[] } };
+    const badges = data?.response?.badges;
+    return Array.isArray(badges) ? badges.length : null;
+  } catch {
+    clearTimeout(timer);
+    return null;
+  }
+}
+
+
 
 type RawWishlistItem = {
   appid?: number | string;
@@ -834,6 +894,88 @@ export async function getPlayerAchievementsSafe(
 }
 
 /**
+ * Fetches the full achievement list for a player in a specific game,
+ * including display names, descriptions, and unlock timestamps.
+ * Sorted: unlocked (most recent first), then locked alphabetically.
+ * Returns null if achievements are private, unsupported, or an error occurs.
+ */
+export async function getPlayerAchievementsForGame(
+  steamId64: string,
+  appId: number,
+  apiKey: string,
+): Promise<import('../types/index.js').PlayerAchievementsResult | null> {
+  if (!steamId64 || !appId || !apiKey) return null;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 2000);
+
+  type RawAch = {
+    apiname: string;
+    achieved: number;
+    unlocktime?: number;
+    name?: string;
+    description?: string;
+  };
+
+  type RawAchResponse = {
+    playerstats?: {
+      gameName?: string;
+      achievements?: RawAch[];
+    };
+  };
+
+  try {
+    const url = `${API_BASE}/ISteamUserStats/GetPlayerAchievements/v1/?key=${apiKey}&steamid=${steamId64}&appid=${appId}&l=english`;
+    const res = await fetch(url, {
+      headers: { 'User-Agent': USER_AGENT },
+      signal: controller.signal,
+    });
+
+    clearTimeout(timer);
+
+    if (!res.ok) return null;
+
+    const data = await res.json() as RawAchResponse;
+    const rawAchs = data?.playerstats?.achievements;
+
+    if (!Array.isArray(rawAchs) || rawAchs.length === 0) return null;
+
+    const total = rawAchs.length;
+    const unlocked = rawAchs.filter((a) => a.achieved === 1).length;
+    const percent = total > 0 ? Math.round((unlocked / total) * 100) : 0;
+
+    const sorted = [...rawAchs].sort((a, b) => {
+      if (a.achieved === 1 && b.achieved === 1) {
+        // Most recently unlocked first
+        return (b.unlocktime ?? 0) - (a.unlocktime ?? 0);
+      }
+      if (a.achieved === 1) return -1;
+      if (b.achieved === 1) return 1;
+      // Locked: alphabetical
+      return (a.name ?? a.apiname).localeCompare(b.name ?? b.apiname);
+    });
+
+    return {
+      total,
+      unlocked,
+      percent,
+      gameName: data?.playerstats?.gameName ?? null,
+      achievements: sorted.map((a) => ({
+        apiName: a.apiname,
+        displayName: a.name ?? a.apiname,
+        description: a.description ?? '',
+        achieved: a.achieved === 1,
+        unlockTime: a.unlocktime ?? 0,
+      })),
+    };
+  } catch {
+    clearTimeout(timer);
+    return null;
+  }
+}
+
+
+/**
  * End-to-end library comparison between two Steam IDs.
  */
 export async function compareLibraries(
@@ -1246,13 +1388,36 @@ type PlayerSummaryLike = {
 };
 
 /**
- * Generates Discord interaction embed and pagination components for Steam Library Duel.
+ * Generates a single high-impact Discord Rich Embed for the Steam Library Duel command.
+ * Unified architecture: single embed combining dominance scoreboard, enrichment metrics,
+ * and paginated shared-titles diff blocks. Player A avatar in author, Player B in thumbnail.
+ *
+ * @param comparison - Library comparison result from compareLibraries()
+ * @param summaryA - Player A profile summary
+ * @param summaryB - Player B profile summary
+ * @param page - Current pagination page (1-indexed)
+ * @param steamLevelA - Optional: Player A's Steam Level (null if unavailable)
+ * @param steamLevelB - Optional: Player B's Steam Level (null if unavailable)
+ * @param badgeCountA - Optional: Player A's total badge count (null if unavailable)
+ * @param badgeCountB - Optional: Player B's total badge count (null if unavailable)
+ * @param accountAgeA - Optional: Player A's account creation date (ISO string or YYYY-MM-DD)
+ * @param accountAgeB - Optional: Player B's account creation date (ISO string or YYYY-MM-DD)
+ * @param countA - Optional: Player A's total library game count
+ * @param countB - Optional: Player B's total library game count
  */
 export function buildDuelEmbedPayload(
   comparison: LibraryComparisonResult,
   summaryA: PlayerSummaryLike,
   summaryB: PlayerSummaryLike,
   page: number = 1,
+  steamLevelA: number | null = null,
+  steamLevelB: number | null = null,
+  badgeCountA: number | null = null,
+  badgeCountB: number | null = null,
+  accountAgeA: string | null = null,
+  accountAgeB: string | null = null,
+  countA: number | null = null,
+  countB: number | null = null,
 ): EmbedPayload {
   const PAGE_SIZE = 4;
   const totalGames = comparison?.commonGames?.length ?? 0;
@@ -1267,6 +1432,41 @@ export function buildDuelEmbedPayload(
   const avatarA = summaryA?.avatarUrl ?? summaryA?.avatarfull ?? null;
   const avatarB = summaryB?.avatarUrl ?? summaryB?.avatarfull ?? null;
 
+  const commonCount = comparison.commonCount ?? comparison.totalCommon ?? 0;
+
+  // ---------------------------------------------------------------------------
+  // Dominance Scoreboard — ANSI codeblock
+  // ---------------------------------------------------------------------------
+  const winsA = comparison.winsA ?? 0;
+  const winsB = comparison.winsB ?? 0;
+  const overallWinner = comparison.overallWinner ?? 'TIE';
+
+  const BOLD_CYAN  = '\u001b[1;36m';
+  const BOLD_GREEN = '\u001b[1;32m';
+  const BOLD_YELLOW= '\u001b[1;33m';
+  const BOLD_WHITE = '\u001b[1;37m';
+  const RESET      = '\u001b[0m';
+
+  const dominantLabel =
+    overallWinner === 'A' ? `${BOLD_GREEN}${personaA} DOMINATES${RESET}` :
+    overallWinner === 'B' ? `${BOLD_GREEN}${personaB} DOMINATES${RESET}` :
+                            `${BOLD_YELLOW}DEAD HEAT${RESET}`;
+
+  const ansiLines: string[] = [
+    `${BOLD_CYAN}Steam Library Duel Scoreboard${RESET}`,
+    ``,
+    `  ${BOLD_WHITE}${personaA}${RESET}   [ ${BOLD_GREEN}${winsA}${RESET} ] vs [ ${BOLD_GREEN}${winsB}${RESET} ]   ${BOLD_WHITE}${personaB}${RESET}`,
+    ``,
+    `  Verdict:  ${dominantLabel}`,
+    `  Shared:   ${BOLD_WHITE}${commonCount}${RESET} common titles`,
+    `  Playtime: ${BOLD_WHITE}${comparison.totalHoursA}h${RESET} vs ${BOLD_WHITE}${comparison.totalHoursB}h${RESET}`,
+  ];
+
+  const scoreboardAnsi = `\`\`\`ansi\n${ansiLines.join('\n')}\n\`\`\``;
+
+  // ---------------------------------------------------------------------------
+  // Paginated shared-titles diff blocks (field)
+  // ---------------------------------------------------------------------------
   const startIdx = (currentPage - 1) * PAGE_SIZE;
   const pageGames = (comparison?.commonGames ?? []).slice(startIdx, startIdx + PAGE_SIZE);
 
@@ -1292,33 +1492,76 @@ export function buildDuelEmbedPayload(
         '```diff',
         `[ ${g.name} ]`,
         `! ${personaA}: ${g.hoursA} hrs`,
-        `! ${personaB}: ${g.hoursB} hrs (Tied Playtime)`,
+        `! ${personaB}: ${g.hoursB} hrs (Tied)`,
         '```',
       ].join('\n');
     }
   }).join('\n');
 
-  const commonCount = comparison.commonCount ?? comparison.totalCommon ?? 0;
-  const scoreboardDescription = [
-    `Dominance Score: **${comparison.winsA}** (${personaA}) vs **${comparison.winsB}** (${personaB})`,
-    `Total Time Invested: **${comparison.totalHoursA}h** vs **${comparison.totalHoursB}h** \u2022 **${commonCount}** Shared Titles`,
-  ].join('\n');
+  // ---------------------------------------------------------------------------
+  // Enrichment Fields
+  // ---------------------------------------------------------------------------
+  const fields: import('../types/index.js').DiscordEmbedField[] = [
+    {
+      name: '\u25b8 Library',
+      value: `**${personaA}**: ${countA ?? commonCount} games\n**${personaB}**: ${countB ?? commonCount} games`,
+      inline: true,
+    },
+    {
+      name: '\u25b8 Total Playtime',
+      value: `**${personaA}**: ${comparison.totalHoursA}h\n**${personaB}**: ${comparison.totalHoursB}h`,
+      inline: true,
+    },
+  ];
 
-  const embed1: DiscordEmbed = {
+  if (steamLevelA !== null || steamLevelB !== null) {
+    const levelA = steamLevelA !== null ? `Lv. ${steamLevelA}` : 'N/A';
+    const levelB = steamLevelB !== null ? `Lv. ${steamLevelB}` : 'N/A';
+    fields.push({
+      name: '\u25b8 Steam Level',
+      value: `**${personaA}**: ${levelA}\n**${personaB}**: ${levelB}`,
+      inline: true,
+    });
+  }
+
+  if (badgeCountA !== null || badgeCountB !== null) {
+    const bA = badgeCountA !== null ? `${badgeCountA} badges` : 'N/A';
+    const bB = badgeCountB !== null ? `${badgeCountB} badges` : 'N/A';
+    fields.push({
+      name: '\u25b8 Badges',
+      value: `**${personaA}**: ${bA}\n**${personaB}**: ${bB}`,
+      inline: true,
+    });
+  }
+
+  if (accountAgeA || accountAgeB) {
+    const ageA = accountAgeA ? accountAgeA.substring(0, 10) : 'N/A';
+    const ageB = accountAgeB ? accountAgeB.substring(0, 10) : 'N/A';
+    fields.push({
+      name: '\u25b8 Account Since',
+      value: `**${personaA}**: ${ageA}\n**${personaB}**: ${ageB}`,
+      inline: true,
+    });
+  }
+
+  // Shared titles diff block as its own field
+  fields.push({
+    name: `\u25b8 Shared Titles [Page ${currentPage}/${totalPages}]`,
+    value: diffBlocks || '*No shared titles on this page.*',
+    inline: false,
+  });
+
+  // ---------------------------------------------------------------------------
+  // Unified Embed
+  // ---------------------------------------------------------------------------
+  const embed: DiscordEmbed = {
     author: {
-      name: `${personaA} vs ${personaB} \u2022 Steam Duel`,
+      name: `${personaA} \u2756 vs \u2756 ${personaB} \u2014 Steam Duel`,
       icon_url: avatarA ?? undefined,
     },
-    title: 'Steam Library Duel Overview',
-    description: scoreboardDescription,
+    description: scoreboardAnsi,
     color: 0x5865f2,
-    thumbnail: avatarA ? { url: avatarA } : undefined,
-  };
-
-  const embed2: DiscordEmbed = {
-    title: `Shared Titles Playtime Comparison [Page ${currentPage}/${totalPages}]`,
-    description: diffBlocks || '*No shared titles on this page.*',
-    color: 0x5865f2,
+    fields,
     thumbnail: avatarB ? { url: avatarB } : undefined,
     footer: {
       text: `Page ${currentPage} of ${totalPages} \u2022 zT Radar \u2022 Steam Duel`,
@@ -1348,8 +1591,9 @@ export function buildDuelEmbedPayload(
     },
   ] : [];
 
-  return { embed: embed1, embeds: [embed1, embed2], components };
+  return { embed, embeds: [embed], components };
 }
+
 
 // ---------------------------------------------------------------------------
 // Embed Builders — Backlog
@@ -1800,4 +2044,123 @@ export function buildGameMatchEmbedPayload(
   ] : [];
 
   return { embed: embed1, embeds: [embed1, embed2], components };
+}
+
+// ---------------------------------------------------------------------------
+// Embed Builders — Achievements
+// ---------------------------------------------------------------------------
+
+/**
+ * Generates a single Discord Rich Embed for the /steam-achievements command.
+ * Color-coded by completion rate. Shows ANSI progress bar, recent unlocks, and next targets.
+ *
+ * @param achievementResult - Full achievement result from getPlayerAchievementsForGame()
+ * @param summary - Player profile summary
+ * @param gameTitle - Display title of the game being queried
+ */
+export function buildAchievementsEmbedPayload(
+  achievementResult: import('../types/index.js').PlayerAchievementsResult,
+  summary: PlayerSummaryLike,
+  gameTitle: string,
+): EmbedPayload {
+  const personaName = summary?.personaName ?? summary?.personaname ?? 'Player';
+  const avatarUrl = summary?.avatarUrl ?? summary?.avatarfull ?? null;
+
+  const { total, unlocked, percent, gameName } = achievementResult;
+  const resolvedTitle = gameName ?? gameTitle;
+
+  // Color based on completion percentage
+  const color =
+    percent >= 80 ? 0x2ecc71  // SUCCESS green
+    : percent >= 40 ? 0xf1c40f // ATL_GOLD yellow
+    : 0xe74c3c;                  // ALERT_CRIMSON red
+
+  // ANSI progress bar using renderProgressBar-style logic inline
+  const BAR_LENGTH = 12;
+  const ratio = Math.min(1, Math.max(0, percent / 100));
+  const filledCount = Math.round(ratio * BAR_LENGTH);
+  const emptyCount = BAR_LENGTH - filledCount;
+  const progressBar = '\u2588'.repeat(filledCount) + '\u2591'.repeat(emptyCount);
+
+  const BOLD_GREEN  = '\u001b[1;32m';
+  const BOLD_YELLOW = '\u001b[1;33m';
+  const BOLD_WHITE  = '\u001b[1;37m';
+  const BOLD_CYAN   = '\u001b[1;36m';
+  const RESET       = '\u001b[0m';
+
+  const barColor = percent >= 80 ? BOLD_GREEN : percent >= 40 ? BOLD_YELLOW : '\u001b[1;31m';
+
+  const ansiLines = [
+    `${BOLD_CYAN}Achievement Progress${RESET}`,
+    ``,
+    `  ${barColor}${progressBar}${RESET}  ${BOLD_WHITE}${percent}%${RESET}`,
+    `  ${BOLD_WHITE}${unlocked}${RESET} / ${BOLD_WHITE}${total}${RESET} Achievements Unlocked`,
+  ];
+
+  const description = `\`\`\`ansi\n${ansiLines.join('\n')}\n\`\`\``;
+
+  // Recently unlocked achievements (up to 5, most recent first)
+  const recentlyUnlocked = achievementResult.achievements
+    .filter((a) => a.achieved)
+    .slice(0, 5);
+
+  // Next targets: locked achievements (alphabetical, up to 5)
+  const nextTargets = achievementResult.achievements
+    .filter((a) => !a.achieved)
+    .slice(0, 5);
+
+  const fields: import('../types/index.js').DiscordEmbedField[] = [];
+
+  if (recentlyUnlocked.length > 0) {
+    const unlockedText = recentlyUnlocked.map((a) => {
+      const desc = a.description ? ` — ${a.description}` : '';
+      const truncated = desc.length > 80 ? desc.substring(0, 77) + '...' : desc;
+      return `\u25b8 **${a.displayName}**${truncated}`;
+    }).join('\n');
+
+    fields.push({
+      name: '\u2756 Recently Unlocked',
+      value: unlockedText.substring(0, 1024),
+      inline: false,
+    });
+  }
+
+  if (nextTargets.length > 0) {
+    const lockedText = nextTargets.map((a) => {
+      const desc = a.description ? ` — ${a.description}` : '';
+      const truncated = desc.length > 80 ? desc.substring(0, 77) + '...' : desc;
+      return `\u25b8 **${a.displayName}**${truncated}`;
+    }).join('\n');
+
+    fields.push({
+      name: '\u25cb Next Targets',
+      value: lockedText.substring(0, 1024),
+      inline: false,
+    });
+  }
+
+  if (recentlyUnlocked.length === 0 && nextTargets.length === 0) {
+    fields.push({
+      name: '\u25b8 Status',
+      value: '*Achievement data unavailable for this game.*',
+      inline: false,
+    });
+  }
+
+  const embed: DiscordEmbed = {
+    author: {
+      name: `${personaName} \u2014 Achievement Progress`,
+      icon_url: avatarUrl ?? undefined,
+    },
+    title: resolvedTitle,
+    description,
+    color,
+    fields,
+    footer: {
+      text: 'zT Radar \u2022 Steam Achievements',
+    },
+    timestamp: new Date().toISOString(),
+  };
+
+  return { embed, embeds: [embed], components: [] };
 }

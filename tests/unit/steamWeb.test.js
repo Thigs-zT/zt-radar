@@ -3,6 +3,8 @@ import {
   calculateBacklogMsrp,
   compareLibraryData,
   matchLibraryData,
+  buildDuelEmbedPayload,
+  buildAchievementsEmbedPayload,
 } from '../../src/utils/steamWeb.js';
 
 describe('Steam Web Intelligence Utilities', () => {
@@ -175,5 +177,216 @@ describe('Steam Web Intelligence Utilities', () => {
       expect(result.matchedCount).toBe(0);
       expect(result.games).toEqual([]);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildDuelEmbedPayload — Unified Single Embed Architecture
+// ---------------------------------------------------------------------------
+describe('buildDuelEmbedPayload (unified single embed)', () => {
+  const mockComparison = {
+    commonCount: 3,
+    totalCommon: 3,
+    winsA: 2,
+    winsB: 1,
+    ties: 0,
+    overallWinner: 'A',
+    totalHoursA: '45.0',
+    totalHoursB: '30.0',
+    countA: 120,
+    countB: 85,
+    commonGames: [
+      { appid: 730, name: 'Counter-Strike 2', playtimeA: 1200, playtimeB: 300, totalPlaytime: 1500, winner: 'A', diffMinutes: 900, hoursA: '20.0', hoursB: '5.0', diffHours: '15.0' },
+      { appid: 570, name: 'Dota 2', playtimeA: 60, playtimeB: 600, totalPlaytime: 660, winner: 'B', diffMinutes: 540, hoursA: '1.0', hoursB: '10.0', diffHours: '9.0' },
+      { appid: 440, name: 'Team Fortress 2', playtimeA: 300, playtimeB: 300, totalPlaytime: 600, winner: 'TIE', diffMinutes: 0, hoursA: '5.0', hoursB: '5.0', diffHours: '0.0' },
+    ],
+  };
+
+  const summaryA = {
+    personaName: 'AlphaPlayer',
+    steamId: '76561198000000001',
+    avatarUrl: 'https://example.com/avatarA.jpg',
+    timeCreated: '2010-05-15',
+  };
+
+  const summaryB = {
+    personaName: 'BetaPlayer',
+    steamId: '76561198000000002',
+    avatarUrl: 'https://example.com/avatarB.jpg',
+    timeCreated: '2012-11-20',
+  };
+
+  it('should return exactly one embed in the embeds array', () => {
+    const { embed, embeds } = buildDuelEmbedPayload(mockComparison, summaryA, summaryB, 1);
+    expect(embeds).toHaveLength(1);
+    expect(embeds[0]).toBe(embed);
+  });
+
+  it('should set Player A avatar as author.icon_url and Player B avatar as thumbnail.url', () => {
+    const { embed } = buildDuelEmbedPayload(mockComparison, summaryA, summaryB, 1);
+    expect(embed.author?.icon_url).toBe(summaryA.avatarUrl);
+    expect(embed.thumbnail?.url).toBe(summaryB.avatarUrl);
+  });
+
+  it('should include the ANSI scoreboard block in the description with player names and win counts', () => {
+    const { embed } = buildDuelEmbedPayload(mockComparison, summaryA, summaryB, 1);
+    // Strip ANSI escape codes before asserting plain-text content
+    const plain = embed.description.replace(/\u001b\[[0-9;]*m/g, '');
+    expect(plain).toContain('Steam Library Duel Scoreboard');
+    expect(plain).toContain('AlphaPlayer');
+    expect(plain).toContain('BetaPlayer');
+    expect(plain).toContain('[ 2 ]');
+    expect(plain).toContain('[ 1 ]');
+    expect(plain).toContain('DOMINATES');
+  });
+
+  it('should include Steam Level and Badge enrichment fields when provided', () => {
+    const { embed } = buildDuelEmbedPayload(mockComparison, summaryA, summaryB, 1, 45, 32, 120, 85);
+    const levelField = embed.fields?.find((f) => f.name.includes('Steam Level'));
+    const badgeField = embed.fields?.find((f) => f.name.includes('Badges'));
+    expect(levelField).toBeDefined();
+    expect(levelField?.value).toContain('Lv. 45');
+    expect(levelField?.value).toContain('Lv. 32');
+    expect(badgeField).toBeDefined();
+    expect(badgeField?.value).toContain('120 badges');
+  });
+
+  it('should include Account Since field when account ages are provided', () => {
+    const { embed } = buildDuelEmbedPayload(mockComparison, summaryA, summaryB, 1, null, null, null, null, '2010-05-15', '2012-11-20');
+    const ageField = embed.fields?.find((f) => f.name.includes('Account Since'));
+    expect(ageField).toBeDefined();
+    expect(ageField?.value).toContain('2010-05-15');
+    expect(ageField?.value).toContain('2012-11-20');
+  });
+
+  it('should include the shared titles diff block as a field', () => {
+    const { embed } = buildDuelEmbedPayload(mockComparison, summaryA, summaryB, 1);
+    const sharedField = embed.fields?.find((f) => f.name.includes('Shared Titles'));
+    expect(sharedField).toBeDefined();
+    expect(sharedField?.value).toContain('Counter-Strike 2');
+  });
+
+  it('should encode pagination button custom_id with duel_p: prefix', () => {
+    // With 3 games, PAGE_SIZE=4 => 1 page, no pagination buttons
+    const { components } = buildDuelEmbedPayload(mockComparison, summaryA, summaryB, 1);
+    expect(components).toHaveLength(0);
+
+    // Add more games to trigger pagination
+    const bigComparison = {
+      ...mockComparison,
+      commonGames: [
+        ...mockComparison.commonGames,
+        { appid: 105600, name: 'Terraria', playtimeA: 500, playtimeB: 200, totalPlaytime: 700, winner: 'A', diffMinutes: 300, hoursA: '8.3', hoursB: '3.3', diffHours: '5.0' },
+        { appid: 413150, name: 'Stardew Valley', playtimeA: 100, playtimeB: 100, totalPlaytime: 200, winner: 'TIE', diffMinutes: 0, hoursA: '1.7', hoursB: '1.7', diffHours: '0.0' },
+      ],
+    };
+    const { components: paginatedComponents } = buildDuelEmbedPayload(bigComparison, summaryA, summaryB, 1);
+    expect(paginatedComponents).toHaveLength(1);
+    const btns = paginatedComponents[0].components;
+    expect(btns[0].custom_id).toMatch(/^duel_p:/);
+    expect(btns[1].custom_id).toMatch(/^duel_p:/);
+    expect(btns[0].custom_id).toContain('76561198000000001');
+    expect(btns[0].custom_id).toContain('76561198000000002');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildAchievementsEmbedPayload — Achievement Embed Builder
+// ---------------------------------------------------------------------------
+describe('buildAchievementsEmbedPayload', () => {
+  const mockSummary = {
+    personaName: 'GamerXP',
+    steamId: '76561198000000001',
+    avatarUrl: 'https://example.com/avatar.jpg',
+  };
+
+  const makeAchievementResult = (percent, unlocked, total) => ({
+    total,
+    unlocked,
+    percent,
+    gameName: 'Half-Life 2',
+    achievements: [
+      ...Array.from({ length: unlocked }, (_, i) => ({
+        apiName: `ACH_UNLOCKED_${i}`,
+        displayName: `Unlocked Achievement ${i + 1}`,
+        description: `Description for unlocked ${i + 1}`,
+        achieved: true,
+        unlockTime: 1700000000 - i * 1000,
+      })),
+      ...Array.from({ length: total - unlocked }, (_, i) => ({
+        apiName: `ACH_LOCKED_${i}`,
+        displayName: `Locked Achievement ${i + 1}`,
+        description: `Description for locked ${i + 1}`,
+        achieved: false,
+        unlockTime: 0,
+      })),
+    ],
+  });
+
+  it('should return SUCCESS green color when percent >= 80', () => {
+    const result = makeAchievementResult(85, 17, 20);
+    const { embed } = buildAchievementsEmbedPayload(result, mockSummary, 'Half-Life 2');
+    expect(embed.color).toBe(0x2ecc71);
+  });
+
+  it('should return ATL_GOLD yellow color when percent is 40-79', () => {
+    const result = makeAchievementResult(55, 11, 20);
+    const { embed } = buildAchievementsEmbedPayload(result, mockSummary, 'Half-Life 2');
+    expect(embed.color).toBe(0xf1c40f);
+  });
+
+  it('should return ALERT_CRIMSON red color when percent < 40', () => {
+    const result = makeAchievementResult(25, 5, 20);
+    const { embed } = buildAchievementsEmbedPayload(result, mockSummary, 'Half-Life 2');
+    expect(embed.color).toBe(0xe74c3c);
+  });
+
+  it('should include ANSI progress bar in the description', () => {
+    const result = makeAchievementResult(50, 5, 10);
+    const { embed } = buildAchievementsEmbedPayload(result, mockSummary, 'Half-Life 2');
+    expect(embed.description).toContain('```ansi');
+    expect(embed.description).toContain('50%');
+    expect(embed.description).toContain('5');
+    expect(embed.description).toContain('10');
+  });
+
+  it('should set author.name with player persona name', () => {
+    const result = makeAchievementResult(100, 5, 5);
+    const { embed } = buildAchievementsEmbedPayload(result, mockSummary, 'Any Game');
+    expect(embed.author?.name).toContain('GamerXP');
+  });
+
+  it('should use gameName from result over gameTitle fallback', () => {
+    const result = makeAchievementResult(50, 5, 10);
+    const { embed } = buildAchievementsEmbedPayload(result, mockSummary, 'Raw Autocomplete Value');
+    expect(embed.title).toBe('Half-Life 2');
+  });
+
+  it('should include Recently Unlocked and Next Targets fields when achievements exist', () => {
+    const result = makeAchievementResult(50, 5, 10);
+    const { embed } = buildAchievementsEmbedPayload(result, mockSummary, 'Half-Life 2');
+    const unlockedField = embed.fields?.find((f) => f.name.includes('Recently Unlocked'));
+    const lockedField = embed.fields?.find((f) => f.name.includes('Next Targets'));
+    expect(unlockedField).toBeDefined();
+    expect(lockedField).toBeDefined();
+  });
+
+  it('should return a single embed and empty components array', () => {
+    const result = makeAchievementResult(50, 5, 10);
+    const { embeds, components } = buildAchievementsEmbedPayload(result, mockSummary, 'Half-Life 2');
+    expect(embeds).toHaveLength(1);
+    expect(components).toHaveLength(0);
+  });
+
+  it('should cap unlocked and locked achievement displays at 5 entries each', () => {
+    const result = makeAchievementResult(50, 10, 20);
+    const { embed } = buildAchievementsEmbedPayload(result, mockSummary, 'Half-Life 2');
+    const unlockedField = embed.fields?.find((f) => f.name.includes('Recently Unlocked'));
+    const lockedField = embed.fields?.find((f) => f.name.includes('Next Targets'));
+    // 5 entries max displayed (each entry has a display name)
+    const unlockedCount = (unlockedField?.value?.match(/Unlocked Achievement/g) || []).length;
+    const lockedCount = (lockedField?.value?.match(/Locked Achievement/g) || []).length;
+    expect(unlockedCount).toBe(5);
+    expect(lockedCount).toBe(5);
   });
 });

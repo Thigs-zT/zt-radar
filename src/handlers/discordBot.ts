@@ -34,7 +34,12 @@ import {
   buildBacklogEmbedPayload,
   findMatchingGames,
   buildGameMatchEmbedPayload,
+  getSteamLevel,
+  getPlayerBadgeCount,
+  getPlayerAchievementsForGame,
+  buildAchievementsEmbedPayload,
 } from '../utils/steamWeb.js';
+
 import { getHowLongToBeatStats } from '../utils/hltbNative.js';
 import {
   generateStateToken,
@@ -608,11 +613,23 @@ export const handler = async (
       }
 
       try {
-        const [summaryA, summaryB, comparison] = await Promise.all([
+        const [summaryResultA, summaryResultB, comparisonResult, levelResultA, levelResultB, badgeResultA, badgeResultB] = await Promise.allSettled([
           getPlayerSummary(steamIdA, STEAM_API_KEY),
           getPlayerSummary(steamIdB, STEAM_API_KEY),
           compareLibraries(steamIdA, steamIdB, STEAM_API_KEY),
+          getSteamLevel(steamIdA, STEAM_API_KEY),
+          getSteamLevel(steamIdB, STEAM_API_KEY),
+          getPlayerBadgeCount(steamIdA, STEAM_API_KEY),
+          getPlayerBadgeCount(steamIdB, STEAM_API_KEY),
         ]);
+
+        const summaryA = summaryResultA.status === 'fulfilled' ? summaryResultA.value : null;
+        const summaryB = summaryResultB.status === 'fulfilled' ? summaryResultB.value : null;
+        const comparison = comparisonResult.status === 'fulfilled' ? comparisonResult.value : null;
+        const steamLevelA = levelResultA.status === 'fulfilled' ? levelResultA.value : null;
+        const steamLevelB = levelResultB.status === 'fulfilled' ? levelResultB.value : null;
+        const badgeCountA = badgeResultA.status === 'fulfilled' ? badgeResultA.value : null;
+        const badgeCountB = badgeResultB.status === 'fulfilled' ? badgeResultB.value : null;
 
         if (!summaryA || !summaryB || !comparison?.success) {
           return {
@@ -633,14 +650,27 @@ export const handler = async (
           };
         }
 
-        const { embeds, components } = buildDuelEmbedPayload(comparison, summaryA, summaryB, targetPage);
+        const { embed, components } = buildDuelEmbedPayload(
+          comparison,
+          summaryA,
+          summaryB,
+          targetPage,
+          steamLevelA,
+          steamLevelB,
+          badgeCountA,
+          badgeCountB,
+          summaryA.timeCreated,
+          summaryB.timeCreated,
+          comparison.countA,
+          comparison.countB,
+        );
         return {
           statusCode: 200,
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             type: RESPONSE_TYPES.UPDATE_MESSAGE,
             data: {
-              embeds,
+              embeds: [embed],
               components,
             },
           }),
@@ -856,7 +886,7 @@ export const handler = async (
     const { name, options } = interaction.data || {};
     const userId = interaction.member?.user?.id || interaction.user?.id;
 
-    const autocompleteCommands = ['compare', 'can-it-run', 'game-news', 'wishlist', 'how-long-to-beat'];
+    const autocompleteCommands = ['compare', 'can-it-run', 'game-news', 'wishlist', 'how-long-to-beat', 'steam-achievements'];
 
     if (autocompleteCommands.includes(name || '')) {
       const subCommand: DiscordInteractionOption | undefined = options?.[0];
@@ -2645,11 +2675,23 @@ export const handler = async (
           };
         }
 
-        const [summaryA, summaryB, comparison] = await Promise.all([
+        const [summaryResultA, summaryResultB, comparisonResult, levelResultA, levelResultB, badgeResultA, badgeResultB] = await Promise.allSettled([
           getPlayerSummary(steamIdA, STEAM_API_KEY),
           getPlayerSummary(steamIdB, STEAM_API_KEY),
           compareLibraries(steamIdA, steamIdB, STEAM_API_KEY),
+          getSteamLevel(steamIdA, STEAM_API_KEY),
+          getSteamLevel(steamIdB, STEAM_API_KEY),
+          getPlayerBadgeCount(steamIdA, STEAM_API_KEY),
+          getPlayerBadgeCount(steamIdB, STEAM_API_KEY),
         ]);
+
+        const summaryA = summaryResultA.status === 'fulfilled' ? summaryResultA.value : null;
+        const summaryB = summaryResultB.status === 'fulfilled' ? summaryResultB.value : null;
+        const comparison = comparisonResult.status === 'fulfilled' ? comparisonResult.value : null;
+        const steamLevelA = levelResultA.status === 'fulfilled' ? levelResultA.value : null;
+        const steamLevelB = levelResultB.status === 'fulfilled' ? levelResultB.value : null;
+        const badgeCountA = badgeResultA.status === 'fulfilled' ? badgeResultA.value : null;
+        const badgeCountB = badgeResultB.status === 'fulfilled' ? badgeResultB.value : null;
 
         if (!summaryA || !summaryB) {
           return {
@@ -2678,10 +2720,10 @@ export const handler = async (
                 data: {
                   embeds: [
                     {
-                      title: 'Steam Library Private ❖ Duel Inaccessible',
+                      title: 'Steam Library Private \u2756 Duel Inaccessible',
                       description: `Cannot perform library duel: **${privateName}** has their Steam game library set to **Private**.\n\nOwned games must be set to **Public** in Steam Privacy Settings to allow library cross-referencing.`,
                       color: PALETTE.WARNING,
-                      footer: { text: 'zT Radar • Steam Duel Intelligence' },
+                      footer: { text: 'zT Radar \u2022 Steam Duel Intelligence' },
                       timestamp: new Date().toISOString(),
                     },
                   ],
@@ -2707,14 +2749,13 @@ export const handler = async (
                 embeds: [
                   {
                     author: {
-                      name: `${summaryA.personaName} vs ${summaryB.personaName} • Steam Duel`,
+                      name: `${summaryA.personaName} \u2756 vs \u2756 ${summaryB.personaName} \u2014 Steam Duel`,
                       icon_url: summaryA.avatarUrl || undefined,
                     },
-                    title: 'Steam Library Duel',
                     description: `No common titles found between **${summaryA.personaName}** (${comparison.countA} games) and **${summaryB.personaName}** (${comparison.countB} games).`,
                     color: 0x5865f2,
                     thumbnail: summaryB.avatarUrl ? { url: summaryB.avatarUrl } : undefined,
-                    footer: { text: 'zT Radar • Steam Duel Intelligence' },
+                    footer: { text: 'zT Radar \u2022 Steam Duel Intelligence' },
                     timestamp: new Date().toISOString(),
                   },
                 ],
@@ -2723,7 +2764,20 @@ export const handler = async (
           };
         }
 
-        const { embeds, components } = buildDuelEmbedPayload(comparison, summaryA, summaryB, 1);
+        const { embed, components } = buildDuelEmbedPayload(
+          comparison,
+          summaryA,
+          summaryB,
+          1,
+          steamLevelA,
+          steamLevelB,
+          badgeCountA,
+          badgeCountB,
+          summaryA.timeCreated,
+          summaryB.timeCreated,
+          comparison.countA,
+          comparison.countB,
+        );
 
         return {
           statusCode: 200,
@@ -2731,7 +2785,7 @@ export const handler = async (
           body: JSON.stringify({
             type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
             data: {
-              embeds,
+              embeds: [embed],
               components,
             },
           }),
@@ -2746,7 +2800,151 @@ export const handler = async (
       }
     }
 
+    // Command: /steam-achievements <game> [target]
+    if (name === 'steam-achievements') {
+      const gameOption = options?.find((opt) => opt.name === 'game')?.value;
+      const targetOption = options?.find((opt) => opt.name === 'target')?.value?.trim();
+
+      if (!STEAM_API_KEY) {
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(
+            createEphemeralEmbed(
+              'Steam Integration Offline',
+              'The Valve Steam Web API Key is not configured on this instance. Please contact the bot administrator.',
+              PALETTE.WARNING
+            )
+          ),
+        };
+      }
+
+      if (!gameOption) {
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(
+            createEphemeralEmbed('Selection Required', 'Please type and select a game from the autocomplete suggestions dropdown.', PALETTE.WARNING)
+          ),
+        };
+      }
+
+      // Resolve Steam AppID and game title from autocomplete value (format: "steam:<appId>|<title>")
+      let steamAppId: number | null = null;
+      let gameTitle = String(gameOption);
+
+      if (String(gameOption).includes('|')) {
+        const [idPart, ...titleParts] = String(gameOption).split('|');
+        gameTitle = titleParts.join('|');
+        if (idPart.startsWith('steam:')) {
+          const parsed = parseInt(idPart.replace('steam:', '').trim(), 10);
+          if (!isNaN(parsed) && parsed > 0) steamAppId = parsed;
+        } else if (/^\d+$/.test(idPart)) {
+          const parsed = parseInt(idPart, 10);
+          if (!isNaN(parsed) && parsed > 0) steamAppId = parsed;
+        }
+      }
+
+      if (!steamAppId) {
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(
+            createEphemeralEmbed(
+              'Game Not Identified',
+              `Could not resolve a Steam AppID for **${gameTitle}**. Please select a game from the autocomplete dropdown.`,
+              PALETTE.WARNING
+            )
+          ),
+        };
+      }
+
+      const authLoginUrl = AUTH_CALLBACK_URL ? AUTH_CALLBACK_URL.replace('/callback', '/login') : '';
+
+      try {
+        const targetResult = await resolveSteamTarget(targetOption, userId || '', docClient, TABLE_NAME, STEAM_API_KEY);
+
+        if (targetResult.unlinked) {
+          return buildTargetUnlinkedResponse(targetResult, authLoginUrl);
+        }
+
+        if (targetResult.error) {
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(createEphemeralEmbed('Steam Resolution Failed', targetResult.error, PALETTE.WARNING)),
+          };
+        }
+
+        const targetSteamId = targetResult.steamId;
+
+        const [summaryResult, achievementsResult] = await Promise.allSettled([
+          getPlayerSummary(targetSteamId, STEAM_API_KEY),
+          getPlayerAchievementsForGame(targetSteamId, steamAppId, STEAM_API_KEY),
+        ]);
+
+        const summary = summaryResult.status === 'fulfilled' ? summaryResult.value : null;
+        const achievements = achievementsResult.status === 'fulfilled' ? achievementsResult.value : null;
+
+        if (!summary) {
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(
+              createEphemeralEmbed('Profile Inaccessible', 'Unable to retrieve Steam profile data. The profile may be private or the Steam ID invalid.', PALETTE.WARNING)
+            ),
+          };
+        }
+
+        if (!achievements) {
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
+              data: {
+                embeds: [
+                  {
+                    author: {
+                      name: `${summary.personaName} \u2014 Achievement Progress`,
+                      icon_url: summary.avatarUrl || undefined,
+                    },
+                    title: gameTitle,
+                    description: 'Achievement data is unavailable for this game.\n\nThis may be because:\n\u25b8 The game has no Steam achievements\n\u25b8 The achievement stats are set to private\n\u25b8 The Steam API is temporarily unavailable',
+                    color: PALETTE.NEUTRAL,
+                    footer: { text: 'zT Radar \u2022 Steam Achievements' },
+                    timestamp: new Date().toISOString(),
+                  },
+                ],
+              },
+            }),
+          };
+        }
+
+        const { embed } = buildAchievementsEmbedPayload(achievements, summary, gameTitle);
+
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
+            data: {
+              embeds: [embed],
+            },
+          }),
+        };
+      } catch (err) {
+        console.error('Error executing /steam-achievements:', err);
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(createEphemeralEmbed('Operation Failed', 'Unable to retrieve achievement data. Please try again.', PALETTE.DANGER)),
+        };
+      }
+    }
+
     // Command: /game-match <target1> <target2> [filter]
+
     if (name === 'game-match') {
       const target1Opt = options?.find((opt) => opt.name === 'target1')?.value?.trim();
       const target2Opt = options?.find((opt) => opt.name === 'target2')?.value?.trim();

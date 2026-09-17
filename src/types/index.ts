@@ -515,6 +515,38 @@ export interface EmbedPayload {
 }
 
 // ---------------------------------------------------------------------------
+// Steam Achievements
+// ---------------------------------------------------------------------------
+
+/** A single achievement entry from ISteamUserStats/GetPlayerAchievements. */
+export interface SteamAchievementEntry {
+  /** Internal API name of the achievement. */
+  apiName: string;
+  /** Localized display name of the achievement. */
+  displayName: string;
+  /** Localized description of the achievement. */
+  description: string;
+  /** Whether the player has unlocked this achievement (1 = unlocked, 0 = locked). */
+  achieved: boolean;
+  /** Unix timestamp of when the achievement was unlocked. 0 if locked. */
+  unlockTime: number;
+}
+
+/** Full result from getPlayerAchievementsForGame. */
+export interface PlayerAchievementsResult {
+  /** Total number of achievements for this game. */
+  total: number;
+  /** Number of achievements the player has unlocked. */
+  unlocked: number;
+  /** Unlocked percentage (0–100). */
+  percent: number;
+  /** Resolved game name from the Steam API response. */
+  gameName: string | null;
+  /** Full achievement list, sorted: unlocked (most recent first), then locked. */
+  achievements: SteamAchievementEntry[];
+}
+
+// ---------------------------------------------------------------------------
 // HowLongToBeat Stats
 // ---------------------------------------------------------------------------
 

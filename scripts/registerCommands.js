@@ -316,6 +316,25 @@ export const commands = [
     ],
   },
   {
+    name: 'steam-achievements',
+    description: 'View achievement progress for any Steam game on a player profile',
+    options: [
+      {
+        name: 'game',
+        description: 'Game title — type to search and select from autocomplete',
+        type: 3, // STRING
+        required: true,
+        autocomplete: true,
+      },
+      {
+        name: 'target',
+        description: 'Optional @user mention, SteamID64, profile URL, or vanity (defaults to caller)',
+        type: 3, // STRING
+        required: false,
+      },
+    ],
+  },
+  {
     name: 'steam-backlog',
     description: 'Analyze unplayed paid games, backlog percentage, and estimated wasted library value',
     options: [
