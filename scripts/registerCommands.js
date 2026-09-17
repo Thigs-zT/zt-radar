@@ -1,8 +1,11 @@
 import dotenv from 'dotenv';
 
-// Load .env.dev if specified via ENV_FILE, otherwise default to standard .env
-const envPath = process.env.ENV_FILE || '.env';
-dotenv.config({ path: envPath });
+const isDev =
+  (process.argv.includes('--env') && process.argv[process.argv.indexOf('--env') + 1] === 'dev') ||
+  process.argv.includes('--dev');
+
+const envPath = isDev ? '.env.dev' : (process.env.ENV_FILE || '.env');
+dotenv.config({ path: envPath, override: isDev });
 
 const APPLICATION_ID = process.env.DISCORD_APP_ID || process.env.DISCORD_APPLICATION_ID;
 const BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
@@ -366,13 +369,13 @@ export const commands = [
 
 export async function registerCommands() {
   if (!APPLICATION_ID || !BOT_TOKEN) {
-    console.error(`Missing DISCORD_APP_ID or DISCORD_BOT_TOKEN in ${envPath}`);
+    console.error(`Missing DISCORD_APP_ID or DISCORD_BOT_TOKEN in ${isDev ? '.env.dev' : '.env'}`);
     process.exit(1);
   }
 
   const url = `https://discord.com/api/v10/applications/${APPLICATION_ID}/commands`;
 
-  console.log(`Registering commands with Discord (${envPath})...`);
+  console.log(`Registering commands with Discord (${isDev ? '.env.dev' : '.env'})...`);
 
   try {
     const response = await fetch(url, {

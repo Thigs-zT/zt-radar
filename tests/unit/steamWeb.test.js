@@ -6,6 +6,7 @@ import {
   buildDuelEmbedPayload,
   buildAchievementsEmbedPayload,
 } from '../../src/utils/steamWeb.js';
+import { BRAND_COLORS } from '../../src/utils/theme.js';
 
 describe('Steam Web Intelligence Utilities', () => {
   describe('calculateBacklogMsrp', () => {
@@ -181,9 +182,9 @@ describe('Steam Web Intelligence Utilities', () => {
 });
 
 // ---------------------------------------------------------------------------
-// buildDuelEmbedPayload — Unified Single Embed Architecture
+// buildDuelEmbedPayload — Symmetrical Dual Embed Architecture
 // ---------------------------------------------------------------------------
-describe('buildDuelEmbedPayload (unified single embed)', () => {
+describe('buildDuelEmbedPayload (symmetrical dual embeds)', () => {
   const mockComparison = {
     commonCount: 3,
     totalCommon: 3,
@@ -216,22 +217,26 @@ describe('buildDuelEmbedPayload (unified single embed)', () => {
     timeCreated: '2012-11-20',
   };
 
-  it('should return exactly one embed in the embeds array', () => {
+  it('should return exactly two synchronized embeds in the embeds array', () => {
     const { embed, embeds } = buildDuelEmbedPayload(mockComparison, summaryA, summaryB, 1);
-    expect(embeds).toHaveLength(1);
+    expect(embeds).toHaveLength(2);
     expect(embeds[0]).toBe(embed);
+    expect(embeds[0].color).toBe(BRAND_COLORS.STEAM);
+    expect(embeds[1].color).toBe(BRAND_COLORS.DISCORD_BLURPLE);
   });
 
-  it('should set Player A avatar as author.icon_url and Player B avatar as thumbnail.url', () => {
-    const { embed } = buildDuelEmbedPayload(mockComparison, summaryA, summaryB, 1);
-    expect(embed.author?.icon_url).toBe(summaryA.avatarUrl);
-    expect(embed.thumbnail?.url).toBe(summaryB.avatarUrl);
+  it('should set symmetrical thumbnails on both embeds with no author icon', () => {
+    const { embeds } = buildDuelEmbedPayload(mockComparison, summaryA, summaryB, 1);
+    expect(embeds[0].thumbnail?.url).toBe(summaryA.avatarUrl);
+    expect(embeds[1].thumbnail?.url).toBe(summaryB.avatarUrl);
+    expect(embeds[0].author).toBeUndefined();
+    expect(embeds[1].author).toBeUndefined();
   });
 
-  it('should include the ANSI scoreboard block in the description with player names and win counts', () => {
-    const { embed } = buildDuelEmbedPayload(mockComparison, summaryA, summaryB, 1);
+  it('should include the ANSI scoreboard block in Player B description with player names and win counts', () => {
+    const { embeds } = buildDuelEmbedPayload(mockComparison, summaryA, summaryB, 1);
     // Strip ANSI escape codes before asserting plain-text content
-    const plain = embed.description.replace(/\u001b\[[0-9;]*m/g, '');
+    const plain = embeds[1].description.replace(/\u001b\[[0-9;]*m/g, '');
     expect(plain).toContain('Steam Library Duel Scoreboard');
     expect(plain).toContain('AlphaPlayer');
     expect(plain).toContain('BetaPlayer');
@@ -240,28 +245,29 @@ describe('buildDuelEmbedPayload (unified single embed)', () => {
     expect(plain).toContain('DOMINATES');
   });
 
-  it('should include Steam Level and Badge enrichment fields when provided', () => {
-    const { embed } = buildDuelEmbedPayload(mockComparison, summaryA, summaryB, 1, 45, 32, 120, 85);
-    const levelField = embed.fields?.find((f) => f.name.includes('Steam Level'));
-    const badgeField = embed.fields?.find((f) => f.name.includes('Badges'));
-    expect(levelField).toBeDefined();
-    expect(levelField?.value).toContain('Lv. 45');
-    expect(levelField?.value).toContain('Lv. 32');
-    expect(badgeField).toBeDefined();
-    expect(badgeField?.value).toContain('120 badges');
+  it('should include Steam Level and Badge enrichment fields on respective embeds when provided', () => {
+    const { embeds } = buildDuelEmbedPayload(mockComparison, summaryA, summaryB, 1, 45, 32, 120, 85);
+    const levelFieldA = embeds[0].fields?.find((f) => f.name.includes('Steam Level'));
+    const levelFieldB = embeds[1].fields?.find((f) => f.name.includes('Steam Level'));
+    const badgeFieldA = embeds[0].fields?.find((f) => f.name.includes('Badges'));
+    const badgeFieldB = embeds[1].fields?.find((f) => f.name.includes('Badges'));
+    expect(levelFieldA?.value).toContain('Lv. 45');
+    expect(levelFieldB?.value).toContain('Lv. 32');
+    expect(badgeFieldA?.value).toContain('120 badges');
+    expect(badgeFieldB?.value).toContain('85 badges');
   });
 
-  it('should include Account Since field when account ages are provided', () => {
-    const { embed } = buildDuelEmbedPayload(mockComparison, summaryA, summaryB, 1, null, null, null, null, '2010-05-15', '2012-11-20');
-    const ageField = embed.fields?.find((f) => f.name.includes('Account Since'));
-    expect(ageField).toBeDefined();
-    expect(ageField?.value).toContain('2010-05-15');
-    expect(ageField?.value).toContain('2012-11-20');
+  it('should include Account Since field on respective embeds when account ages are provided', () => {
+    const { embeds } = buildDuelEmbedPayload(mockComparison, summaryA, summaryB, 1, null, null, null, null, '2010-05-15', '2012-11-20');
+    const ageFieldA = embeds[0].fields?.find((f) => f.name.includes('Account Since'));
+    const ageFieldB = embeds[1].fields?.find((f) => f.name.includes('Account Since'));
+    expect(ageFieldA?.value).toContain('2010-05-15');
+    expect(ageFieldB?.value).toContain('2012-11-20');
   });
 
-  it('should include the shared titles diff block as a field', () => {
-    const { embed } = buildDuelEmbedPayload(mockComparison, summaryA, summaryB, 1);
-    const sharedField = embed.fields?.find((f) => f.name.includes('Shared Titles'));
+  it('should include the shared titles diff block as a field in Player B embed', () => {
+    const { embeds } = buildDuelEmbedPayload(mockComparison, summaryA, summaryB, 1);
+    const sharedField = embeds[1].fields?.find((f) => f.name.includes('Shared Titles'));
     expect(sharedField).toBeDefined();
     expect(sharedField?.value).toContain('Counter-Strike 2');
   });

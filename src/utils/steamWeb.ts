@@ -29,6 +29,7 @@ import type {
   EmbedPayload,
   DiscordEmbed,
 } from '../types/index.js';
+import { BRAND_COLORS } from './theme.js';
 
 const USER_AGENT = 'zT-Radar-Bot/1.0 (https://github.com/zt-radar)';
 const API_BASE = 'https://api.steampowered.com';
@@ -1388,9 +1389,10 @@ type PlayerSummaryLike = {
 };
 
 /**
- * Generates a single high-impact Discord Rich Embed for the Steam Library Duel command.
- * Unified architecture: single embed combining dominance scoreboard, enrichment metrics,
- * and paginated shared-titles diff blocks. Player A avatar in author, Player B in thumbnail.
+ * Generates two synchronized, symmetrical Discord Rich Embeds for the Steam Library Duel command.
+ * Symmetrical architecture: eliminates visual asymmetry by placing Player A avatar as thumbnail (80x80)
+ * on Embed 1 (Steam Blue), and Player B avatar as thumbnail (80x80) on Embed 2 (Discord Blurple) with
+ * the ANSI scoreboard verdict and paginated diff blocks.
  *
  * @param comparison - Library comparison result from compareLibraries()
  * @param summaryA - Player A profile summary
@@ -1499,69 +1501,113 @@ export function buildDuelEmbedPayload(
   }).join('\n');
 
   // ---------------------------------------------------------------------------
-  // Enrichment Fields
+  // Player A Telemetry Fields
   // ---------------------------------------------------------------------------
-  const fields: import('../types/index.js').DiscordEmbedField[] = [
+  const fieldsA: import('../types/index.js').DiscordEmbedField[] = [
     {
       name: '\u25b8 Library',
-      value: `**${personaA}**: ${countA ?? commonCount} games\n**${personaB}**: ${countB ?? commonCount} games`,
+      value: `${countA ?? commonCount} games`,
       inline: true,
     },
     {
       name: '\u25b8 Total Playtime',
-      value: `**${personaA}**: ${comparison.totalHoursA}h\n**${personaB}**: ${comparison.totalHoursB}h`,
+      value: `${comparison.totalHoursA}h`,
       inline: true,
     },
   ];
 
-  if (steamLevelA !== null || steamLevelB !== null) {
-    const levelA = steamLevelA !== null ? `Lv. ${steamLevelA}` : 'N/A';
-    const levelB = steamLevelB !== null ? `Lv. ${steamLevelB}` : 'N/A';
-    fields.push({
+  if (steamLevelA !== null) {
+    fieldsA.push({
       name: '\u25b8 Steam Level',
-      value: `**${personaA}**: ${levelA}\n**${personaB}**: ${levelB}`,
+      value: `Lv. ${steamLevelA}`,
       inline: true,
     });
   }
 
-  if (badgeCountA !== null || badgeCountB !== null) {
-    const bA = badgeCountA !== null ? `${badgeCountA} badges` : 'N/A';
-    const bB = badgeCountB !== null ? `${badgeCountB} badges` : 'N/A';
-    fields.push({
+  if (badgeCountA !== null) {
+    fieldsA.push({
       name: '\u25b8 Badges',
-      value: `**${personaA}**: ${bA}\n**${personaB}**: ${bB}`,
+      value: `${badgeCountA} badges`,
       inline: true,
     });
   }
 
-  if (accountAgeA || accountAgeB) {
-    const ageA = accountAgeA ? accountAgeA.substring(0, 10) : 'N/A';
-    const ageB = accountAgeB ? accountAgeB.substring(0, 10) : 'N/A';
-    fields.push({
+  if (accountAgeA) {
+    fieldsA.push({
       name: '\u25b8 Account Since',
-      value: `**${personaA}**: ${ageA}\n**${personaB}**: ${ageB}`,
+      value: accountAgeA.substring(0, 10),
       inline: true,
     });
   }
 
-  // Shared titles diff block as its own field
-  fields.push({
+  // ---------------------------------------------------------------------------
+  // Player B Telemetry & Showdown Fields
+  // ---------------------------------------------------------------------------
+  const fieldsB: import('../types/index.js').DiscordEmbedField[] = [
+    {
+      name: '\u25b8 Library',
+      value: `${countB ?? commonCount} games`,
+      inline: true,
+    },
+    {
+      name: '\u25b8 Total Playtime',
+      value: `${comparison.totalHoursB}h`,
+      inline: true,
+    },
+  ];
+
+  if (steamLevelB !== null) {
+    fieldsB.push({
+      name: '\u25b8 Steam Level',
+      value: `Lv. ${steamLevelB}`,
+      inline: true,
+    });
+  }
+
+  if (badgeCountB !== null) {
+    fieldsB.push({
+      name: '\u25b8 Badges',
+      value: `${badgeCountB} badges`,
+      inline: true,
+    });
+  }
+
+  if (accountAgeB) {
+    fieldsB.push({
+      name: '\u25b8 Account Since',
+      value: accountAgeB.substring(0, 10),
+      inline: true,
+    });
+  }
+
+  // Shared titles diff block as its own field in Player B embed
+  fieldsB.push({
     name: `\u25b8 Shared Titles [Page ${currentPage}/${totalPages}]`,
     value: diffBlocks || '*No shared titles on this page.*',
     inline: false,
   });
 
   // ---------------------------------------------------------------------------
-  // Unified Embed
+  // Symmetrical Synchronized Embeds
   // ---------------------------------------------------------------------------
-  const embed: DiscordEmbed = {
-    author: {
-      name: `${personaA} \u2756 vs \u2756 ${personaB} \u2014 Steam Duel`,
-      icon_url: avatarA ?? undefined,
+  const playerAEmbed: DiscordEmbed = {
+    title: `${personaA} \u2014 Steam Profile`,
+    url: steamIdA ? `https://steamcommunity.com/profiles/${steamIdA}` : undefined,
+    color: BRAND_COLORS.STEAM,
+    fields: fieldsA,
+    thumbnail: avatarA ? { url: avatarA } : undefined,
+    footer: {
+      text: 'zT Radar \u2022 Steam Duel',
     },
+    timestamp: new Date().toISOString(),
+  };
+
+  const playerBEmbed: DiscordEmbed = {
+    title: `${personaB} \u2014 Steam Profile`,
+    url: steamIdB ? `https://steamcommunity.com/profiles/${steamIdB}` : undefined,
     description: scoreboardAnsi,
-    color: 0x5865f2,
-    fields,
+    color: BRAND_COLORS.DISCORD_BLURPLE,
+    fields: fieldsB,
     thumbnail: avatarB ? { url: avatarB } : undefined,
     footer: {
       text: `Page ${currentPage} of ${totalPages} \u2022 zT Radar \u2022 Steam Duel`,
@@ -1591,7 +1637,7 @@ export function buildDuelEmbedPayload(
     },
   ] : [];
 
-  return { embed, embeds: [embed], components };
+  return { embed: playerAEmbed, embeds: [playerAEmbed, playerBEmbed], components };
 }
 
 

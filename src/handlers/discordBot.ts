@@ -650,7 +650,7 @@ export const handler = async (
           };
         }
 
-        const { embed, components } = buildDuelEmbedPayload(
+        const { embeds, components } = buildDuelEmbedPayload(
           comparison,
           summaryA,
           summaryB,
@@ -670,7 +670,7 @@ export const handler = async (
           body: JSON.stringify({
             type: RESPONSE_TYPES.UPDATE_MESSAGE,
             data: {
-              embeds: [embed],
+              embeds,
               components,
             },
           }),
@@ -2764,7 +2764,7 @@ export const handler = async (
           };
         }
 
-        const { embed, components } = buildDuelEmbedPayload(
+        const { embeds, components } = buildDuelEmbedPayload(
           comparison,
           summaryA,
           summaryB,
@@ -2785,7 +2785,7 @@ export const handler = async (
           body: JSON.stringify({
             type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
             data: {
-              embeds: [embed],
+              embeds,
               components,
             },
           }),

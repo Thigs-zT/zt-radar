@@ -481,6 +481,7 @@ export interface DiscordEmbedField {
 /** A Discord embed object. */
 export interface DiscordEmbed {
   title?: string;
+  url?: string;
   description?: string;
   color?: number;
   fields?: DiscordEmbedField[];
