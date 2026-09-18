@@ -421,28 +421,22 @@ describe('buildAchievementsEmbedPayload', () => {
     expect(navRow.components[1].disabled).toBe(false);
   });
 
-  it('should include external tracker link buttons for SteamHunters and Exophase', () => {
+  it('should include strictly SteamHunters tracker link button with View on SteamHunters label and inject header banner image', () => {
     const result = { ...makeAchievementResult(100, 3, 3), gameName: 'Portal 2' }; // 3 achievements => 1 page (no nav row)
-    const { components } = buildAchievementsEmbedPayload(result, mockSummary, 'Portal 2', 1, 'all', 620);
+    const { embed, components } = buildAchievementsEmbedPayload(result, mockSummary, 'Portal 2', 1, 'all', 620);
+    expect(embed.image?.url).toBe('https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/620/header.jpg');
     expect(components).toHaveLength(1);
     const trackerRow = components[0];
-    expect(trackerRow.components[0].label).toBe('SteamHunters');
+    expect(trackerRow.components).toHaveLength(1);
+    expect(trackerRow.components[0].label).toBe('View on SteamHunters');
     expect(trackerRow.components[0].url).toBe('https://steamhunters.com/apps/620');
-    expect(trackerRow.components[1].label).toBe('Exophase');
-    expect(trackerRow.components[1].url).toContain('https://www.exophase.com/game/portal-2/achievements/');
   });
 });
 
 describe('getAchievementTrackerLinks', () => {
-  it('should generate valid tracker URLs for a given appId and title', () => {
+  it('should generate valid SteamHunters tracker URL for a given appId', () => {
     const links = getAchievementTrackerLinks(1086940, "Baldur's Gate 3");
     expect(links.steamHunters).toBe('https://steamhunters.com/apps/1086940');
-    expect(links.exophase).toBe('https://www.exophase.com/game/baldur-s-gate-3/achievements/');
-  });
-
-  it('should fallback to search URL when slug generation yields empty string', () => {
-    const links = getAchievementTrackerLinks(999, '!!!');
-    expect(links.steamHunters).toBe('https://steamhunters.com/apps/999');
-    expect(links.exophase).toContain('https://www.exophase.com/search/?q=');
+    expect(links.steamHuntersUrl).toBe('https://steamhunters.com/apps/1086940');
   });
 });

@@ -550,8 +550,8 @@ export interface SteamSchemaAchievement {
 /** External tracker links for a Steam title. */
 export interface AchievementTrackerLinks {
   steamHunters: string;
-  exophase: string;
   steamHuntersUrl?: string;
+  exophase?: string;
   exophaseUrl?: string;
 }
 

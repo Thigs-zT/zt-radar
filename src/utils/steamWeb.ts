@@ -2100,23 +2100,13 @@ export function buildGameMatchEmbedPayload(
  */
 export function getAchievementTrackerLinks(
   appId: number,
-  gameTitle: string,
+  _gameTitle?: string,
 ): AchievementTrackerLinks {
-  const slug = gameTitle
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '');
-
   const steamHunters = `https://steamhunters.com/apps/${appId}`;
-  const exophase = slug
-    ? `https://www.exophase.com/game/${slug}/achievements/`
-    : `https://www.exophase.com/search/?q=${encodeURIComponent(gameTitle)}`;
 
   return {
     steamHunters,
-    exophase,
     steamHuntersUrl: steamHunters,
-    exophaseUrl: exophase,
   };
 }
 
@@ -2268,14 +2258,8 @@ export function buildAchievementsEmbedPayload(
         {
           type: 2 as const,
           style: 5 as const,
-          label: 'SteamHunters',
+          label: 'View on SteamHunters',
           url: trackers.steamHunters,
-        },
-        {
-          type: 2 as const,
-          style: 5 as const,
-          label: 'Exophase',
-          url: trackers.exophase,
         },
       ],
     });
@@ -2290,6 +2274,9 @@ export function buildAchievementsEmbedPayload(
     description,
     color,
     fields,
+    image: targetAppId
+      ? { url: `https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/${targetAppId}/header.jpg` }
+      : undefined,
     footer: {
       text: `Page ${currentPage} of ${totalPages} \u2022 Filter: ${filterLabel} \u2022 zT Radar \u2022 Steam Achievements`,
     },
