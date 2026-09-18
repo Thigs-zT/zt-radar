@@ -335,6 +335,17 @@ export const commands = [
         type: 3, // STRING
         required: false,
       },
+      {
+        name: 'filter',
+        description: 'Filter achievements by unlock status (all, unlocked, or locked)',
+        type: 3, // STRING
+        required: false,
+        choices: [
+          { name: 'All Achievements', value: 'all' },
+          { name: 'Unlocked Only', value: 'unlocked' },
+          { name: 'Locked / Remaining Only', value: 'locked' },
+        ],
+      },
     ],
   },
   {

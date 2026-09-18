@@ -5,6 +5,7 @@ import {
   matchLibraryData,
   buildDuelEmbedPayload,
   buildAchievementsEmbedPayload,
+  getAchievementTrackerLinks,
 } from '../../src/utils/steamWeb.js';
 import { BRAND_COLORS } from '../../src/utils/theme.js';
 
@@ -182,9 +183,9 @@ describe('Steam Web Intelligence Utilities', () => {
 });
 
 // ---------------------------------------------------------------------------
-// buildDuelEmbedPayload — Symmetrical Dual Embed Architecture
+// buildDuelEmbedPayload — Unified Single Embed Architecture
 // ---------------------------------------------------------------------------
-describe('buildDuelEmbedPayload (symmetrical dual embeds)', () => {
+describe('buildDuelEmbedPayload (unified single embed)', () => {
   const mockComparison = {
     commonCount: 3,
     totalCommon: 3,
@@ -217,26 +218,24 @@ describe('buildDuelEmbedPayload (symmetrical dual embeds)', () => {
     timeCreated: '2012-11-20',
   };
 
-  it('should return exactly two synchronized embeds in the embeds array', () => {
+  it('should return strictly a single Rich Embed in the embeds array', () => {
     const { embed, embeds } = buildDuelEmbedPayload(mockComparison, summaryA, summaryB, 1);
-    expect(embeds).toHaveLength(2);
+    expect(embeds).toHaveLength(1);
     expect(embeds[0]).toBe(embed);
-    expect(embeds[0].color).toBe(BRAND_COLORS.STEAM);
-    expect(embeds[1].color).toBe(BRAND_COLORS.DISCORD_BLURPLE);
+    expect(embed.color).toBe(BRAND_COLORS.STEAM);
   });
 
-  it('should set symmetrical thumbnails on both embeds with no author icon', () => {
-    const { embeds } = buildDuelEmbedPayload(mockComparison, summaryA, summaryB, 1);
-    expect(embeds[0].thumbnail?.url).toBe(summaryA.avatarUrl);
-    expect(embeds[1].thumbnail?.url).toBe(summaryB.avatarUrl);
-    expect(embeds[0].author).toBeUndefined();
-    expect(embeds[1].author).toBeUndefined();
+  it('should set symmetrical neutral duel combat icon in thumbnail and author with crossed swords title', () => {
+    const { embed } = buildDuelEmbedPayload(mockComparison, summaryA, summaryB, 1);
+    expect(embed.title).toBe('AlphaPlayer \u2694\ufe0f BetaPlayer \u2014 Steam Library Duel');
+    expect(embed.author?.name).toBe('Steam Library Duel');
+    expect(embed.author?.icon_url).toContain('share_steam_logo.png');
+    expect(embed.thumbnail?.url).toContain('share_steam_logo.png');
   });
 
-  it('should include the ANSI scoreboard block in Player B description with player names and win counts', () => {
-    const { embeds } = buildDuelEmbedPayload(mockComparison, summaryA, summaryB, 1);
-    // Strip ANSI escape codes before asserting plain-text content
-    const plain = embeds[1].description.replace(/\u001b\[[0-9;]*m/g, '');
+  it('should include the ANSI scoreboard block in embed description with player names and win counts', () => {
+    const { embed } = buildDuelEmbedPayload(mockComparison, summaryA, summaryB, 1);
+    const plain = embed.description.replace(/\u001b\[[0-9;]*m/g, '');
     expect(plain).toContain('Steam Library Duel Scoreboard');
     expect(plain).toContain('AlphaPlayer');
     expect(plain).toContain('BetaPlayer');
@@ -245,39 +244,50 @@ describe('buildDuelEmbedPayload (symmetrical dual embeds)', () => {
     expect(plain).toContain('DOMINATES');
   });
 
-  it('should include Steam Level and Badge enrichment fields on respective embeds when provided', () => {
-    const { embeds } = buildDuelEmbedPayload(mockComparison, summaryA, summaryB, 1, 45, 32, 120, 85);
-    const levelFieldA = embeds[0].fields?.find((f) => f.name.includes('Steam Level'));
-    const levelFieldB = embeds[1].fields?.find((f) => f.name.includes('Steam Level'));
-    const badgeFieldA = embeds[0].fields?.find((f) => f.name.includes('Badges'));
-    const badgeFieldB = embeds[1].fields?.find((f) => f.name.includes('Badges'));
-    expect(levelFieldA?.value).toContain('Lv. 45');
-    expect(levelFieldB?.value).toContain('Lv. 32');
-    expect(badgeFieldA?.value).toContain('120 badges');
-    expect(badgeFieldB?.value).toContain('85 badges');
+  it('should include symmetrical inline comparison fields for both players', () => {
+    const { embed } = buildDuelEmbedPayload(mockComparison, summaryA, summaryB, 1, 45, 32, 120, 85, '2010-05-15', '2012-11-20');
+    const libField = embed.fields?.find((f) => f.name.includes('Library'));
+    const timeField = embed.fields?.find((f) => f.name.includes('Total Playtime'));
+    const levelField = embed.fields?.find((f) => f.name.includes('Steam Level'));
+    const badgeField = embed.fields?.find((f) => f.name.includes('Badges'));
+    const ageField = embed.fields?.find((f) => f.name.includes('Account Age'));
+
+    expect(libField?.value).toContain('AlphaPlayer:');
+    expect(libField?.value).toContain('BetaPlayer:');
+    expect(libField?.value).toContain('120 games');
+    expect(libField?.value).toContain('85 games');
+
+    expect(timeField?.value).toContain('45.0h');
+    expect(timeField?.value).toContain('30.0h');
+
+    expect(levelField?.value).toContain('Lv. 45');
+    expect(levelField?.value).toContain('Lv. 32');
+
+    expect(badgeField?.value).toContain('120 badges');
+    expect(badgeField?.value).toContain('85 badges');
+
+    expect(ageField?.value).toContain('2010-05-15');
+    expect(ageField?.value).toContain('2012-11-20');
+
+    expect(libField?.inline).toBe(true);
+    expect(timeField?.inline).toBe(true);
+    expect(levelField?.inline).toBe(true);
+    expect(badgeField?.inline).toBe(true);
+    expect(ageField?.inline).toBe(true);
   });
 
-  it('should include Account Since field on respective embeds when account ages are provided', () => {
-    const { embeds } = buildDuelEmbedPayload(mockComparison, summaryA, summaryB, 1, null, null, null, null, '2010-05-15', '2012-11-20');
-    const ageFieldA = embeds[0].fields?.find((f) => f.name.includes('Account Since'));
-    const ageFieldB = embeds[1].fields?.find((f) => f.name.includes('Account Since'));
-    expect(ageFieldA?.value).toContain('2010-05-15');
-    expect(ageFieldB?.value).toContain('2012-11-20');
-  });
-
-  it('should include the shared titles diff block as a field in Player B embed', () => {
-    const { embeds } = buildDuelEmbedPayload(mockComparison, summaryA, summaryB, 1);
-    const sharedField = embeds[1].fields?.find((f) => f.name.includes('Shared Titles'));
+  it('should include the shared titles diff block as a non-inline field', () => {
+    const { embed } = buildDuelEmbedPayload(mockComparison, summaryA, summaryB, 1);
+    const sharedField = embed.fields?.find((f) => f.name.includes('Shared Titles'));
     expect(sharedField).toBeDefined();
+    expect(sharedField?.inline).toBe(false);
     expect(sharedField?.value).toContain('Counter-Strike 2');
   });
 
-  it('should encode pagination button custom_id with duel_p: prefix', () => {
-    // With 3 games, PAGE_SIZE=4 => 1 page, no pagination buttons
+  it('should encode pagination button custom_id with duel_p: prefix when games exceed PAGE_SIZE', () => {
     const { components } = buildDuelEmbedPayload(mockComparison, summaryA, summaryB, 1);
     expect(components).toHaveLength(0);
 
-    // Add more games to trigger pagination
     const bigComparison = {
       ...mockComparison,
       commonGames: [
@@ -297,7 +307,7 @@ describe('buildDuelEmbedPayload (symmetrical dual embeds)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// buildAchievementsEmbedPayload — Achievement Embed Builder
+// buildAchievementsEmbedPayload & getAchievementTrackerLinks
 // ---------------------------------------------------------------------------
 describe('buildAchievementsEmbedPayload', () => {
   const mockSummary = {
@@ -311,6 +321,7 @@ describe('buildAchievementsEmbedPayload', () => {
     unlocked,
     percent,
     gameName: 'Half-Life 2',
+    appId: 220,
     achievements: [
       ...Array.from({ length: unlocked }, (_, i) => ({
         apiName: `ACH_UNLOCKED_${i}`,
@@ -368,31 +379,70 @@ describe('buildAchievementsEmbedPayload', () => {
     expect(embed.title).toBe('Half-Life 2');
   });
 
-  it('should include Recently Unlocked and Next Targets fields when achievements exist', () => {
+  it('should format achievements with status indicators on page 1 (all filter)', () => {
     const result = makeAchievementResult(50, 5, 10);
-    const { embed } = buildAchievementsEmbedPayload(result, mockSummary, 'Half-Life 2');
-    const unlockedField = embed.fields?.find((f) => f.name.includes('Recently Unlocked'));
-    const lockedField = embed.fields?.find((f) => f.name.includes('Next Targets'));
-    expect(unlockedField).toBeDefined();
-    expect(lockedField).toBeDefined();
+    const { embed } = buildAchievementsEmbedPayload(result, mockSummary, 'Half-Life 2', 1, 'all');
+    const achField = embed.fields?.[0];
+    expect(achField).toBeDefined();
+    expect(achField?.name).toContain('Page 1/2');
+    expect(achField?.name).toContain('Filter: All');
+    expect(achField?.value).toContain('[\u2714]'); // Unlocked indicator
+    expect(achField?.value).toContain('[\u2716]'); // Locked indicator
+    expect(achField?.value).toContain('<t:1700000000:d>'); // Unlock date timestamp
+    expect(achField?.value).toContain('*(Locked)*');
   });
 
-  it('should return a single embed and empty components array', () => {
+  it('should filter achievements when filter is unlocked', () => {
     const result = makeAchievementResult(50, 5, 10);
-    const { embeds, components } = buildAchievementsEmbedPayload(result, mockSummary, 'Half-Life 2');
-    expect(embeds).toHaveLength(1);
-    expect(components).toHaveLength(0);
+    const { embed } = buildAchievementsEmbedPayload(result, mockSummary, 'Half-Life 2', 1, 'unlocked');
+    const achField = embed.fields?.[0];
+    expect(achField?.name).toContain('Filter: Unlocked');
+    expect(achField?.value).toContain('[\u2714]');
+    expect(achField?.value).not.toContain('[\u2716]');
   });
 
-  it('should cap unlocked and locked achievement displays at 5 entries each', () => {
-    const result = makeAchievementResult(50, 10, 20);
-    const { embed } = buildAchievementsEmbedPayload(result, mockSummary, 'Half-Life 2');
-    const unlockedField = embed.fields?.find((f) => f.name.includes('Recently Unlocked'));
-    const lockedField = embed.fields?.find((f) => f.name.includes('Next Targets'));
-    // 5 entries max displayed (each entry has a display name)
-    const unlockedCount = (unlockedField?.value?.match(/Unlocked Achievement/g) || []).length;
-    const lockedCount = (lockedField?.value?.match(/Locked Achievement/g) || []).length;
-    expect(unlockedCount).toBe(5);
-    expect(lockedCount).toBe(5);
+  it('should filter achievements when filter is locked', () => {
+    const result = makeAchievementResult(50, 5, 10);
+    const { embed } = buildAchievementsEmbedPayload(result, mockSummary, 'Half-Life 2', 1, 'locked');
+    const achField = embed.fields?.[0];
+    expect(achField?.name).toContain('Filter: Locked');
+    expect(achField?.value).toContain('[\u2716]');
+    expect(achField?.value).not.toContain('[\u2714]');
+  });
+
+  it('should wire up interactive pagination buttons with ach:page: custom_id when totalPages > 1', () => {
+    const result = makeAchievementResult(50, 10, 20); // 20 achievements => 4 pages
+    const { components } = buildAchievementsEmbedPayload(result, mockSummary, 'Half-Life 2', 1, 'all', 220, '76561198000000001');
+    expect(components.length).toBeGreaterThanOrEqual(1);
+    const navRow = components[0];
+    expect(navRow.components[0].custom_id).toMatch(/^ach:page:0:220:76561198000000001:all$/);
+    expect(navRow.components[1].custom_id).toMatch(/^ach:page:2:220:76561198000000001:all$/);
+    expect(navRow.components[0].disabled).toBe(true); // First page
+    expect(navRow.components[1].disabled).toBe(false);
+  });
+
+  it('should include external tracker link buttons for SteamHunters and Exophase', () => {
+    const result = { ...makeAchievementResult(100, 3, 3), gameName: 'Portal 2' }; // 3 achievements => 1 page (no nav row)
+    const { components } = buildAchievementsEmbedPayload(result, mockSummary, 'Portal 2', 1, 'all', 620);
+    expect(components).toHaveLength(1);
+    const trackerRow = components[0];
+    expect(trackerRow.components[0].label).toBe('SteamHunters');
+    expect(trackerRow.components[0].url).toBe('https://steamhunters.com/apps/620');
+    expect(trackerRow.components[1].label).toBe('Exophase');
+    expect(trackerRow.components[1].url).toContain('https://www.exophase.com/game/portal-2/achievements/');
+  });
+});
+
+describe('getAchievementTrackerLinks', () => {
+  it('should generate valid tracker URLs for a given appId and title', () => {
+    const links = getAchievementTrackerLinks(1086940, "Baldur's Gate 3");
+    expect(links.steamHunters).toBe('https://steamhunters.com/apps/1086940');
+    expect(links.exophase).toBe('https://www.exophase.com/game/baldur-s-gate-3/achievements/');
+  });
+
+  it('should fallback to search URL when slug generation yields empty string', () => {
+    const links = getAchievementTrackerLinks(999, '!!!');
+    expect(links.steamHunters).toBe('https://steamhunters.com/apps/999');
+    expect(links.exophase).toContain('https://www.exophase.com/search/?q=');
   });
 });

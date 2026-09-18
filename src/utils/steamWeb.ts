@@ -28,12 +28,16 @@ import type {
   BacklogTelemetryResult,
   EmbedPayload,
   DiscordEmbed,
+  AchievementFilterMode,
+  AchievementTrackerLinks,
+  PlayerAchievementsResult,
 } from '../types/index.js';
 import { BRAND_COLORS } from './theme.js';
 
 const USER_AGENT = 'zT-Radar-Bot/1.0 (https://github.com/zt-radar)';
 const API_BASE = 'https://api.steampowered.com';
 const DEFAULT_TIMEOUT_MS = 2800;
+const STEAM_DUEL_ICON = 'https://community.cloudflare.steamstatic.com/public/shared/images/responsive/share_steam_logo.png';
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -896,7 +900,8 @@ export async function getPlayerAchievementsSafe(
 
 /**
  * Fetches the full achievement list for a player in a specific game,
- * including display names, descriptions, and unlock timestamps.
+ * including schema display names, descriptions, and unlock timestamps.
+ * Fetches ISteamUserStats/GetPlayerAchievements/v1 and ISteamUserStats/GetSchemaForGame/v2 in parallel.
  * Sorted: unlocked (most recent first), then locked alphabetically.
  * Returns null if achievements are private, unsupported, or an error occurs.
  */
@@ -904,11 +909,11 @@ export async function getPlayerAchievementsForGame(
   steamId64: string,
   appId: number,
   apiKey: string,
-): Promise<import('../types/index.js').PlayerAchievementsResult | null> {
+): Promise<PlayerAchievementsResult | null> {
   if (!steamId64 || !appId || !apiKey) return null;
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 2000);
+  const timer = setTimeout(() => controller.abort(), 2400);
 
   type RawAch = {
     apiname: string;
@@ -925,49 +930,99 @@ export async function getPlayerAchievementsForGame(
     };
   };
 
+  type SchemaResponse = {
+    game?: {
+      gameName?: string;
+      availableGameStats?: {
+        achievements?: Array<{
+          name: string;
+          displayName?: string;
+          description?: string;
+          hidden?: number;
+        }>;
+      };
+    };
+  };
+
   try {
-    const url = `${API_BASE}/ISteamUserStats/GetPlayerAchievements/v1/?key=${apiKey}&steamid=${steamId64}&appid=${appId}&l=english`;
-    const res = await fetch(url, {
-      headers: { 'User-Agent': USER_AGENT },
-      signal: controller.signal,
-    });
+    const playerUrl = `${API_BASE}/ISteamUserStats/GetPlayerAchievements/v1/?key=${apiKey}&steamid=${steamId64}&appid=${appId}&l=english`;
+    const schemaUrl = `${API_BASE}/ISteamUserStats/GetSchemaForGame/v2/?key=${apiKey}&appid=${appId}&l=english`;
+
+    const [playerRes, schemaRes] = await Promise.allSettled([
+      fetch(playerUrl, {
+        headers: { 'User-Agent': USER_AGENT },
+        signal: controller.signal,
+      }),
+      fetch(schemaUrl, {
+        headers: { 'User-Agent': USER_AGENT },
+        signal: controller.signal,
+      }),
+    ]);
 
     clearTimeout(timer);
 
-    if (!res.ok) return null;
+    if (playerRes.status !== 'fulfilled' || !playerRes.value.ok) return null;
 
-    const data = await res.json() as RawAchResponse;
+    const data = (await playerRes.value.json()) as RawAchResponse;
     const rawAchs = data?.playerstats?.achievements;
 
     if (!Array.isArray(rawAchs) || rawAchs.length === 0) return null;
+
+    // Build schema lookup map if schema was successfully retrieved
+    const schemaMap = new Map<string, { displayName?: string; description?: string }>();
+    let schemaGameName: string | null = null;
+
+    if (schemaRes.status === 'fulfilled' && schemaRes.value.ok) {
+      try {
+        const schemaData = (await schemaRes.value.json()) as SchemaResponse;
+        schemaGameName = schemaData?.game?.gameName ?? null;
+        const schemaList = schemaData?.game?.availableGameStats?.achievements ?? [];
+        for (const s of schemaList) {
+          if (s.name) {
+            schemaMap.set(s.name, {
+              displayName: s.displayName,
+              description: s.description,
+            });
+          }
+        }
+      } catch {
+        // Gracefully ignore schema parsing failure
+      }
+    }
 
     const total = rawAchs.length;
     const unlocked = rawAchs.filter((a) => a.achieved === 1).length;
     const percent = total > 0 ? Math.round((unlocked / total) * 100) : 0;
 
-    const sorted = [...rawAchs].sort((a, b) => {
-      if (a.achieved === 1 && b.achieved === 1) {
+    const enriched = rawAchs.map((a) => {
+      const schemaItem = schemaMap.get(a.apiname);
+      return {
+        apiName: a.apiname,
+        displayName: schemaItem?.displayName || a.name || a.apiname,
+        description: schemaItem?.description || a.description || '',
+        achieved: a.achieved === 1,
+        unlockTime: a.unlocktime ?? 0,
+      };
+    });
+
+    enriched.sort((a, b) => {
+      if (a.achieved && b.achieved) {
         // Most recently unlocked first
-        return (b.unlocktime ?? 0) - (a.unlocktime ?? 0);
+        return (b.unlockTime ?? 0) - (a.unlockTime ?? 0);
       }
-      if (a.achieved === 1) return -1;
-      if (b.achieved === 1) return 1;
+      if (a.achieved) return -1;
+      if (b.achieved) return 1;
       // Locked: alphabetical
-      return (a.name ?? a.apiname).localeCompare(b.name ?? b.apiname);
+      return a.displayName.localeCompare(b.displayName);
     });
 
     return {
       total,
       unlocked,
       percent,
-      gameName: data?.playerstats?.gameName ?? null,
-      achievements: sorted.map((a) => ({
-        apiName: a.apiname,
-        displayName: a.name ?? a.apiname,
-        description: a.description ?? '',
-        achieved: a.achieved === 1,
-        unlockTime: a.unlocktime ?? 0,
-      })),
+      gameName: schemaGameName || data?.playerstats?.gameName || null,
+      appId,
+      achievements: enriched,
     };
   } catch {
     clearTimeout(timer);
@@ -1389,10 +1444,9 @@ type PlayerSummaryLike = {
 };
 
 /**
- * Generates two synchronized, symmetrical Discord Rich Embeds for the Steam Library Duel command.
- * Symmetrical architecture: eliminates visual asymmetry by placing Player A avatar as thumbnail (80x80)
- * on Embed 1 (Steam Blue), and Player B avatar as thumbnail (80x80) on Embed 2 (Discord Blurple) with
- * the ANSI scoreboard verdict and paginated diff blocks.
+ * Generates a unified, single Discord Rich Embed for the Steam Library Duel command.
+ * Symmetrical architecture: neutral Steam combat branding, side-by-side ANSI scoreboard,
+ * and balanced inline telemetry fields comparing both players with identical visual weight.
  *
  * @param comparison - Library comparison result from compareLibraries()
  * @param summaryA - Player A profile summary
@@ -1431,8 +1485,6 @@ export function buildDuelEmbedPayload(
   const personaB = summaryB?.personaName ?? summaryB?.personaname ?? 'Player B';
   const steamIdA = summaryA?.steamId ?? summaryA?.steamid ?? '';
   const steamIdB = summaryB?.steamId ?? summaryB?.steamid ?? '';
-  const avatarA = summaryA?.avatarUrl ?? summaryA?.avatarfull ?? null;
-  const avatarB = summaryB?.avatarUrl ?? summaryB?.avatarfull ?? null;
 
   const commonCount = comparison.commonCount ?? comparison.totalCommon ?? 0;
 
@@ -1467,7 +1519,7 @@ export function buildDuelEmbedPayload(
   const scoreboardAnsi = `\`\`\`ansi\n${ansiLines.join('\n')}\n\`\`\``;
 
   // ---------------------------------------------------------------------------
-  // Paginated shared-titles diff blocks (field)
+  // Paginated shared-titles diff blocks
   // ---------------------------------------------------------------------------
   const startIdx = (currentPage - 1) * PAGE_SIZE;
   const pageGames = (comparison?.commonGames ?? []).slice(startIdx, startIdx + PAGE_SIZE);
@@ -1501,116 +1553,63 @@ export function buildDuelEmbedPayload(
   }).join('\n');
 
   // ---------------------------------------------------------------------------
-  // Player A Telemetry Fields
+  // Symmetrical Inline Comparison Fields
   // ---------------------------------------------------------------------------
-  const fieldsA: import('../types/index.js').DiscordEmbedField[] = [
+  const resolvedCountA = countA ?? (comparison as any)?.countA ?? commonCount;
+  const resolvedCountB = countB ?? (comparison as any)?.countB ?? commonCount;
+
+  const fields: import('../types/index.js').DiscordEmbedField[] = [
     {
       name: '\u25b8 Library',
-      value: `${countA ?? commonCount} games`,
+      value: `**${personaA}:** ${resolvedCountA} games\n**${personaB}:** ${resolvedCountB} games`,
       inline: true,
     },
     {
       name: '\u25b8 Total Playtime',
-      value: `${comparison.totalHoursA}h`,
-      inline: true,
-    },
-  ];
-
-  if (steamLevelA !== null) {
-    fieldsA.push({
-      name: '\u25b8 Steam Level',
-      value: `Lv. ${steamLevelA}`,
-      inline: true,
-    });
-  }
-
-  if (badgeCountA !== null) {
-    fieldsA.push({
-      name: '\u25b8 Badges',
-      value: `${badgeCountA} badges`,
-      inline: true,
-    });
-  }
-
-  if (accountAgeA) {
-    fieldsA.push({
-      name: '\u25b8 Account Since',
-      value: accountAgeA.substring(0, 10),
-      inline: true,
-    });
-  }
-
-  // ---------------------------------------------------------------------------
-  // Player B Telemetry & Showdown Fields
-  // ---------------------------------------------------------------------------
-  const fieldsB: import('../types/index.js').DiscordEmbedField[] = [
-    {
-      name: '\u25b8 Library',
-      value: `${countB ?? commonCount} games`,
+      value: `**${personaA}:** ${comparison.totalHoursA}h\n**${personaB}:** ${comparison.totalHoursB}h`,
       inline: true,
     },
     {
-      name: '\u25b8 Total Playtime',
-      value: `${comparison.totalHoursB}h`,
+      name: '\u25b8 Steam Level',
+      value: `**${personaA}:** Lv. ${steamLevelA !== null ? steamLevelA : 'N/A'}\n**${personaB}:** Lv. ${steamLevelB !== null ? steamLevelB : 'N/A'}`,
       inline: true,
+    },
+    {
+      name: '\u25b8 Badges',
+      value: `**${personaA}:** ${badgeCountA !== null ? `${badgeCountA} badges` : 'N/A'}\n**${personaB}:** ${badgeCountB !== null ? `${badgeCountB} badges` : 'N/A'}`,
+      inline: true,
+    },
+    {
+      name: '\u25b8 Account Age',
+      value: `**${personaA}:** ${accountAgeA ? accountAgeA.substring(0, 10) : 'N/A'}\n**${personaB}:** ${accountAgeB ? accountAgeB.substring(0, 10) : 'N/A'}`,
+      inline: true,
+    },
+    {
+      name: `\u25b8 Shared Titles [Page ${currentPage}/${totalPages}]`,
+      value: diffBlocks || '*No shared titles on this page.*',
+      inline: false,
     },
   ];
 
-  if (steamLevelB !== null) {
-    fieldsB.push({
-      name: '\u25b8 Steam Level',
-      value: `Lv. ${steamLevelB}`,
-      inline: true,
-    });
-  }
-
-  if (badgeCountB !== null) {
-    fieldsB.push({
-      name: '\u25b8 Badges',
-      value: `${badgeCountB} badges`,
-      inline: true,
-    });
-  }
-
-  if (accountAgeB) {
-    fieldsB.push({
-      name: '\u25b8 Account Since',
-      value: accountAgeB.substring(0, 10),
-      inline: true,
-    });
-  }
-
-  // Shared titles diff block as its own field in Player B embed
-  fieldsB.push({
-    name: `\u25b8 Shared Titles [Page ${currentPage}/${totalPages}]`,
-    value: diffBlocks || '*No shared titles on this page.*',
-    inline: false,
-  });
-
   // ---------------------------------------------------------------------------
-  // Symmetrical Synchronized Embeds
+  // Single Unified Embed
   // ---------------------------------------------------------------------------
-  const playerAEmbed: DiscordEmbed = {
-    title: `${personaA} \u2014 Steam Profile`,
-    url: steamIdA ? `https://steamcommunity.com/profiles/${steamIdA}` : undefined,
-    color: BRAND_COLORS.STEAM,
-    fields: fieldsA,
-    thumbnail: avatarA ? { url: avatarA } : undefined,
-    footer: {
-      text: 'zT Radar \u2022 Steam Duel',
+  const duelEmbed: DiscordEmbed = {
+    author: {
+      name: 'Steam Library Duel',
+      icon_url: STEAM_DUEL_ICON,
     },
-    timestamp: new Date().toISOString(),
-  };
-
-  const playerBEmbed: DiscordEmbed = {
-    title: `${personaB} \u2014 Steam Profile`,
-    url: steamIdB ? `https://steamcommunity.com/profiles/${steamIdB}` : undefined,
+    title: `${personaA} \u2694\ufe0f ${personaB} \u2014 Steam Library Duel`,
     description: scoreboardAnsi,
-    color: BRAND_COLORS.DISCORD_BLURPLE,
-    fields: fieldsB,
-    thumbnail: avatarB ? { url: avatarB } : undefined,
+    color: BRAND_COLORS.STEAM,
+    fields,
+    thumbnail: {
+      url: STEAM_DUEL_ICON,
+    },
     footer: {
-      text: `Page ${currentPage} of ${totalPages} \u2022 zT Radar \u2022 Steam Duel`,
+      text: totalPages > 1
+        ? `Page ${currentPage} of ${totalPages} \u2022 zT Radar \u2022 Steam Duel`
+        : 'zT Radar \u2022 Steam Duel',
     },
     timestamp: new Date().toISOString(),
   };
@@ -1637,7 +1636,7 @@ export function buildDuelEmbedPayload(
     },
   ] : [];
 
-  return { embed: playerAEmbed, embeds: [playerAEmbed, playerBEmbed], components };
+  return { embed: duelEmbed, embeds: [duelEmbed], components };
 }
 
 
@@ -2097,23 +2096,59 @@ export function buildGameMatchEmbedPayload(
 // ---------------------------------------------------------------------------
 
 /**
+ * Generates external achievement tracker URLs for a Steam game.
+ */
+export function getAchievementTrackerLinks(
+  appId: number,
+  gameTitle: string,
+): AchievementTrackerLinks {
+  const slug = gameTitle
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+
+  const steamHunters = `https://steamhunters.com/apps/${appId}`;
+  const exophase = slug
+    ? `https://www.exophase.com/game/${slug}/achievements/`
+    : `https://www.exophase.com/search/?q=${encodeURIComponent(gameTitle)}`;
+
+  return {
+    steamHunters,
+    exophase,
+    steamHuntersUrl: steamHunters,
+    exophaseUrl: exophase,
+  };
+}
+
+/**
  * Generates a single Discord Rich Embed for the /steam-achievements command.
- * Color-coded by completion rate. Shows ANSI progress bar, recent unlocks, and next targets.
+ * Color-coded by completion rate. Shows ANSI progress bar, paginated achievements list,
+ * filter indicators, pagination action row, and external tracker buttons.
  *
  * @param achievementResult - Full achievement result from getPlayerAchievementsForGame()
  * @param summary - Player profile summary
  * @param gameTitle - Display title of the game being queried
+ * @param page - Current pagination page (1-indexed, default: 1)
+ * @param filter - Filter mode ('all' | 'unlocked' | 'locked', default: 'all')
+ * @param appId - Steam App ID for tracker links and interactive pagination
+ * @param steamId - Steam ID 64 for interactive pagination
  */
 export function buildAchievementsEmbedPayload(
-  achievementResult: import('../types/index.js').PlayerAchievementsResult,
+  achievementResult: PlayerAchievementsResult,
   summary: PlayerSummaryLike,
   gameTitle: string,
+  page: number = 1,
+  filter: AchievementFilterMode = 'all',
+  appId?: number,
+  steamId?: string,
 ): EmbedPayload {
   const personaName = summary?.personaName ?? summary?.personaname ?? 'Player';
   const avatarUrl = summary?.avatarUrl ?? summary?.avatarfull ?? null;
 
   const { total, unlocked, percent, gameName } = achievementResult;
   const resolvedTitle = gameName ?? gameTitle;
+  const targetAppId = appId ?? achievementResult.appId;
+  const targetSteamId = steamId ?? summary?.steamId ?? summary?.steamid ?? '';
 
   // Color based on completion percentage
   const color =
@@ -2145,51 +2180,104 @@ export function buildAchievementsEmbedPayload(
 
   const description = `\`\`\`ansi\n${ansiLines.join('\n')}\n\`\`\``;
 
-  // Recently unlocked achievements (up to 5, most recent first)
-  const recentlyUnlocked = achievementResult.achievements
-    .filter((a) => a.achieved)
-    .slice(0, 5);
+  // Filter achievements
+  let items = achievementResult.achievements || [];
+  if (filter === 'unlocked') {
+    items = items.filter((a) => a.achieved);
+  } else if (filter === 'locked') {
+    items = items.filter((a) => !a.achieved);
+  }
 
-  // Next targets: locked achievements (alphabetical, up to 5)
-  const nextTargets = achievementResult.achievements
-    .filter((a) => !a.achieved)
-    .slice(0, 5);
+  // Pagination (6 achievements per page)
+  const PAGE_SIZE = 6;
+  const totalFiltered = items.length;
+  const totalPages = Math.max(1, Math.ceil(totalFiltered / PAGE_SIZE));
+  const requestedPage = typeof page === 'number' && page >= 1 ? page : 1;
+  const currentPage = Math.min(Math.max(1, requestedPage), totalPages);
 
-  const fields: import('../types/index.js').DiscordEmbedField[] = [];
+  const startIdx = (currentPage - 1) * PAGE_SIZE;
+  const pageItems = items.slice(startIdx, startIdx + PAGE_SIZE);
 
-  if (recentlyUnlocked.length > 0) {
-    const unlockedText = recentlyUnlocked.map((a) => {
-      const desc = a.description ? ` — ${a.description}` : '';
-      const truncated = desc.length > 80 ? desc.substring(0, 77) + '...' : desc;
-      return `\u25b8 **${a.displayName}**${truncated}`;
-    }).join('\n');
+  let formattedItems = '';
+  if (pageItems.length === 0) {
+    formattedItems = `*No achievements found matching filter: \`${filter}\`.*`;
+  } else {
+    formattedItems = pageItems
+      .map((a) => {
+        if (a.achieved) {
+          const dateStr = a.unlockTime ? ` \u2022 <t:${a.unlockTime}:d>` : '';
+          const descStr = a.description
+            ? `\n  \u2514\u2500 ${a.description}${dateStr}`
+            : dateStr
+            ? `\n  \u2514\u2500 Unlocked${dateStr}`
+            : '';
+          return `\u25b8 [\u2714] **${a.displayName}**${descStr}`;
+        } else {
+          const descStr = a.description
+            ? `\n  \u2514\u2500 ${a.description} *(Locked)*`
+            : '\n  \u2514\u2500 *(Locked)*';
+          return `\u25b8 [\u2716] **${a.displayName}**${descStr}`;
+        }
+      })
+      .join('\n\n');
+  }
 
-    fields.push({
-      name: '\u2756 Recently Unlocked',
-      value: unlockedText.substring(0, 1024),
+  const filterLabel =
+    filter === 'unlocked' ? 'Unlocked' :
+    filter === 'locked' ? 'Locked' :
+    'All';
+
+  const fields: import('../types/index.js').DiscordEmbedField[] = [
+    {
+      name: `\u2756 Achievements [Page ${currentPage}/${totalPages} \u2022 Filter: ${filterLabel}]`,
+      value: formattedItems.substring(0, 1024),
       inline: false,
+    },
+  ];
+
+  // Components (Navigation row + Tracker links row)
+  const components: any[] = [];
+
+  if (totalPages > 1) {
+    components.push({
+      type: 1 as const,
+      components: [
+        {
+          type: 2 as const,
+          style: 2 as const,
+          label: '\u25c4 Prev',
+          custom_id: `ach:page:${currentPage - 1}:${targetAppId || 0}:${targetSteamId || '0'}:${filter}`,
+          disabled: currentPage <= 1,
+        },
+        {
+          type: 2 as const,
+          style: 1 as const,
+          label: 'Next \u25ba',
+          custom_id: `ach:page:${currentPage + 1}:${targetAppId || 0}:${targetSteamId || '0'}:${filter}`,
+          disabled: currentPage >= totalPages,
+        },
+      ],
     });
   }
 
-  if (nextTargets.length > 0) {
-    const lockedText = nextTargets.map((a) => {
-      const desc = a.description ? ` — ${a.description}` : '';
-      const truncated = desc.length > 80 ? desc.substring(0, 77) + '...' : desc;
-      return `\u25b8 **${a.displayName}**${truncated}`;
-    }).join('\n');
-
-    fields.push({
-      name: '\u25cb Next Targets',
-      value: lockedText.substring(0, 1024),
-      inline: false,
-    });
-  }
-
-  if (recentlyUnlocked.length === 0 && nextTargets.length === 0) {
-    fields.push({
-      name: '\u25b8 Status',
-      value: '*Achievement data unavailable for this game.*',
-      inline: false,
+  if (targetAppId) {
+    const trackers = getAchievementTrackerLinks(targetAppId, resolvedTitle);
+    components.push({
+      type: 1 as const,
+      components: [
+        {
+          type: 2 as const,
+          style: 5 as const,
+          label: 'SteamHunters',
+          url: trackers.steamHunters,
+        },
+        {
+          type: 2 as const,
+          style: 5 as const,
+          label: 'Exophase',
+          url: trackers.exophase,
+        },
+      ],
     });
   }
 
@@ -2203,10 +2291,10 @@ export function buildAchievementsEmbedPayload(
     color,
     fields,
     footer: {
-      text: 'zT Radar \u2022 Steam Achievements',
+      text: `Page ${currentPage} of ${totalPages} \u2022 Filter: ${filterLabel} \u2022 zT Radar \u2022 Steam Achievements`,
     },
     timestamp: new Date().toISOString(),
   };
 
-  return { embed, embeds: [embed], components: [] };
+  return { embed, embeds: [embed], components };
 }

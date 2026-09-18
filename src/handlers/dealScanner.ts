@@ -12,6 +12,7 @@ import {
   getMarketOverviewDeals,
   formatExpiryAvailability,
   formatPriceComparisonDiff,
+  fetchSteamRegionalBrlPrice,
 } from '../utils/itadApi.js';
 import type {
   DynamoDbWishlistItem,
@@ -235,9 +236,29 @@ export const handler = async (): Promise<{ statusCode: number; body: string }> =
           continue;
         }
 
-        const preferredCurrency = userCurrencyMap.get(userId) || 'USD';
+        const preferredCurrency = userCurrencyMap.get(userId) || (item as any).currency || (item as any).preferred_currency || 'USD';
         const deal = await getGameDealInfo(item.external_game_id, preferredCurrency, item.game_title);
-        if (!deal) continue;
+        if (!deal || !deal.primaryDeal) continue;
+
+        // Strict currency validation for BRL users
+        if (preferredCurrency === 'BRL') {
+          if (deal.primaryDeal.currency !== 'BRL' || deal.primaryDeal.currencySymbol !== 'R$') {
+            if (deal.steamAppId) {
+              const brlPrice = await fetchSteamRegionalBrlPrice(deal.steamAppId);
+              if (brlPrice) {
+                deal.primaryDeal.salePrice = brlPrice.salePrice;
+                deal.primaryDeal.regularPrice = brlPrice.regularPrice;
+                deal.primaryDeal.cutPercent = brlPrice.cutPercent;
+                deal.primaryDeal.currency = 'BRL';
+                deal.primaryDeal.currencySymbol = 'R$';
+              } else {
+                continue; // Discard non-BRL deal from BRL user queue
+              }
+            } else {
+              continue; // Discard non-BRL deal from BRL user queue
+            }
+          }
+        }
 
         // Auto-heal & clean resolved display title
         const resolvedTitle = deal.title && !deal.title.startsWith('Steam App #') ? deal.title : item.game_title;
@@ -266,7 +287,7 @@ export const handler = async (): Promise<{ statusCode: number; body: string }> =
         const effectivePrice = deal.cheaperAlternative?.salePrice ?? deal.primaryDeal?.salePrice ?? 0;
         const effectiveCut = deal.cheaperAlternative?.cutPercent ?? deal.primaryDeal?.cutPercent ?? 0;
         const regularPrice = deal.cheaperAlternative?.regularPrice ?? deal.primaryDeal?.regularPrice ?? 0;
-        const sym = deal.primaryDeal?.currencySymbol || (preferredCurrency === 'BRL' ? 'R$' : '$');
+        const sym = preferredCurrency === 'BRL' ? 'R$' : (deal.primaryDeal?.currencySymbol || '$');
 
         // Reset notification state if the game has returned to base retail price
         const isBaseRetail =
@@ -569,9 +590,30 @@ export const handler = async (): Promise<{ statusCode: number; body: string }> =
 
         for (const deal of marketDeals) {
           if (sentThisRun >= 3) break;
+          if (!deal.primaryDeal) continue;
 
-          const isFree = deal.primaryDeal?.salePrice === 0;
-          const cut = deal.primaryDeal?.cutPercent ?? 0;
+          // Strict currency enforcement for BRL broadcasts
+          if (targetCurrency === 'BRL') {
+            if (deal.primaryDeal.currency !== 'BRL' || deal.primaryDeal.currencySymbol !== 'R$') {
+              if (deal.steamAppId) {
+                const brlPrice = await fetchSteamRegionalBrlPrice(deal.steamAppId);
+                if (brlPrice) {
+                  deal.primaryDeal.salePrice = brlPrice.salePrice;
+                  deal.primaryDeal.regularPrice = brlPrice.regularPrice;
+                  deal.primaryDeal.cutPercent = brlPrice.cutPercent;
+                  deal.primaryDeal.currency = 'BRL';
+                  deal.primaryDeal.currencySymbol = 'R$';
+                } else {
+                  continue; // Discard non-BRL deal from BRL broadcast queue
+                }
+              } else {
+                continue; // Discard non-BRL deal from BRL broadcast queue
+              }
+            }
+          }
+
+          const isFree = deal.primaryDeal.salePrice === 0;
+          const cut = deal.primaryDeal.cutPercent ?? 0;
           const isFreeWeekend = deal.dealType === 'FREE_PLAY_DAYS';
           const isFreeToKeep = deal.dealType === 'FREE_TO_KEEP';
           const uniqueDealKey = `${deal.gameId}_${deal.primaryDeal.salePrice}`;
@@ -587,7 +629,7 @@ export const handler = async (): Promise<{ statusCode: number; body: string }> =
             continue;
           }
 
-          const sym = deal.primaryDeal.currencySymbol || (targetCurrency === 'BRL' ? 'R$' : '$');
+          const sym = targetCurrency === 'BRL' ? 'R$' : (deal.primaryDeal.currencySymbol || '$');
 
           let embedColor: number = ALERT_PALETTE.CURATED_DEAL;
           let bannerHeadline = `High-value promotion detected (**-${cut}%**)!`;

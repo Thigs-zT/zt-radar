@@ -533,6 +533,28 @@ export interface SteamAchievementEntry {
   unlockTime: number;
 }
 
+/** Filter mode for achievements inspection: all, unlocked, or locked. */
+export type AchievementFilterMode = 'all' | 'unlocked' | 'locked';
+
+/** Schema achievement entry from ISteamUserStats/GetSchemaForGame/v2. */
+export interface SteamSchemaAchievement {
+  name: string;
+  defaultvalue?: number;
+  displayName: string;
+  hidden: number;
+  description?: string;
+  icon?: string;
+  icongray?: string;
+}
+
+/** External tracker links for a Steam title. */
+export interface AchievementTrackerLinks {
+  steamHunters: string;
+  exophase: string;
+  steamHuntersUrl?: string;
+  exophaseUrl?: string;
+}
+
 /** Full result from getPlayerAchievementsForGame. */
 export interface PlayerAchievementsResult {
   /** Total number of achievements for this game. */
@@ -545,6 +567,8 @@ export interface PlayerAchievementsResult {
   gameName: string | null;
   /** Full achievement list, sorted: unlocked (most recent first), then locked. */
   achievements: SteamAchievementEntry[];
+  /** Optional Steam AppID of the game. */
+  appId?: number;
 }
 
 // ---------------------------------------------------------------------------

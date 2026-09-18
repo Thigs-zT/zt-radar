@@ -781,6 +781,99 @@ export const handler = async (
       }
     }
 
+    if (customId.startsWith('ach:page:')) {
+      const parts = customId.split(':');
+      const targetPage = parseInt(parts[2], 10) || 1;
+      const appId = parseInt(parts[3], 10);
+      const steamId = parts[4];
+      const filterMode = (parts[5] as 'all' | 'unlocked' | 'locked') || 'all';
+
+      if (!appId || !steamId || !STEAM_API_KEY) {
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: RESPONSE_TYPES.UPDATE_MESSAGE,
+            data: {
+              embeds: [
+                {
+                  title: 'Achievements Inaccessible',
+                  description: 'Unable to load achievement data for pagination.',
+                  color: PALETTE.DANGER,
+                },
+              ],
+            },
+          }),
+        };
+      }
+
+      try {
+        const [summary, achievements] = await Promise.all([
+          getPlayerSummary(steamId, STEAM_API_KEY),
+          getPlayerAchievementsForGame(steamId, appId, STEAM_API_KEY),
+        ]);
+
+        if (!summary || !achievements) {
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              type: RESPONSE_TYPES.UPDATE_MESSAGE,
+              data: {
+                embeds: [
+                  {
+                    title: 'Pagination Error',
+                    description: 'Failed to retrieve achievement data.',
+                    color: PALETTE.DANGER,
+                  },
+                ],
+              },
+            }),
+          };
+        }
+
+        const { embeds, components } = buildAchievementsEmbedPayload(
+          achievements,
+          summary,
+          achievements.gameName || 'Achievements',
+          targetPage,
+          filterMode,
+          appId,
+          steamId,
+        );
+
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: RESPONSE_TYPES.UPDATE_MESSAGE,
+            data: {
+              embeds,
+              components,
+            },
+          }),
+        };
+      } catch (err) {
+        console.error('Error in achievements pagination:', err);
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: RESPONSE_TYPES.UPDATE_MESSAGE,
+            data: {
+              embeds: [
+                {
+                  title: 'Pagination Error',
+                  description: 'An error occurred while loading achievements page.',
+                  color: PALETTE.DANGER,
+                },
+              ],
+            },
+          }),
+        };
+      }
+    }
+
     if (customId.startsWith('backlog_p:')) {
       const parts = customId.split(':');
       const targetPage = parseInt(parts[1], 10) || 1;
@@ -2800,10 +2893,11 @@ export const handler = async (
       }
     }
 
-    // Command: /steam-achievements <game> [target]
+    // Command: /steam-achievements <game> [target] [filter]
     if (name === 'steam-achievements') {
       const gameOption = options?.find((opt) => opt.name === 'game')?.value;
       const targetOption = options?.find((opt) => opt.name === 'target')?.value?.trim();
+      const filterOption = (options?.find((opt) => opt.name === 'filter')?.value as 'all' | 'unlocked' | 'locked') || 'all';
 
       if (!STEAM_API_KEY) {
         return {
@@ -2921,7 +3015,15 @@ export const handler = async (
           };
         }
 
-        const { embed } = buildAchievementsEmbedPayload(achievements, summary, gameTitle);
+        const { embeds, components } = buildAchievementsEmbedPayload(
+          achievements,
+          summary,
+          gameTitle,
+          1,
+          filterOption,
+          steamAppId,
+          targetSteamId,
+        );
 
         return {
           statusCode: 200,
@@ -2929,7 +3031,8 @@ export const handler = async (
           body: JSON.stringify({
             type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
             data: {
-              embeds: [embed],
+              embeds,
+              components,
             },
           }),
         };

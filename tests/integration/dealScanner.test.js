@@ -471,4 +471,133 @@ describe('Deal Scanner Integration & In-Memory AWS Mocks', () => {
       expect(alertUpdateCall.args[0].input.ExpressionAttributeValues[':cut']).toBe(60);
     });
   });
+
+  describe('Strict BRL Regional Currency Enforcement', () => {
+    it('should discard USD deals without BRL pricing for BRL wishlist users', async () => {
+      const brlWishlistItem = {
+        PK: `USER#${MOCK_USER_ID}`,
+        SK: 'GAME#cs_deal_usd_only',
+        user_id: MOCK_USER_ID,
+        external_game_id: 'cs:12345',
+        game_title: 'CheapShark Exclusive USD Title',
+        min_discount: 50,
+        alert_all_time_low: true,
+        currency: 'BRL',
+        last_notified_price: null,
+        last_notified_cut: 0,
+      };
+
+      ddbMock.on(ScanCommand).resolves({
+        Items: [brlWishlistItem],
+      });
+
+      // Deal returned is USD only (CheapShark offer without Steam AppID or BRL symbol)
+      getGameDealInfo.mockResolvedValueOnce({
+        title: 'CheapShark Exclusive USD Title',
+        dealType: 'CURATED_DEAL',
+        isAllTimeLow: true,
+        currency: 'USD',
+        currencySymbol: '$',
+        primaryDeal: {
+          shopName: 'CheapShark',
+          salePrice: 9.99,
+          regularPrice: 29.99,
+          cutPercent: 66,
+          currency: 'USD',
+          currencySymbol: '$',
+        },
+      });
+
+      const response = await handler();
+      expect(response.statusCode).toBe(200);
+
+      // Verify no Discord DM notification was sent with USD price
+      const discordMessagesCall = globalThis.fetch.mock.calls.find((call) =>
+        String(call[0]).includes('/messages')
+      );
+      expect(discordMessagesCall).toBeUndefined();
+    });
+
+    it('should enforce regional BRL price fallback when CheapShark deal has steamAppId', async () => {
+      const brlWishlistItem = {
+        PK: `USER#${MOCK_USER_ID}`,
+        SK: 'GAME#cs_with_steam_fallback',
+        user_id: MOCK_USER_ID,
+        external_game_id: 'steam:1086940',
+        game_title: 'Steam App Fallback Game',
+        min_discount: 40,
+        alert_all_time_low: true,
+        currency: 'BRL',
+        last_notified_price: null,
+        last_notified_cut: 0,
+      };
+
+      ddbMock.on(ScanCommand).resolves({
+        Items: [brlWishlistItem],
+      });
+      ddbMock.on(UpdateCommand).resolves({});
+
+      // getGameDealInfo returns USD info but has steamAppId
+      getGameDealInfo.mockResolvedValueOnce({
+        title: 'Steam App Fallback Game',
+        steamAppId: 1086940,
+        dealType: 'CURATED_DEAL',
+        isAllTimeLow: true,
+        currency: 'USD',
+        currencySymbol: '$',
+        primaryDeal: {
+          shopName: 'CheapShark',
+          salePrice: 19.99,
+          regularPrice: 49.99,
+          cutPercent: 60,
+          currency: 'USD',
+          currencySymbol: '$',
+        },
+      });
+
+      // Mock Steam store API response in BRL (cc=br)
+      const prevFetch = globalThis.fetch;
+      globalThis.fetch = vi.fn(async (url, options) => {
+        const urlStr = String(url);
+        if (urlStr.includes('store.steampowered.com/api/appdetails') && urlStr.includes('cc=br')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              '1086940': {
+                success: true,
+                data: {
+                  is_free: false,
+                  price_overview: {
+                    currency: 'BRL',
+                    initial: 19999,
+                    final: 9999,
+                    discount_percent: 50,
+                    initial_formatted: 'R$ 199,99',
+                    final_formatted: 'R$ 99,99',
+                  },
+                },
+              },
+            }),
+          };
+        }
+        return prevFetch(url, options);
+      });
+
+      const response = await handler();
+      expect(response.statusCode).toBe(200);
+
+      // Verify Discord DM was sent
+      const discordMessagesCall = globalThis.fetch.mock.calls.find((call) =>
+        String(call[0]).includes('/messages')
+      );
+      expect(discordMessagesCall).toBeDefined();
+
+      // Verify the message embed content contains R$ and not $
+      const payload = JSON.parse(discordMessagesCall[1].body);
+      const embedField = payload.embeds[0].fields[0].value;
+      expect(embedField).toContain('R$');
+      expect(embedField).not.toContain('$ 19.99');
+    });
+  });
 });

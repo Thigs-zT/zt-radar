@@ -588,9 +588,51 @@ interface RawSteamFeaturedCategories {
 }
 
 /**
+ * Fetches regional BRL pricing directly from Steam Store API for a given AppID.
+ * Returns null if the title is delisted, invalid, or lacks BRL pricing.
+ */
+export async function fetchSteamRegionalBrlPrice(appId: number | string): Promise<{
+  salePrice: number;
+  regularPrice: number;
+  cutPercent: number;
+  currency: string;
+  currencySymbol: string;
+} | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 2000);
+  try {
+    const url = `https://store.steampowered.com/api/appdetails?appids=${appId}&cc=br&filters=price_overview`;
+    const res = await fetch(url, {
+      headers: { 'User-Agent': USER_AGENT },
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    if (!res.ok) return null;
+    const data = (await res.json()) as Record<string, { success?: boolean; data?: { is_free?: boolean; price_overview?: { initial?: number; final?: number; discount_percent?: number; currency?: string } } }>;
+    const appData = data[String(appId)];
+    if (!appData?.success) return null;
+    const overview = appData.data?.price_overview;
+    if (!overview || overview.currency !== 'BRL') return null;
+    const regularPrice = (overview.initial ?? overview.final ?? 0) / 100;
+    const salePrice = (overview.final ?? 0) / 100;
+    const cutPercent = overview.discount_percent ?? 0;
+    return {
+      salePrice,
+      regularPrice,
+      cutPercent,
+      currency: 'BRL',
+      currencySymbol: 'R$',
+    };
+  } catch {
+    clearTimeout(timer);
+    return null;
+  }
+}
+
+/**
  * Probes Steam Store categories for active Free Weekend / Play For Free promotions.
  */
-async function fetchSteamFreeWeekends(): Promise<GameDealInfo[]> {
+async function fetchSteamFreeWeekends(preferredCurrency: string = 'USD'): Promise<GameDealInfo[]> {
   try {
     const url = 'https://store.steampowered.com/api/featuredcategories/';
     const res = await fetch(url, { headers: { 'User-Agent': USER_AGENT } });
@@ -621,8 +663,8 @@ async function fetchSteamFreeWeekends(): Promise<GameDealInfo[]> {
           regularPrice: item.original_price ? item.original_price / 100 : 0,
           cutPercent: 100,
           url: `https://store.steampowered.com/app/${appIdStr}/`,
-          currency: 'USD',
-          currencySymbol: '$',
+          currency: preferredCurrency === 'BRL' ? 'BRL' : 'USD',
+          currencySymbol: preferredCurrency === 'BRL' ? 'R$' : '$',
           expiry: null,
         };
 
@@ -773,9 +815,54 @@ export async function getMarketOverviewDeals(
       }
     }
 
+async function batchFetchSteamBrlOverview(appIds: string[]): Promise<Map<string, {
+  salePrice: number;
+  regularPrice: number;
+  cutPercent: number;
+}>> {
+  const resultMap = new Map<string, { salePrice: number; regularPrice: number; cutPercent: number }>();
+  if (!Array.isArray(appIds) || appIds.length === 0) return resultMap;
+
+  const uniqueIds = Array.from(new Set(appIds)).slice(0, 50);
+  const CHUNK_SIZE = 25;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 2200);
+
+  try {
+    for (let i = 0; i < uniqueIds.length; i += CHUNK_SIZE) {
+      const chunk = uniqueIds.slice(i, i + CHUNK_SIZE);
+      const url = `https://store.steampowered.com/api/appdetails?appids=${chunk.join(',')}&cc=br&filters=price_overview`;
+      const res = await fetch(url, {
+        headers: { 'User-Agent': USER_AGENT },
+        signal: controller.signal,
+      });
+      if (!res.ok) continue;
+      const data = (await res.json()) as Record<string, { success?: boolean; data?: { is_free?: boolean; price_overview?: { initial?: number; final?: number; discount_percent?: number; currency?: string } } }>;
+      if (!data || typeof data !== 'object') continue;
+
+      for (const [idStr, appData] of Object.entries(data)) {
+        if (!appData?.success) continue;
+        const overview = appData.data?.price_overview;
+        if (!overview || overview.currency !== 'BRL') continue;
+        const regularPrice = (overview.initial ?? overview.final ?? 0) / 100;
+        const salePrice = (overview.final ?? 0) / 100;
+        const cutPercent = overview.discount_percent ?? 0;
+        resultMap.set(idStr, { salePrice, regularPrice, cutPercent });
+      }
+    }
+  } catch {
+    // Graceful fallback
+  } finally {
+    clearTimeout(timer);
+  }
+
+  return resultMap;
+}
+
     // 2. Fetch Active Steam Free Weekend / Play For Free Events
     try {
-      const activeFreeWeekends = await fetchSteamFreeWeekends();
+      const activeFreeWeekends = await fetchSteamFreeWeekends(preferredCurrency);
       for (const fw of activeFreeWeekends) {
         const norm = fw.title.toLowerCase().trim();
         if (!seenTitles.has(norm)) {
@@ -797,6 +884,18 @@ export async function getMarketOverviewDeals(
 
       if (csRes.ok) {
         const csDeals = (await csRes.json()) as RawCheapSharkDeal[];
+
+        let brlPricesMap = new Map<string, { salePrice: number; regularPrice: number; cutPercent: number }>();
+        if (preferredCurrency === 'BRL') {
+          const candidateAppIds: string[] = [];
+          for (const d of csDeals) {
+            if (d.steamAppID && /^\d+$/.test(d.steamAppID)) {
+              candidateAppIds.push(d.steamAppID);
+            }
+          }
+          brlPricesMap = await batchFetchSteamBrlOverview(candidateAppIds);
+        }
+
         for (const d of csDeals) {
           if (!d.title) continue;
 
@@ -820,15 +919,29 @@ export async function getMarketOverviewDeals(
 
           if (!isCuratedGame(d.title, shopName, imageUrl, includeThirdParty)) continue;
 
+          let salePrice = parseFloat(d.salePrice || '0');
+          let regularPrice = normalPrice;
+          let cutPercent = savings;
+          let currency = 'USD';
+          let currencySymbol = '$';
+
+          if (preferredCurrency === 'BRL') {
+            const brl = d.steamAppID ? brlPricesMap.get(d.steamAppID) : null;
+            if (!brl) {
+              // Discard USD deal when BRL pricing is strictly required but unavailable
+              continue;
+            }
+            salePrice = brl.salePrice;
+            regularPrice = brl.regularPrice;
+            cutPercent = brl.cutPercent;
+            currency = 'BRL';
+            currencySymbol = 'R$';
+          }
+
           const normalizedTitle = d.title.toLowerCase().trim();
           if (seenTitles.has(normalizedTitle)) continue;
           seenTitles.add(normalizedTitle);
 
-          const salePrice = parseFloat(d.salePrice || '0');
-          const regularPrice = normalPrice;
-          const cutPercent = savings;
-          const currency = 'USD';
-          const currencySymbol = '$';
           const dealUrl = `https://www.cheapshark.com/redirect?dealID=${d.dealID}`;
 
           const cheapSharkPrimaryDeal: StoreDeal = {
