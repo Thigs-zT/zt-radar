@@ -14,72 +14,27 @@ import type {
 } from '../types/index.js';
 import {
   BRAND_COLORS,
-  ANSI_CODES,
-  formatAnsiBlock,
   CUSTOM_STORE_EMOJIS,
-  resolveStoreBadge,
 } from './theme.js';
 
 /**
  * Curated list of official Valve Steam seasonal promotions and major festivals.
- * Chronologically indexed and timestamped in UTC.
+ * Verified with official SteamDB schedule and chronologically indexed in UTC.
  */
 export const STEAM_SALES_SCHEDULE: readonly SteamSaleEvent[] = [
-  {
-    name: 'Steam Next Fest: February 2026',
-    type: 'fest',
-    startDate: '2026-02-23T18:00:00Z',
-    endDate: '2026-03-02T18:00:00Z',
-    description: 'Valve multi-day celebration of upcoming PC games featuring hundreds of free playable demos and developer livestreams.',
-  },
   {
     name: 'Steam Spring Sale 2026',
     type: 'seasonal',
     startDate: '2026-03-19T17:00:00Z',
     endDate: '2026-03-26T17:00:00Z',
-    description: 'Official Valve Spring seasonal promotional event featuring catalog-wide discounts across thousands of titles.',
-  },
-  {
-    name: 'Steam Deckbuilders Fest',
-    type: 'fest',
-    startDate: '2026-03-30T17:00:00Z',
-    endDate: '2026-04-06T17:00:00Z',
-    description: 'Discounts and spotlight on card-battlers, roguelike deckbuilders, and tactical tabletop-inspired strategy games.',
-  },
-  {
-    name: 'Steam Open World Survival Craft Fest',
-    type: 'fest',
-    startDate: '2026-05-18T17:00:00Z',
-    endDate: '2026-05-25T17:00:00Z',
-    description: 'Celebration of open-world survival, base-building, and expansive crafting sandbox adventures.',
-  },
-  {
-    name: 'Steam Next Fest: June 2026',
-    type: 'fest',
-    startDate: '2026-06-08T17:00:00Z',
-    endDate: '2026-06-15T17:00:00Z',
-    description: 'Mid-year Next Fest edition showcasing hundreds of unreleased games and exclusive demo access.',
+    description: 'Catalog-wide discounts celebrating the arrival of Spring.',
   },
   {
     name: 'Steam Summer Sale 2026',
     type: 'seasonal',
     startDate: '2026-06-25T17:00:00Z',
     endDate: '2026-07-09T17:00:00Z',
-    description: 'The pinnacle mid-year Steam sale event with massive discounts across thousands of titles, special profile items, and badge events.',
-  },
-  {
-    name: 'Steam Fighting Games Fest',
-    type: 'fest',
-    startDate: '2026-07-27T17:00:00Z',
-    endDate: '2026-08-03T17:00:00Z',
-    description: 'Spotlighting traditional fighting games, 3D brawlers, martial arts, and arena combat experiences.',
-  },
-  {
-    name: 'Steam Turn-Based RPG Fest',
-    type: 'fest',
-    startDate: '2026-08-17T17:00:00Z',
-    endDate: '2026-08-24T17:00:00Z',
-    description: 'Discounts and developer spotlights on tactical turn-based roleplaying and strategy adventures.',
+    description: 'Mid-year premier Steam sale featuring thousands of game discounts.',
   },
   {
     name: 'Steam Space Exploration Fest',
@@ -89,39 +44,48 @@ export const STEAM_SALES_SCHEDULE: readonly SteamSaleEvent[] = [
     description: 'Dedicated festival celebrating space simulators, interplanetary exploration, and sci-fi sagas.',
   },
   {
-    name: 'Steam Next Fest: October 2026',
+    name: 'Autumn Sale 2026',
+    type: 'seasonal',
+    startDate: '2026-10-01T17:00:00Z',
+    endDate: '2026-10-08T17:00:00Z',
+    description: 'Massive storewide discounts across thousands of PC games.',
+    banner: 'https://shared.fastly.steamstatic.com/store_item_assets/steam/clusters/sale_autumn2024/0e84c9df4f71a4fdb23e9860/header_english.jpg',
+  },
+  {
+    name: 'Cooking Fest',
     type: 'fest',
     startDate: '2026-10-12T17:00:00Z',
     endDate: '2026-10-19T17:00:00Z',
-    description: 'Autumn edition of Next Fest presenting upcoming fall and winter PC game releases with playable demos.',
+    description: 'Celebration of culinary crafts, restaurant management, and cooking games.',
   },
   {
-    name: 'Steam Scream Fest (Halloween 2026)',
+    name: 'Steam Next Fest (October 2026)',
+    type: 'fest',
+    startDate: '2026-10-19T17:00:00Z',
+    endDate: '2026-10-26T17:00:00Z',
+    description: 'Multi-day celebration of upcoming PC games featuring hundreds of free playable demos and developer livestreams.',
+  },
+  {
+    name: 'Steam Scream V Fest (Halloween)',
     type: 'fest',
     startDate: '2026-10-26T17:00:00Z',
     endDate: '2026-11-02T17:00:00Z',
-    description: 'Annual Halloween celebration featuring discounts on survival horror, psychological thrillers, and spooky in-game events.',
+    description: 'Annual Halloween celebration featuring discounts on survival horror, psychological thrillers, and spooky games.',
   },
   {
-    name: 'Steam Autumn Sale 2026',
-    type: 'seasonal',
-    startDate: '2026-11-24T18:00:00Z',
-    endDate: '2026-12-01T18:00:00Z',
-    description: 'Major Black Friday & Cyber Week seasonal sale featuring the launch of Steam Awards nominations.',
-  },
-  {
-    name: 'Steam Winter Sale 2026',
-    type: 'seasonal',
-    startDate: '2026-12-17T18:00:00Z',
-    endDate: '2027-01-07T18:00:00Z',
-    description: 'The premier year-end holiday sale with platform-wide discounts, seasonal trading cards, and official Steam Awards voting.',
-  },
-  {
-    name: 'Steam Next Fest: February 2027',
+    name: 'Auto-Battler RPG Fest',
     type: 'fest',
-    startDate: '2027-02-22T18:00:00Z',
-    endDate: '2027-03-01T18:00:00Z',
-    description: 'Opening Next Fest of 2027 offering hundreds of new PC demos and developer chats.',
+    startDate: '2026-11-16T17:00:00Z',
+    endDate: '2026-11-23T17:00:00Z',
+    description: 'Discounts and developer spotlights on auto-battlers, tactical roguelikes, and squad strategy.',
+  },
+  {
+    name: 'Winter Sale 2026',
+    type: 'seasonal',
+    startDate: '2026-12-17T17:00:00Z',
+    endDate: '2027-01-07T17:00:00Z',
+    description: 'The premier year-end holiday sale with platform-wide discounts, seasonal trading cards, and official Steam Awards voting.',
+    banner: 'https://shared.fastly.steamstatic.com/store_item_assets/steam/clusters/sale_autumn2024/0e84c9df4f71a4fdb23e9860/header_english.jpg',
   },
   {
     name: 'Steam Spring Sale 2027',
@@ -194,6 +158,15 @@ function getDurationDays(startDate: string, endDate: string): number {
 }
 
 /**
+ * Formats event name for timeline listing by trimming repetitive annotations.
+ */
+function formatTimelineName(name: string): string {
+  return name
+    .replace(' (Halloween)', '')
+    .replace(' (October 2026)', ' (October)');
+}
+
+/**
  * Builds a branded Discord embed and action row button for the Steam Sales Calendar.
  *
  * @param referenceDate - Optional date override for testing.
@@ -211,69 +184,51 @@ export function buildSalesCalendarEmbed(referenceDate?: Date): {
   if (spotlightSale) {
     const startUnix = toUnix(spotlightSale.startDate);
     const endUnix = toUnix(spotlightSale.endDate);
-    const typeTag = spotlightSale.type === 'seasonal' ? 'Seasonal Sale' : 'Festival / Next Fest';
+    const days = getDurationDays(spotlightSale.startDate, spotlightSale.endDate);
+    const typeTag = spotlightSale.type === 'seasonal' ? 'Major Seasonal Sale' : 'Steam Festival';
 
     if (currentStatus.isActive) {
-      const ansiBox = formatAnsiBlock([
-        `${ANSI_CODES.BOLD_GREEN}[ ACTIVE NOW — VALVE PROMOTIONAL EVENT ]${ANSI_CODES.RESET}`,
-        `  Event:  ${ANSI_CODES.BOLD_WHITE}${spotlightSale.name}${ANSI_CODES.RESET}`,
-        `  Type:   ${ANSI_CODES.BOLD_YELLOW}${typeTag}${ANSI_CODES.RESET}`,
-        `  Ends:   <t:${endUnix}:R>`,
-        `  Dates:  <t:${startUnix}:D> – <t:${endUnix}:D>`,
-      ].join('\n'));
-
       spotlightDescription = [
-        ansiBox,
-        `★ **ACTIVE NOW — Ends <t:${endUnix}:R>**`,
-        `▸ **${spotlightSale.name}** \`[${typeTag}]\``,
-        `  └─ ${spotlightSale.description}`,
-        `  └─ **Date Range:** <t:${startUnix}:D> – <t:${endUnix}:D>`,
+        `## ❖ Active Now: ${spotlightSale.name}`,
+        `▸ **Type**: ${typeTag}`,
+        `▸ **Ends**: <t:${endUnix}:R> (<t:${endUnix}:D>)`,
+        `▸ **Duration**: ${days} Days (Started <t:${startUnix}:D>)`,
+        `└─ ${spotlightSale.description}`,
       ].join('\n');
     } else {
-      const ansiBox = formatAnsiBlock([
-        `${ANSI_CODES.BOLD_CYAN}[ NEXT CONFIRMED STEAM EVENT ]${ANSI_CODES.RESET}`,
-        `  Event:  ${ANSI_CODES.BOLD_WHITE}${spotlightSale.name}${ANSI_CODES.RESET}`,
-        `  Type:   ${ANSI_CODES.BOLD_YELLOW}${typeTag}${ANSI_CODES.RESET}`,
-        `  Starts: <t:${startUnix}:R>`,
-        `  Dates:  <t:${startUnix}:D> – <t:${endUnix}:D>`,
-      ].join('\n'));
-
       spotlightDescription = [
-        ansiBox,
-        `❖ **Next Confirmed Steam Event Spotlight**`,
-        `▸ **${spotlightSale.name}** \`[${typeTag}]\``,
-        `  └─ ${spotlightSale.description}`,
-        `  └─ **Countdown:** Starts <t:${startUnix}:R>`,
-        `  └─ **Date Range:** <t:${startUnix}:D> – <t:${endUnix}:D>`,
+        `## ❖ Spotlight: ${spotlightSale.name}`,
+        `▸ **Type**: ${typeTag}`,
+        `▸ **Starts**: <t:${startUnix}:R> (<t:${startUnix}:D>)`,
+        `▸ **Duration**: ${days} Days (Ends <t:${endUnix}:D>)`,
+        `└─ ${spotlightSale.description}`,
       ].join('\n');
     }
   } else {
     spotlightDescription = '▸ No upcoming sales currently recorded in the 2026–2027 calendar.';
   }
 
-  // Get upcoming schedule excluding currently active spotlighted sale from schedule list if already active
-  const allFuture = getUpcomingSales(6, referenceDate);
+  // Get upcoming schedule excluding currently spotlighted sale to prevent redundancy
+  const allFuture = getUpcomingSales(10, referenceDate);
   const scheduleEvents = allFuture
     .filter((e) => {
-      if (currentStatus.isActive && spotlightSale && e.name === spotlightSale.name) {
+      if (spotlightSale && e.name === spotlightSale.name) {
         return false;
       }
       return new Date(e.startDate).getTime() > now;
     })
-    .slice(0, 4);
+    .slice(0, 5);
 
   const scheduleLines = scheduleEvents.map((event) => {
     const sUnix = toUnix(event.startDate);
-    const days = getDurationDays(event.startDate, event.endDate);
-    const badge = event.type === 'seasonal' ? 'Seasonal' : 'Fest';
-
-    return `▸ **${event.name}** \`[${badge}]\` • <t:${sUnix}:d> (${days}d) • Starts <t:${sUnix}:R>`;
+    const displayName = formatTimelineName(event.name);
+    return `▸ **${displayName}** • <t:${sUnix}:d> (<t:${sUnix}:R>)`;
   });
 
   const fields = [];
   if (scheduleLines.length > 0) {
     fields.push({
-      name: '❖ Upcoming Steam Promotions & Major Festivals',
+      name: '❖ Upcoming Events Timeline',
       value: scheduleLines.join('\n'),
       inline: false,
     });
@@ -281,15 +236,18 @@ export function buildSalesCalendarEmbed(referenceDate?: Date): {
 
   const steamEmoji =
     CUSTOM_STORE_EMOJIS.steam_animated ||
-    CUSTOM_STORE_EMOJIS.steam ||
-    resolveStoreBadge('steam');
+    '<a:store_steam_animated:1549480222812930099>';
+
+  const bannerUrl =
+    spotlightSale?.banner ||
+    'https://shared.fastly.steamstatic.com/store_item_assets/steam/clusters/sale_autumn2024/0e84c9df4f71a4fdb23e9860/header_english.jpg';
 
   const embed: DiscordEmbed = {
-    title: `${steamEmoji} Steam Seasonal Sales & Major Fests Calendar`,
+    title: `${steamEmoji} Steam Sales & Major Events Calendar`,
     description: spotlightDescription,
     color: BRAND_COLORS.STEAM,
     image: {
-      url: 'https://shared.fastly.steamstatic.com/store_item_assets/steam/clusters/frontpage/c2e22c95/page_bg_english.jpg',
+      url: bannerUrl,
     },
     fields,
     footer: {
@@ -305,7 +263,7 @@ export function buildSalesCalendarEmbed(referenceDate?: Date): {
         {
           type: 2,
           style: 5,
-          label: 'Steam Sales History (SteamDB)',
+          label: 'View on SteamDB',
           url: 'https://steamdb.info/sales/history/',
         },
       ],

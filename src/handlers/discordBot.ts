@@ -1239,7 +1239,33 @@ export const handler = async (
       }
 
       try {
-        const newsList = await fetchGameNews(steamAppId);
+        let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+        const timeoutPromise = new Promise<null>((resolve) => {
+          timeoutHandle = setTimeout(() => resolve(null), 1900);
+        });
+
+        const newsResult = await Promise.race([
+          fetchGameNews(steamAppId),
+          timeoutPromise,
+        ]);
+
+        if (timeoutHandle) clearTimeout(timeoutHandle);
+
+        if (newsResult === null) {
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(
+              createEphemeralEmbed(
+                'News Dispatch Delayed',
+                `Valve's Steam News service did not respond in time for **${gameTitle}**. Please try again in a few moments.`,
+                PALETTE.WARNING
+              )
+            ),
+          };
+        }
+
+        const newsList = newsResult;
 
         if (newsList.length === 0) {
           return {

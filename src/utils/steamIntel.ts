@@ -47,18 +47,14 @@ interface SteamNewsApiResponse {
  * Fetches official game news and patch notes directly from Valve Steam Web API.
  */
 export async function fetchGameNews(appId: string | number): Promise<SteamNewsItem[]> {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 3500);
-
   try {
     const url = `https://api.steampowered.com/ISteamNews/GetNewsForApp/v2/?appid=${appId}&count=3&maxlength=400`;
     const res = await fetch(url, {
       headers: { 'User-Agent': USER_AGENT },
-      signal: controller.signal,
+      signal: AbortSignal.timeout(1800),
     });
 
     if (!res.ok) {
-      clearTimeout(timeoutId);
       return [];
     }
 
@@ -80,10 +76,8 @@ export async function fetchGameNews(appId: string | number): Promise<SteamNewsIt
       };
     });
 
-    clearTimeout(timeoutId);
     return parsedNews;
   } catch (err: unknown) {
-    clearTimeout(timeoutId);
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`Error fetching news for Steam AppID ${appId}:`, msg);
     return [];

@@ -648,6 +648,7 @@ export interface SteamSaleEvent {
   startDate: string;
   endDate: string;
   description: string;
+  banner?: string;
 }
 
 /** Active or upcoming sale status. */
