@@ -12,7 +12,13 @@ import type {
   DiscordEmbed,
   DiscordActionRow,
 } from '../types/index.js';
-import { BRAND_COLORS } from './theme.js';
+import {
+  BRAND_COLORS,
+  ANSI_CODES,
+  formatAnsiBlock,
+  CUSTOM_STORE_EMOJIS,
+  resolveStoreBadge,
+} from './theme.js';
 
 /**
  * Curated list of official Valve Steam seasonal promotions and major festivals.
@@ -208,19 +214,37 @@ export function buildSalesCalendarEmbed(referenceDate?: Date): {
     const typeTag = spotlightSale.type === 'seasonal' ? 'Seasonal Sale' : 'Festival / Next Fest';
 
     if (currentStatus.isActive) {
+      const ansiBox = formatAnsiBlock([
+        `${ANSI_CODES.BOLD_GREEN}[ ACTIVE NOW — VALVE PROMOTIONAL EVENT ]${ANSI_CODES.RESET}`,
+        `  Event:  ${ANSI_CODES.BOLD_WHITE}${spotlightSale.name}${ANSI_CODES.RESET}`,
+        `  Type:   ${ANSI_CODES.BOLD_YELLOW}${typeTag}${ANSI_CODES.RESET}`,
+        `  Ends:   <t:${endUnix}:R>`,
+        `  Dates:  <t:${startUnix}:D> – <t:${endUnix}:D>`,
+      ].join('\n'));
+
       spotlightDescription = [
+        ansiBox,
         `★ **ACTIVE NOW — Ends <t:${endUnix}:R>**`,
         `▸ **${spotlightSale.name}** \`[${typeTag}]\``,
         `  └─ ${spotlightSale.description}`,
-        `  └─ Date Range: <t:${startUnix}:D> – <t:${endUnix}:D>`,
+        `  └─ **Date Range:** <t:${startUnix}:D> – <t:${endUnix}:D>`,
       ].join('\n');
     } else {
+      const ansiBox = formatAnsiBlock([
+        `${ANSI_CODES.BOLD_CYAN}[ NEXT CONFIRMED STEAM EVENT ]${ANSI_CODES.RESET}`,
+        `  Event:  ${ANSI_CODES.BOLD_WHITE}${spotlightSale.name}${ANSI_CODES.RESET}`,
+        `  Type:   ${ANSI_CODES.BOLD_YELLOW}${typeTag}${ANSI_CODES.RESET}`,
+        `  Starts: <t:${startUnix}:R>`,
+        `  Dates:  <t:${startUnix}:D> – <t:${endUnix}:D>`,
+      ].join('\n'));
+
       spotlightDescription = [
+        ansiBox,
         `❖ **Next Confirmed Steam Event Spotlight**`,
         `▸ **${spotlightSale.name}** \`[${typeTag}]\``,
         `  └─ ${spotlightSale.description}`,
-        `  └─ Countdown: Starts <t:${startUnix}:R>`,
-        `  └─ Date Range: <t:${startUnix}:D> – <t:${endUnix}:D>`,
+        `  └─ **Countdown:** Starts <t:${startUnix}:R>`,
+        `  └─ **Date Range:** <t:${startUnix}:D> – <t:${endUnix}:D>`,
       ].join('\n');
     }
   } else {
@@ -240,29 +264,33 @@ export function buildSalesCalendarEmbed(referenceDate?: Date): {
 
   const scheduleLines = scheduleEvents.map((event) => {
     const sUnix = toUnix(event.startDate);
-    const eUnix = toUnix(event.endDate);
     const days = getDurationDays(event.startDate, event.endDate);
     const badge = event.type === 'seasonal' ? 'Seasonal' : 'Fest';
 
-    return [
-      `▸ **${event.name}** \`[${badge}]\``,
-      `  └─ <t:${sUnix}:d> – <t:${eUnix}:d> (${days} days) • Starts <t:${sUnix}:R>`,
-    ].join('\n');
+    return `▸ **${event.name}** \`[${badge}]\` • <t:${sUnix}:d> (${days}d) • Starts <t:${sUnix}:R>`;
   });
 
   const fields = [];
   if (scheduleLines.length > 0) {
     fields.push({
       name: '❖ Upcoming Steam Promotions & Major Festivals',
-      value: scheduleLines.join('\n\n'),
+      value: scheduleLines.join('\n'),
       inline: false,
     });
   }
 
+  const steamEmoji =
+    CUSTOM_STORE_EMOJIS.steam_animated ||
+    CUSTOM_STORE_EMOJIS.steam ||
+    resolveStoreBadge('steam');
+
   const embed: DiscordEmbed = {
-    title: 'zT Radar ❖ Steam Seasonal Sales & Major Fests Calendar',
+    title: `${steamEmoji} Steam Seasonal Sales & Major Fests Calendar`,
     description: spotlightDescription,
     color: BRAND_COLORS.STEAM,
+    image: {
+      url: 'https://shared.fastly.steamstatic.com/store_item_assets/steam/clusters/frontpage/c2e22c95/page_bg_english.jpg',
+    },
     fields,
     footer: {
       text: 'Valve Steam Official Schedule • Timestamps Synchronized with Local Discord Time',

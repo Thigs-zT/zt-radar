@@ -740,13 +740,14 @@ export async function getMarketOverviewDeals(
   preferredCurrency: string = 'USD',
 ): Promise<GameDealInfo[]> {
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 5500);
+  const timeoutId = setTimeout(() => controller.abort(), 1900);
+
+  const freeDeals: GameDealInfo[] = [];
+  const freeWeekendDeals: GameDealInfo[] = [];
+  const discountedDeals: GameDealInfo[] = [];
+  const seenTitles = new Set<string>();
 
   try {
-    const freeDeals: GameDealInfo[] = [];
-    const freeWeekendDeals: GameDealInfo[] = [];
-    const discountedDeals: GameDealInfo[] = [];
-    const seenTitles = new Set<string>();
 
     // 1. Fetch 100% Free Game Promotions (Keep Forever - Steam & Epic)
     const itadKey = process.env.ITAD_API_KEY || ITAD_API_KEY;
@@ -980,7 +981,7 @@ async function batchFetchSteamBrlOverview(appIds: string[]): Promise<Map<string,
   } catch (error: unknown) {
     clearTimeout(timeoutId);
     const msg = error instanceof Error ? error.message : String(error);
-    console.error('Fatal error in market overview deals lookup:', msg);
-    return [];
+    console.error('Fatal error or timeout in market overview deals lookup:', msg);
+    return [...freeDeals, ...freeWeekendDeals, ...discountedDeals];
   }
 }

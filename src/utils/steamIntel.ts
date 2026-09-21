@@ -91,12 +91,12 @@ export async function fetchGameNews(appId: string | number): Promise<SteamNewsIt
 }
 
 /**
- * Structures raw Steam system requirements into clean, tagged lines.
+ * Structures raw Steam system requirements into clean, boxed codeblocks.
  * Normalizes hardware tags (OS, Processor, Memory, Graphics, Storage, DirectX).
  */
 export function formatHardwareSpecs(rawSpecs: string): string {
   if (!rawSpecs || rawSpecs.trim() === 'Not specified by developer.') {
-    return '▸ *Not specified by developer.*';
+    return '```yaml\nStatus: Not specified by developer.\n```';
   }
 
   // Remove leading "Minimum:" or "Recommended:" headers if present
@@ -104,15 +104,15 @@ export function formatHardwareSpecs(rawSpecs: string): string {
 
   // Split by line breaks
   const rawLines = cleaned.split(/\n+/);
-  const formattedLines: string[] = [];
+  const blockLines: string[] = [];
 
   const tagPatterns: Array<{ key: string; regex: RegExp }> = [
     { key: 'OS', regex: /^(?:▸\s*)?(?:OS|Operating System)\s*:\s*(.+)$/i },
     { key: 'Processor', regex: /^(?:▸\s*)?(?:Processor|CPU)\s*:\s*(.+)$/i },
     { key: 'Memory', regex: /^(?:▸\s*)?(?:Memory|RAM)\s*:\s*(.+)$/i },
     { key: 'Graphics', regex: /^(?:▸\s*)?(?:Graphics|Video Card|GPU)\s*:\s*(.+)$/i },
-    { key: 'DirectX', regex: /^(?:▸\s*)?(?:DirectX)\s*:\s*(.+)$/i },
     { key: 'Storage', regex: /^(?:▸\s*)?(?:Storage|Hard Drive|Disk Space)\s*:\s*(.+)$/i },
+    { key: 'DirectX', regex: /^(?:▸\s*)?(?:DirectX)\s*:\s*(.+)$/i },
     { key: 'Sound Card', regex: /^(?:▸\s*)?(?:Sound Card|Audio)\s*:\s*(.+)$/i },
   ];
 
@@ -124,7 +124,8 @@ export function formatHardwareSpecs(rawSpecs: string): string {
     for (const { key, regex } of tagPatterns) {
       const match = trimmed.match(regex);
       if (match && match[1]) {
-        formattedLines.push(`▸ **${key}:** ${match[1].trim()}`);
+        const paddedKey = `${key}:`.padEnd(11, ' ');
+        blockLines.push(`${paddedKey}${match[1].trim()}`);
         matched = true;
         break;
       }
@@ -137,17 +138,18 @@ export function formatHardwareSpecs(rawSpecs: string): string {
         !cleanLine.toLowerCase().startsWith('minimum') &&
         !cleanLine.toLowerCase().startsWith('recommended')
       ) {
-        formattedLines.push(`▸ ${cleanLine}`);
+        blockLines.push(cleanLine);
       }
     }
   }
 
-  if (formattedLines.length === 0) {
-    return `▸ ${cleaned}`;
+  if (blockLines.length === 0) {
+    return `\`\`\`yaml\n${cleaned}\n\`\`\``;
   }
 
-  return formattedLines.join('\n');
+  return `\`\`\`yaml\n${blockLines.join('\n')}\n\`\`\``;
 }
+
 
 
 interface RawSteamAppDetailsResponse {

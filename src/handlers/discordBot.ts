@@ -57,6 +57,7 @@ import type {
   DiscordActionRow,
   PlatformStatusEntry,
   DynamoDbWishlistItem,
+  GameDealInfo,
 } from '../types/index.js';
 import {
   BRAND_COLORS,
@@ -1152,20 +1153,20 @@ export const handler = async (
           },
         ];
 
+        const steamBadge = resolveStoreBadge('steam');
+        const headerImageUrl = `https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/${steamAppId}/header.jpg`;
+
         const embed: DiscordEmbed = {
-          title: `zT Radar ❖ Hardware Benchmarks: ${specs.title}`,
+          title: `${steamBadge} Hardware Benchmarks ❖ ${specs.title}`,
           description: 'Official developer-specified PC system requirements from Steam.',
           color: PALETTE.BRAND,
+          image: { url: headerImageUrl },
           fields,
           footer: {
             text: 'zT Radar • Steam Store Hardware Database',
           },
           timestamp: new Date().toISOString(),
         };
-
-        if (specs.headerImage) {
-          embed.thumbnail = { url: specs.headerImage };
-        }
 
         return {
           statusCode: 200,
@@ -1250,26 +1251,38 @@ export const handler = async (
           };
         }
 
+        const steamBadge = resolveStoreBadge('steam');
+        const headerImageUrl = `https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/${steamAppId}/header.jpg`;
+
         const fields = newsList.map((n) => {
-          const timeTag = n.timestamp ? `<t:${n.timestamp}:d>` : n.date;
-          const relTag = n.timestamp ? ` • <t:${n.timestamp}:R>` : '';
-          const authorText = n.author ? ` by **${n.author}**` : '';
+          const timeTag = n.timestamp ? `<t:${n.timestamp}:R>` : n.date;
+          const authorText = n.author ? ` • by **${n.author}**` : '';
+          const snippet = n.snippet.length > 175 ? n.snippet.substring(0, 172) + '...' : n.snippet;
 
           return {
             name: `❖ ${n.title}`,
             value: [
-              `▸ **Published:** ${timeTag}${relTag}${authorText}`,
-              `  ${n.snippet}`,
-              `  └─ [Read Full Announcement on Steam](${n.url})`,
+              `▸ ${snippet}`,
+              `└─ Published ${timeTag}${authorText}`,
             ].join('\n'),
             inline: false,
           };
         });
 
+        const buttons = newsList.slice(0, 5).map((n, idx) => ({
+          type: 2, // BUTTON
+          style: 5, // LINK
+          label: `News #${idx + 1}: ${n.title.length > 18 ? n.title.substring(0, 15) + '...' : n.title}`,
+          url: n.url,
+        }));
+
+        const components = buttons.length > 0 ? [{ type: 1, components: buttons }] : [];
+
         const embed = {
-          title: `zT Radar ❖ Patch Notes & News: ${gameTitle}`,
+          title: `${steamBadge} Patch Notes & News ❖ ${gameTitle}`,
           description: 'Latest official developer dispatches published on Valve Steam Community.',
           color: PALETTE.BRAND,
+          image: { url: headerImageUrl },
           fields,
           footer: {
             text: 'Valve ISteamNews Web API • Verified Developer Announcements',
@@ -1285,6 +1298,7 @@ export const handler = async (
             data: {
               flags: MESSAGE_FLAGS.EPHEMERAL,
               embeds: [embed],
+              components,
             },
           }),
         };
@@ -1501,8 +1515,10 @@ export const handler = async (
 
         const components = buttons.length > 0 ? [{ type: 1, components: buttons.slice(0, 5) }] : [];
 
+        const steamBadge = resolveStoreBadge('steam');
+
         const embed: DiscordEmbed = {
-          title: `HowLongToBeat ❖ ${hltbData.gameTitle || gameTitle}`,
+          title: `${steamBadge} HowLongToBeat ❖ ${hltbData.gameTitle || gameTitle}`,
           description: `Playtime intelligence & entertainment value analysis for **${hltbData.gameTitle || gameTitle}**.`,
           color: PALETTE.BRAND,
           fields,
@@ -1512,9 +1528,12 @@ export const handler = async (
           timestamp: new Date().toISOString(),
         };
 
-        const imageUrl = dealInfo?.imageUrl || hltbData.imageUrl;
-        if (imageUrl) {
-          embed.thumbnail = { url: imageUrl };
+        const steamHeader = dealInfo?.steamAppId
+          ? `https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/${dealInfo.steamAppId}/header.jpg`
+          : null;
+        const bannerUrl = steamHeader || dealInfo?.imageUrl || hltbData.imageUrl;
+        if (bannerUrl) {
+          embed.image = { url: bannerUrl };
         }
 
         return {
@@ -2201,7 +2220,19 @@ export const handler = async (
           console.warn('Could not query user config for /free-play-radar:', cfgErr?.message || cfgErr);
         }
 
-        const marketDeals = await getMarketOverviewDeals(false, userCurrency);
+        let marketDeals: GameDealInfo[] = [];
+        try {
+          const timeoutPromise = new Promise<GameDealInfo[]>((resolve) =>
+            setTimeout(() => resolve([]), 2000)
+          );
+          marketDeals = await Promise.race([
+            getMarketOverviewDeals(false, userCurrency),
+            timeoutPromise,
+          ]);
+        } catch (fetchErr) {
+          console.warn('Defensive timeout or error in /free-play-radar deals fetch:', fetchErr);
+          marketDeals = [];
+        }
         const freeToKeep = marketDeals.filter((d) => d.dealType === 'FREE_TO_KEEP');
         const freePlayEvents = marketDeals.filter((d) => d.dealType === 'FREE_PLAY_DAYS');
 
@@ -2337,8 +2368,11 @@ export const handler = async (
         const components = buttons.length > 0 ? [{ type: 1, components: buttons.slice(0, 5) }] : [];
         const featuredImage = allFreeDeals.find((d) => d.imageUrl)?.imageUrl || null;
 
+        const steamBadge = resolveStoreBadge('steam');
+        const epicBadge = resolveStoreBadge('epic');
+
         const embed: DiscordEmbed = {
-          title: 'zT Radar ❖ Free Play & Giveaway Intelligence',
+          title: `${steamBadge} ${epicBadge} Free Play & Giveaway Intelligence`,
           description: 'Currently detected 100% free promotions and active Free Weekend events.',
           color: freeToKeep.length > 0 ? PALETTE.SUCCESS : 0x9B59B6,
           fields,

@@ -115,15 +115,20 @@ describe('Steam Sales Calendar Utility (steamSales.ts)', () => {
       const payload = buildSalesCalendarEmbed(testDate);
 
       expect(payload.embed).toBeDefined();
-      expect(payload.embed.title).toBe('zT Radar ❖ Steam Seasonal Sales & Major Fests Calendar');
+      expect(payload.embed.title).toContain('Steam Seasonal Sales & Major Fests Calendar');
       expect(payload.embed.color).toBe(BRAND_COLORS.STEAM);
+      expect(payload.embed.image?.url).toBe(
+        'https://shared.fastly.steamstatic.com/store_item_assets/steam/clusters/frontpage/c2e22c95/page_bg_english.jpg'
+      );
       expect(payload.embed.footer?.text).toContain('Valve Steam Official Schedule');
       expect(payload.embed.timestamp).toBeDefined();
 
-      // Spotlight description verification
+      // Spotlight description verification (ANSI box + live countdown)
+      expect(payload.embed.description).toContain('```ansi');
+      expect(payload.embed.description).toContain('[ NEXT CONFIRMED STEAM EVENT ]');
       expect(payload.embed.description).toContain('Next Confirmed Steam Event Spotlight');
       expect(payload.embed.description).toContain('Steam Next Fest: October 2026');
-      expect(payload.embed.description).toContain('Countdown: Starts <t:');
+      expect(payload.embed.description).toContain('Starts <t:');
       expect(payload.embed.description).toContain(':R>');
 
       // Upcoming schedule field verification
@@ -147,6 +152,8 @@ describe('Steam Sales Calendar Utility (steamSales.ts)', () => {
       const testDate = new Date('2026-11-26T12:00:00Z'); // during Autumn Sale
       const payload = buildSalesCalendarEmbed(testDate);
 
+      expect(payload.embed.description).toContain('```ansi');
+      expect(payload.embed.description).toContain('[ ACTIVE NOW — VALVE PROMOTIONAL EVENT ]');
       expect(payload.embed.description).toContain('★ **ACTIVE NOW — Ends <t:');
       expect(payload.embed.description).toContain('Steam Autumn Sale 2026');
       expect(payload.embed.description).toContain('[Seasonal Sale]');
@@ -160,11 +167,11 @@ describe('Steam Sales Calendar Utility (steamSales.ts)', () => {
 
   describe('formatHardwareSpecs (steamIntel.ts)', () => {
     it('should format fallback when developer specs are not provided', () => {
-      expect(formatHardwareSpecs('')).toBe('▸ *Not specified by developer.*');
-      expect(formatHardwareSpecs('Not specified by developer.')).toBe('▸ *Not specified by developer.*');
+      expect(formatHardwareSpecs('')).toBe('```yaml\nStatus: Not specified by developer.\n```');
+      expect(formatHardwareSpecs('Not specified by developer.')).toBe('```yaml\nStatus: Not specified by developer.\n```');
     });
 
-    it('should structure raw specs into clean, tagged hardware lines', () => {
+    it('should structure raw specs into clean, boxed yaml lines', () => {
       const raw = `Minimum:
 OS: Windows 10 64-bit
 Processor: Intel Core i5-8400 or AMD Ryzen 5 2600
@@ -174,13 +181,15 @@ DirectX: Version 12
 Storage: 65 GB available space`;
 
       const formatted = formatHardwareSpecs(raw);
-      expect(formatted).toContain('▸ **OS:** Windows 10 64-bit');
-      expect(formatted).toContain('▸ **Processor:** Intel Core i5-8400 or AMD Ryzen 5 2600');
-      expect(formatted).toContain('▸ **Memory:** 16 GB RAM');
-      expect(formatted).toContain('▸ **Graphics:** NVIDIA GeForce GTX 1060 (6 GB) or AMD Radeon RX 580 (8 GB)');
-      expect(formatted).toContain('▸ **DirectX:** Version 12');
-      expect(formatted).toContain('▸ **Storage:** 65 GB available space');
+      expect(formatted).toContain('```yaml');
+      expect(formatted).toContain('OS:        Windows 10 64-bit');
+      expect(formatted).toContain('Processor: Intel Core i5-8400 or AMD Ryzen 5 2600');
+      expect(formatted).toContain('Memory:    16 GB RAM');
+      expect(formatted).toContain('Graphics:  NVIDIA GeForce GTX 1060 (6 GB) or AMD Radeon RX 580 (8 GB)');
+      expect(formatted).toContain('DirectX:   Version 12');
+      expect(formatted).toContain('Storage:   65 GB available space');
       expect(formatted).not.toContain('Minimum:');
     });
   });
+
 });
