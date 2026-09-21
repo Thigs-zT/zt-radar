@@ -5,7 +5,8 @@ import {
   getUpcomingSales,
   buildSalesCalendarEmbed,
 } from '../../src/utils/steamSales.js';
-import { formatHardwareSpecs } from '../../src/utils/steamIntel.js';
+import { formatHardwareSpecs, cleanFormatting } from '../../src/utils/steamIntel.js';
+import { lookupSteamAppDirectory } from '../../src/utils/steamWeb.js';
 import { BRAND_COLORS } from '../../src/utils/theme.js';
 
 describe('Steam Sales Calendar Utility (steamSales.ts)', () => {
@@ -244,6 +245,51 @@ Storage: 65 GB available space`;
       expect(formatted).toContain('DirectX:   Version 12');
       expect(formatted).toContain('Storage:   65 GB available space');
       expect(formatted).not.toContain('Minimum:');
+    });
+  });
+
+  describe('cleanFormatting (steamIntel.ts)', () => {
+    it('should strip raw HTML and BBCode tags including images and clan placeholders', () => {
+      const raw = '[b]New Update[/b]: [img]https://cdn.steam.com/banner.jpg[/img] We fixed [i]several bugs[/i] and added [url=https://store.steampowered.com]new maps[/url]! {STEAM_CLAN_IMAGE}/12345/pic.png<br>Check it out!';
+      const cleaned = cleanFormatting(raw);
+      expect(cleaned).not.toContain('[b]');
+      expect(cleaned).not.toContain('[/b]');
+      expect(cleaned).not.toContain('[img]');
+      expect(cleaned).not.toContain('{STEAM_CLAN_IMAGE}');
+      expect(cleaned).not.toContain('<br>');
+      expect(cleaned).toContain('New Update');
+      expect(cleaned).toContain('several bugs');
+      expect(cleaned).toContain('new maps');
+      expect(cleaned).toContain('Check it out!');
+    });
+
+    it('should handle empty or null input gracefully', () => {
+      expect(cleanFormatting('')).toBe('');
+      expect(cleanFormatting(null)).toBe('');
+    });
+  });
+
+  describe('lookupSteamAppDirectory (steamWeb.ts)', () => {
+    it('should resolve institutional titles by numeric AppID or Title', () => {
+      const cs2 = lookupSteamAppDirectory('730');
+      expect(cs2).not.toBeNull();
+      expect(cs2?.appId).toBe('730');
+      expect(cs2?.title).toBe('Counter-Strike 2');
+
+      const bg3 = lookupSteamAppDirectory("Baldur's Gate 3");
+      expect(bg3).not.toBeNull();
+      expect(bg3?.appId).toBe('1086940');
+      expect(bg3?.title).toBe("Baldur's Gate 3");
+
+      const caseInsensitive = lookupSteamAppDirectory('elden ring');
+      expect(caseInsensitive).not.toBeNull();
+      expect(caseInsensitive?.appId).toBe('1245620');
+      expect(caseInsensitive?.title).toBe('ELDEN RING');
+    });
+
+    it('should return null for unknown games or non-matching inputs', () => {
+      expect(lookupSteamAppDirectory('Nonexistent Unknown Game 99999')).toBeNull();
+      expect(lookupSteamAppDirectory('')).toBeNull();
     });
   });
 });

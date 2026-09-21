@@ -29,6 +29,8 @@ import {
   getCompletePlayerProfile,
   fetchSteamWishlist,
   resolveSteamAppTitles,
+  lookupSteamAppDirectory,
+  APP_DIRECTORY,
   compareLibraries,
   calculateBacklogTelemetry,
   buildDuelEmbedPayload,
@@ -1206,78 +1208,111 @@ export const handler = async (
         };
       }
 
-      let steamAppId = null;
-      let gameTitle = rawVal;
+      let steamAppId: string | null = null;
+      let gameTitle = rawVal.trim();
 
+      // 1. Fast-path ID resolution from autocomplete format (steam:appid|title, appid|title, or numeric appid)
       if (rawVal.includes('|')) {
         const [idPart, ...titleParts] = rawVal.split('|');
-        gameTitle = titleParts.join('|');
+        const parsedTitle = titleParts.join('|').trim();
+        if (parsedTitle) gameTitle = parsedTitle;
         if (idPart.startsWith('steam:')) {
           steamAppId = idPart.replace('steam:', '').trim();
-        } else if (/^\d+$/.test(idPart)) {
-          steamAppId = idPart;
+        } else if (/^\d+$/.test(idPart.trim())) {
+          steamAppId = idPart.trim();
         }
+      } else if (/^\d+$/.test(rawVal.trim())) {
+        steamAppId = rawVal.trim();
       }
 
+      // 2. Fast-path lookup from in-memory APP_DIRECTORY (0ms overhead)
       if (!steamAppId) {
-        const deal = await getGameDealInfo(rawVal, 'USD', gameTitle);
-        steamAppId = deal?.steamAppId || null;
+        const inMemory = lookupSteamAppDirectory(rawVal);
+        if (inMemory) {
+          steamAppId = inMemory.appId;
+          gameTitle = inMemory.title;
+        }
+      } else if (gameTitle === rawVal && APP_DIRECTORY[steamAppId]) {
+        gameTitle = APP_DIRECTORY[steamAppId];
       }
 
-      if (!steamAppId) {
-        return {
-          statusCode: 200,
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(
-            createEphemeralEmbed(
-              'Official News Unavailable',
-              `Could not identify the official Steam catalog entry for **${gameTitle}**. News broadcasts are only accessible for indexed Steam releases.`,
-              PALETTE.WARNING
-            )
-          ),
-        };
-      }
+      const steamBadge = resolveStoreBadge('steam');
 
-      try {
-        let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
-        const timeoutPromise = new Promise<null>((resolve) => {
-          timeoutHandle = setTimeout(() => resolve(null), 1900);
-        });
+      // 3. Strict 1800ms global timeout pipeline protecting the entire execution
+      const executePipeline = async () => {
+        // Fallback to external deal search only if fast-path did not resolve steamAppId
+        if (!steamAppId) {
+          try {
+            const deal = await getGameDealInfo(rawVal, 'USD', gameTitle);
+            steamAppId = deal?.steamAppId || null;
+            if (deal?.title) {
+              gameTitle = deal.title;
+            }
+          } catch (dealErr) {
+            console.warn('Could not resolve deal info for news lookup:', dealErr);
+          }
+        }
 
-        const newsResult = await Promise.race([
-          fetchGameNews(steamAppId),
-          timeoutPromise,
-        ]);
-
-        if (timeoutHandle) clearTimeout(timeoutHandle);
-
-        if (newsResult === null) {
+        if (!steamAppId) {
           return {
             statusCode: 200,
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(
               createEphemeralEmbed(
-                'News Dispatch Delayed',
-                `Valve's Steam News service did not respond in time for **${gameTitle}**. Please try again in a few moments.`,
+                'Official News Unavailable',
+                `Could not identify the official Steam catalog entry for **${gameTitle}**. News broadcasts are only accessible for indexed Steam releases.`,
                 PALETTE.WARNING
               )
             ),
           };
         }
 
-        const newsList = newsResult;
+        const newsList = await fetchGameNews(steamAppId);
 
-        if (newsList.length === 0) {
+        // Safe formatting & zero-item fallback
+        if (!newsList || newsList.length === 0) {
+          const headerImageUrl = `https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/${steamAppId}/header.jpg`;
+          const newsUrl = `https://store.steampowered.com/news/app/${steamAppId}`;
+
+          const emptyEmbed = {
+            title: `${steamBadge} Game News ❖ ${gameTitle}`,
+            description: 'No recent news articles or patch notes were published for this title recently.',
+            color: PALETTE.NEUTRAL,
+            image: { url: headerImageUrl },
+            footer: {
+              text: 'Valve Steam News • No Recent Dispatches',
+            },
+            timestamp: new Date().toISOString(),
+          };
+
+          const emptyComponents = [
+            {
+              type: 1,
+              components: [
+                {
+                  type: 2,
+                  style: 5,
+                  label: 'View on Steam News',
+                  url: newsUrl,
+                },
+              ],
+            },
+          ];
+
           return {
             statusCode: 200,
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(
-              createEphemeralEmbed('News Dispatches', `No recent official announcements found for **${gameTitle}**.`, PALETTE.NEUTRAL)
-            ),
+            body: JSON.stringify({
+              type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
+              data: {
+                flags: MESSAGE_FLAGS.EPHEMERAL,
+                embeds: [emptyEmbed],
+                components: emptyComponents,
+              },
+            }),
           };
         }
 
-        const steamBadge = resolveStoreBadge('steam');
         const headerImageUrl = `https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/${steamAppId}/header.jpg`;
 
         const fields = newsList.map((n) => {
@@ -1328,8 +1363,70 @@ export const handler = async (
             },
           }),
         };
+      };
+
+      let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+      const timeoutPromise = new Promise<'TIMEOUT'>((resolve) => {
+        timeoutHandle = setTimeout(() => resolve('TIMEOUT'), 1800);
+      });
+
+      try {
+        const raceResult = await Promise.race([executePipeline(), timeoutPromise]);
+
+        if (timeoutHandle) clearTimeout(timeoutHandle);
+
+        if (raceResult === 'TIMEOUT') {
+          const newsUrl = steamAppId
+            ? `https://store.steampowered.com/news/app/${steamAppId}`
+            : 'https://store.steampowered.com/news/';
+          const headerImageUrl = steamAppId
+            ? `https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/${steamAppId}/header.jpg`
+            : undefined;
+
+          const timeoutEmbed = {
+            title: `${steamBadge} Game News ❖ ${gameTitle}`,
+            description:
+              'Patch notes retrieval timed out from Steam servers. You can read the latest announcements directly on the Steam Community Hub.',
+            color: PALETTE.WARNING,
+            ...(headerImageUrl ? { image: { url: headerImageUrl } } : {}),
+            footer: {
+              text: 'Valve Steam News • Gateway Timeout Protection',
+            },
+            timestamp: new Date().toISOString(),
+          };
+
+          const timeoutComponents = [
+            {
+              type: 1,
+              components: [
+                {
+                  type: 2,
+                  style: 5,
+                  label: 'View on Steam News',
+                  url: newsUrl,
+                },
+              ],
+            },
+          ];
+
+          return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
+              data: {
+                flags: MESSAGE_FLAGS.EPHEMERAL,
+                embeds: [timeoutEmbed],
+                components: timeoutComponents,
+              },
+            }),
+          };
+        }
+
+        return raceResult;
       } catch (newsErr) {
-        console.error('Error fetching game news:', newsErr);
+        if (timeoutHandle) clearTimeout(timeoutHandle);
+        console.error('Error in game-news pipeline:', newsErr);
         return {
           statusCode: 200,
           headers: { 'Content-Type': 'application/json' },

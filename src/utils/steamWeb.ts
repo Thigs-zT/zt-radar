@@ -497,7 +497,7 @@ export async function fetchSteamWishlist(
 // ---------------------------------------------------------------------------
 
 // Verified Steam AppID to Name registry for top institutional titles
-const APP_DIRECTORY: Record<string, string> = {
+export const APP_DIRECTORY: Record<string, string> = {
   730: 'Counter-Strike 2',
   570: 'Dota 2',
   578080: 'PUBG: BATTLEGROUNDS',
@@ -603,6 +603,27 @@ const APP_DIRECTORY: Record<string, string> = {
   268500: 'XCOM 2',
   1063730: 'New World',
 };
+
+/**
+ * Fast-path in-memory lookup for Steam AppIDs and titles without network overhead.
+ */
+export function lookupSteamAppDirectory(query: string): { appId: string; title: string } | null {
+  const clean = query.trim();
+  if (!clean) return null;
+
+  if (/^\d+$/.test(clean) && APP_DIRECTORY[clean]) {
+    return { appId: clean, title: APP_DIRECTORY[clean] };
+  }
+
+  const lower = clean.toLowerCase();
+  for (const [id, title] of Object.entries(APP_DIRECTORY)) {
+    if (title.toLowerCase() === lower) {
+      return { appId: id, title };
+    }
+  }
+
+  return null;
+}
 
 /**
  * Resolves Steam AppIDs to game titles via memory directory and bounded Steam appdetails API.

@@ -12,19 +12,27 @@ const USER_AGENT = 'zT-Radar-Bot/1.0 (https://github.com/zt-radar)';
 /**
  * Strips HTML tags and common BBCode formatting to render clean text for Discord embeds.
  */
-function cleanFormatting(rawText: string): string {
+export function cleanFormatting(rawText: string): string {
   if (!rawText) return '';
   return rawText
     .replace(/<br\s*\/?>/gi, '\n')
     .replace(/<li\s*>/gi, '▸ ')
     .replace(/<\/li>/gi, '\n')
     .replace(/<[^>]+>/g, '')
-    .replace(/\[\/?(b|i|u|h1|h2|h3|list|\*)\]/gi, '')
+    .replace(/\[img\].*?\[\/img\]/gis, '')
+    .replace(/\[previewyoutube=[^\]]*\]\s*\[\/previewyoutube\]/gi, '')
     .replace(/\[url=[^\]]+\]([^\[]+)\[\/url\]/gi, '$1')
+    .replace(/\[url\]([^\[]+)\[\/url\]/gi, '$1')
+    .replace(/\[\/?(b|i|u|s|strike|h1|h2|h3|list|olist|\*|quote|table|tr|td|th|spoiler|code|noparse|hr)\]/gi, '')
+    .replace(/\[[^\]]{1,25}\]/g, '')
+    .replace(/\{STEAM_CLAN_IMAGE\}\/[^\s]+/g, '')
     .replace(/&quot;/g, '"')
     .replace(/&amp;/g, '&')
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
+    .replace(/&#39;/g, "'")
+    .replace(/&nbsp;/g, ' ')
+    .replace(/\r/g, '')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 }
@@ -51,7 +59,7 @@ export async function fetchGameNews(appId: string | number): Promise<SteamNewsIt
     const url = `https://api.steampowered.com/ISteamNews/GetNewsForApp/v2/?appid=${appId}&count=3&maxlength=400`;
     const res = await fetch(url, {
       headers: { 'User-Agent': USER_AGENT },
-      signal: AbortSignal.timeout(1800),
+      signal: AbortSignal.timeout(1500),
     });
 
     if (!res.ok) {
@@ -64,7 +72,7 @@ export async function fetchGameNews(appId: string | number): Promise<SteamNewsIt
     const parsedNews: SteamNewsItem[] = newsItems.map((item) => {
       const dateStr = item.date ? new Date(item.date * 1000).toISOString().split('T')[0] : 'Recent';
       const cleanSnippet = cleanFormatting(item.contents || '');
-      const truncatedSnippet = cleanSnippet.length > 250 ? cleanSnippet.substring(0, 247) + '...' : cleanSnippet;
+      const truncatedSnippet = cleanSnippet.length > 175 ? cleanSnippet.substring(0, 172) + '...' : cleanSnippet;
 
       return {
         title: item.title || 'Official Announcement',
