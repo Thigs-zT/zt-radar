@@ -72,6 +72,10 @@ export const commands = [
     description: 'Display official top 10 most-played games on Steam by live concurrent player count',
   },
   {
+    name: 'steam-sales',
+    description: 'Check countdown and schedule for the next major Steam sales and festivals',
+  },
+  {
     name: 'platform-status',
     description: 'Check live operational availability and latency across major gaming networks',
   },

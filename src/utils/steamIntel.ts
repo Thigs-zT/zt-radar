@@ -75,6 +75,7 @@ export async function fetchGameNews(appId: string | number): Promise<SteamNewsIt
         url: item.url || `https://store.steampowered.com/news/app/${appId}`,
         author: item.author || 'Developer',
         date: dateStr,
+        timestamp: item.date,
         snippet: truncatedSnippet,
       };
     });
@@ -88,6 +89,66 @@ export async function fetchGameNews(appId: string | number): Promise<SteamNewsIt
     return [];
   }
 }
+
+/**
+ * Structures raw Steam system requirements into clean, tagged lines.
+ * Normalizes hardware tags (OS, Processor, Memory, Graphics, Storage, DirectX).
+ */
+export function formatHardwareSpecs(rawSpecs: string): string {
+  if (!rawSpecs || rawSpecs.trim() === 'Not specified by developer.') {
+    return '▸ *Not specified by developer.*';
+  }
+
+  // Remove leading "Minimum:" or "Recommended:" headers if present
+  const cleaned = rawSpecs.replace(/^(Minimum|Recommended):\s*/i, '').trim();
+
+  // Split by line breaks
+  const rawLines = cleaned.split(/\n+/);
+  const formattedLines: string[] = [];
+
+  const tagPatterns: Array<{ key: string; regex: RegExp }> = [
+    { key: 'OS', regex: /^(?:▸\s*)?(?:OS|Operating System)\s*:\s*(.+)$/i },
+    { key: 'Processor', regex: /^(?:▸\s*)?(?:Processor|CPU)\s*:\s*(.+)$/i },
+    { key: 'Memory', regex: /^(?:▸\s*)?(?:Memory|RAM)\s*:\s*(.+)$/i },
+    { key: 'Graphics', regex: /^(?:▸\s*)?(?:Graphics|Video Card|GPU)\s*:\s*(.+)$/i },
+    { key: 'DirectX', regex: /^(?:▸\s*)?(?:DirectX)\s*:\s*(.+)$/i },
+    { key: 'Storage', regex: /^(?:▸\s*)?(?:Storage|Hard Drive|Disk Space)\s*:\s*(.+)$/i },
+    { key: 'Sound Card', regex: /^(?:▸\s*)?(?:Sound Card|Audio)\s*:\s*(.+)$/i },
+  ];
+
+  for (const line of rawLines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+
+    let matched = false;
+    for (const { key, regex } of tagPatterns) {
+      const match = trimmed.match(regex);
+      if (match && match[1]) {
+        formattedLines.push(`▸ **${key}:** ${match[1].trim()}`);
+        matched = true;
+        break;
+      }
+    }
+
+    if (!matched) {
+      const cleanLine = trimmed.replace(/^[▸•\-\*]\s*/, '').trim();
+      if (
+        cleanLine.length > 0 &&
+        !cleanLine.toLowerCase().startsWith('minimum') &&
+        !cleanLine.toLowerCase().startsWith('recommended')
+      ) {
+        formattedLines.push(`▸ ${cleanLine}`);
+      }
+    }
+  }
+
+  if (formattedLines.length === 0) {
+    return `▸ ${cleaned}`;
+  }
+
+  return formattedLines.join('\n');
+}
+
 
 interface RawSteamAppDetailsResponse {
   [appId: string]: {

@@ -598,6 +598,7 @@ export interface SteamNewsItem {
   url: string;
   author: string;
   date: string;
+  timestamp?: number;
   snippet: string;
 }
 
@@ -631,5 +632,27 @@ export interface GuildConfigItem {
   min_discount?: number;
   created_at?: string;
   updated_at?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Steam Sales Calendar Intelligence
+// ---------------------------------------------------------------------------
+
+/** Classification of Steam sales events. */
+export type SteamSaleType = 'seasonal' | 'fest';
+
+/** A curated Steam seasonal sale or festival entry. */
+export interface SteamSaleEvent {
+  name: string;
+  type: SteamSaleType;
+  startDate: string;
+  endDate: string;
+  description: string;
+}
+
+/** Active or upcoming sale status. */
+export interface SteamSaleStatus {
+  sale: SteamSaleEvent | null;
+  isActive: boolean;
 }
 

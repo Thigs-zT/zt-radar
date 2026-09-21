@@ -21,7 +21,8 @@ import {
   getSteamTrendingGames,
   getSteamMostPlayedGames,
 } from '../utils/platformStatus.js';
-import { fetchGameNews, fetchSystemRequirements } from '../utils/steamIntel.js';
+import { fetchGameNews, fetchSystemRequirements, formatHardwareSpecs } from '../utils/steamIntel.js';
+import { buildSalesCalendarEmbed } from '../utils/steamSales.js';
 import {
   resolveSteamId,
   getPlayerSummary,
@@ -1140,13 +1141,13 @@ export const handler = async (
 
         const fields = [
           {
-            name: 'Minimum Specifications',
-            value: `\`\`\`yaml\n${specs.minimum}\n\`\`\``,
+            name: '❖ Minimum Specifications',
+            value: formatHardwareSpecs(specs.minimum),
             inline: false,
           },
           {
-            name: 'Recommended Specifications',
-            value: `\`\`\`yaml\n${specs.recommended}\n\`\`\``,
+            name: '❖ Recommended Specifications',
+            value: formatHardwareSpecs(specs.recommended),
             inline: false,
           },
         ];
@@ -1249,11 +1250,21 @@ export const handler = async (
           };
         }
 
-        const fields = newsList.map((n) => ({
-          name: `❖ ${n.title} (${n.date})`,
-          value: `${n.snippet}\n[Read Full Announcement on Steam](${n.url})`,
-          inline: false,
-        }));
+        const fields = newsList.map((n) => {
+          const timeTag = n.timestamp ? `<t:${n.timestamp}:d>` : n.date;
+          const relTag = n.timestamp ? ` • <t:${n.timestamp}:R>` : '';
+          const authorText = n.author ? ` by **${n.author}**` : '';
+
+          return {
+            name: `❖ ${n.title}`,
+            value: [
+              `▸ **Published:** ${timeTag}${relTag}${authorText}`,
+              `  ${n.snippet}`,
+              `  └─ [Read Full Announcement on Steam](${n.url})`,
+            ].join('\n'),
+            inline: false,
+          };
+        });
 
         const embed = {
           title: `zT Radar ❖ Patch Notes & News: ${gameTitle}`,
@@ -1370,55 +1381,75 @@ export const handler = async (
         // Effective hours for primary Cost-Per-Hour calculation
         const effectiveHours = mainHours > 0 ? mainHours : (allHours > 0 ? allHours : (extraHours > 0 ? extraHours : 0));
 
-        // Format Average Completion Times breakdown
+        const maxPlaytime = Math.max(mainHours, extraHours, compHours, allHours, 1);
+
+        // Format Average Completion Times breakdown with solid progress bars
         const completionLines = [];
         if (mainHours > 0) {
-          completionLines.push(`▸ Main Story: **${mainHours} hours**`);
+          const bar = renderProgressBar(mainHours, maxPlaytime, 10);
+          completionLines.push(`▸ **Main Story:** ${mainHours}h\n  └─ \`${bar}\``);
         }
         if (extraHours > 0) {
-          completionLines.push(`▸ Main + Extras: **${extraHours} hours**`);
+          const bar = renderProgressBar(extraHours, maxPlaytime, 10);
+          completionLines.push(`▸ **Main + Extras:** ${extraHours}h\n  └─ \`${bar}\``);
         }
         if (compHours > 0) {
-          completionLines.push(`▸ 100% Completionist: **${compHours} hours**`);
+          const bar = renderProgressBar(compHours, maxPlaytime, 10);
+          completionLines.push(`▸ **100% Completionist:** ${compHours}h\n  └─ \`${bar}\``);
         }
         if (completionLines.length === 0 && allHours > 0) {
-          completionLines.push(`▸ All PlayStyles Average: **${allHours} hours**`);
+          const bar = renderProgressBar(allHours, maxPlaytime, 10);
+          completionLines.push(`▸ **All PlayStyles Average:** ${allHours}h\n  └─ \`${bar}\``);
         }
 
-        // Compute Cost-Per-Hour entertainment metric
-        let cphValue = '';
+        // Inset high-intensity ANSI block highlighting Cost-Per-Hour of gameplay
+        let cphBlock = '';
         if (bestPrice === null || !bestOffer) {
-          cphValue = '▸ Storefront pricing currently unavailable to compute cost-per-hour.';
+          const lines = [
+            `${ANSI_CODES.BOLD_YELLOW}[ COST-PER-HOUR ANALYSIS ]${ANSI_CODES.RESET}`,
+            `  Rate:  ${ANSI_CODES.BOLD_WHITE}N/A${ANSI_CODES.RESET}`,
+            `  Note:  Storefront pricing currently unavailable`,
+          ];
+          cphBlock = formatAnsiBlock(lines.join('\n'));
         } else if (bestPrice === 0) {
-          cphValue = [
-            `▸ **Free to Play / 100% Promotional (${sym} 0.00 / hour)**`,
-            `└─ Based on current free storefront price at ${bestOffer.shopName}.`,
-          ].join('\n');
+          const cleanShop = (bestOffer.shopName || 'Store').replace(/<[^>]+>/g, '').trim();
+          const lines = [
+            `${ANSI_CODES.BOLD_GREEN}[ COST-PER-HOUR ANALYSIS ]${ANSI_CODES.RESET}`,
+            `  Rate:  ${ANSI_CODES.BOLD_GREEN}${sym} 0.00 / hr (FREE TO PLAY)${ANSI_CODES.RESET}`,
+            `  Offer: ${ANSI_CODES.BOLD_WHITE}100% Promotional at ${cleanShop}${ANSI_CODES.RESET}`,
+          ];
+          cphBlock = formatAnsiBlock(lines.join('\n'));
         } else if (effectiveHours > 0) {
           const cph = (bestPrice / effectiveHours).toFixed(2);
           const hoursBasis = mainHours > 0 ? 'Main Story' : 'All PlayStyles';
           const cutText = bestOffer.cutPercent > 0 ? ` (-${bestOffer.cutPercent}%)` : '';
-          cphValue = [
-            `▸ **${sym} ${cph} / hour** (based on ${hoursBasis}: ${effectiveHours}h)`,
-            `└─ Live Offer: **${sym} ${bestPrice.toFixed(2)}**${cutText} at ${bestOffer.shopName}`,
-          ].join('\n');
+          const cleanShop = (bestOffer.shopName || 'Store').replace(/<[^>]+>/g, '').trim();
+          const lines = [
+            `${ANSI_CODES.BOLD_CYAN}[ COST-PER-HOUR ANALYSIS ]${ANSI_CODES.RESET}`,
+            `  Rate:  ${ANSI_CODES.BOLD_GREEN}${sym} ${cph} / hr${ANSI_CODES.RESET} (${hoursBasis}: ${effectiveHours}h)`,
+            `  Offer: ${ANSI_CODES.BOLD_WHITE}${sym} ${bestPrice.toFixed(2)}${cutText} at ${cleanShop}${ANSI_CODES.RESET}`,
+          ];
+          cphBlock = formatAnsiBlock(lines.join('\n'));
         } else {
           const cutText = bestOffer.cutPercent > 0 ? ` (-${bestOffer.cutPercent}%)` : '';
-          cphValue = [
-            `▸ Live Offer: **${sym} ${bestPrice.toFixed(2)}**${cutText} at ${bestOffer.shopName}`,
-            '└─ Playtime duration too variable to compute hourly rate.',
-          ].join('\n');
+          const cleanShop = (bestOffer.shopName || 'Store').replace(/<[^>]+>/g, '').trim();
+          const lines = [
+            `${ANSI_CODES.BOLD_YELLOW}[ COST-PER-HOUR ANALYSIS ]${ANSI_CODES.RESET}`,
+            `  Offer: ${ANSI_CODES.BOLD_WHITE}${sym} ${bestPrice.toFixed(2)}${cutText} at ${cleanShop}${ANSI_CODES.RESET}`,
+            `  Note:  Playtime duration too variable to compute hourly rate`,
+          ];
+          cphBlock = formatAnsiBlock(lines.join('\n'));
         }
 
         const fields = [
           {
-            name: 'Average Completion Times',
-            value: completionLines.length > 0 ? completionLines.join('\n') : '▸ No verified completion times recorded.',
+            name: '❖ Average Completion Times',
+            value: completionLines.length > 0 ? completionLines.join('\n\n') : '▸ No verified completion times recorded.',
             inline: false,
           },
           {
-            name: 'Cost-Per-Hour Analysis',
-            value: cphValue,
+            name: '❖ Cost-Per-Hour Analysis',
+            value: cphBlock,
             inline: false,
           },
         ];
@@ -1637,14 +1668,25 @@ export const handler = async (
       try {
         const statuses = await checkPlatformStatuses();
 
-        const formatLine = (item: PlatformStatusEntry) => {
-          let indicator = '● ONLINE';
-          if (item.status === 'DEGRADED') indicator = '▲ DEGRADED';
-          if (item.status === 'OUTAGE' || item.status === 'OFFLINE') indicator = '✖ OFFLINE';
-          return `▸ **${item.name}**\n  └─ Status: \`${indicator}\` • Latency: \`${item.latencyMs}ms\``;
-        };
+        const ansiLines: string[] = [
+          `${ANSI_CODES.BOLD_CYAN}[ GAMING PLATFORMS STATUS DASHBOARD ]${ANSI_CODES.RESET}`,
+          '',
+        ];
 
-        const statusLines = Object.values(statuses).map(formatLine).join('\n\n');
+        for (const item of Object.values(statuses)) {
+          let badge = `${ANSI_CODES.BOLD_GREEN}[ONLINE]  ${ANSI_CODES.RESET}`;
+          if (item.status === 'DEGRADED') {
+            badge = `${ANSI_CODES.BOLD_YELLOW}[DEGRADED]${ANSI_CODES.RESET}`;
+          } else if (item.status === 'OUTAGE' || item.status === 'OFFLINE') {
+            badge = `${ANSI_CODES.BOLD_RED}[OFFLINE] ${ANSI_CODES.RESET}`;
+          }
+
+          const padName = item.name.padEnd(22, ' ');
+          const latencyStr = `${item.latencyMs}ms`.padStart(6, ' ');
+          ansiLines.push(`${badge} ${ANSI_CODES.BOLD_WHITE}${padName}${ANSI_CODES.RESET} • ${ANSI_CODES.BOLD_CYAN}${latencyStr}${ANSI_CODES.RESET}`);
+        }
+
+        const terminalDashboard = formatAnsiBlock(ansiLines.join('\n'));
         const hasOutage = Object.values(statuses).some((s) => s.status === 'OFFLINE' || s.status === 'OUTAGE');
         const hasDegraded = Object.values(statuses).some((s) => s.status === 'DEGRADED');
 
@@ -1654,7 +1696,7 @@ export const handler = async (
 
         const embed = {
           title: 'zT Radar ❖ Gaming Platforms Status Monitor',
-          description: statusLines,
+          description: terminalDashboard,
           color: embedColor,
           footer: {
             text: 'Live HTTP & Statuspage Probe • Refreshed on Demand',
@@ -1794,6 +1836,34 @@ export const handler = async (
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(
             createEphemeralEmbed('Charts Error', 'Could not retrieve live Steam statistics.', PALETTE.DANGER)
+          ),
+        };
+      }
+    }
+
+    // Command: /steam-sales
+    if (name === 'steam-sales') {
+      try {
+        const { embed, components } = buildSalesCalendarEmbed();
+
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: RESPONSE_TYPES.CHANNEL_MESSAGE_WITH_SOURCE,
+            data: {
+              embeds: [embed],
+              components,
+            },
+          }),
+        };
+      } catch (err) {
+        console.error('Error generating steam sales calendar:', err);
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(
+            createEphemeralEmbed('Calendar Error', 'Could not generate Steam sales countdown calendar.', PALETTE.DANGER)
           ),
         };
       }
@@ -2052,6 +2122,7 @@ export const handler = async (
               '▸ `/game-news <game>`\n  └─ Official patch notes, news dispatches, and developer updates.',
               '▸ `/how-long-to-beat <game>`\n  └─ Campaign completion times and cost-per-hour metrics.',
               '▸ `/free-play-radar`\n  └─ Active 100% off promotions, giveaways, and Free Weekends.',
+              '▸ `/steam-sales`\n  └─ Valve seasonal sales countdown and 2026 festival schedule.',
             ].join('\n'),
             inline: false,
           },
@@ -2157,12 +2228,27 @@ export const handler = async (
             const regPrice = deal.primaryDeal?.regularPrice
               ? `${sym} ${deal.primaryDeal.regularPrice.toFixed(2)}`
               : 'Paid';
-            const expiryText = formatExpiryAvailability(deal.expiry || deal.primaryDeal?.expiry);
+            const storeBadge = resolveStoreBadge(deal.primaryDeal?.shopName || 'store');
+
+            let expiryText = '  └─ Availability: Limited-time promotion (Claim ASAP)';
+            const rawExpiry = deal.expiry || deal.primaryDeal?.expiry;
+            if (rawExpiry) {
+              let expTime = 0;
+              if (typeof rawExpiry === 'number') {
+                expTime = rawExpiry < 10000000000 ? rawExpiry * 1000 : rawExpiry;
+              } else {
+                expTime = new Date(rawExpiry).getTime();
+              }
+              if (!isNaN(expTime)) {
+                const expUnix = Math.floor(expTime / 1000);
+                expiryText = `  └─ Availability: Ends <t:${expUnix}:R> (<t:${expUnix}:F>)`;
+              }
+            }
 
             return [
-              `❖ **${deal.title}** (${deal.primaryDeal.shopName})`,
+              `❖ ${storeBadge} **${deal.title}** (${deal.primaryDeal.shopName})`,
               `  └─ Claim for permanent library ownership • Value: ~~${regPrice}~~ ➔ **FREE**`,
-              `  ${expiryText}`,
+              expiryText,
               '```diff',
               `- Regular Price: ${regPrice}`,
               `+ Promotional:   ${sym} 0.00 (-100%)`,
@@ -2172,7 +2258,7 @@ export const handler = async (
 
           fields.push({
             name: '100% Free to Keep ❖ Permanent Giveaways',
-            value: keepDescriptions.join('\n'),
+            value: keepDescriptions.join('\n\n'),
             inline: false,
           });
         }
@@ -2182,12 +2268,27 @@ export const handler = async (
             const regPrice = deal.primaryDeal?.regularPrice
               ? `${sym} ${deal.primaryDeal.regularPrice.toFixed(2)}`
               : 'Standard';
-            const expiryText = formatExpiryAvailability(deal.expiry || deal.primaryDeal?.expiry);
+            const storeBadge = resolveStoreBadge('steam');
+
+            let expiryText = '  └─ Availability: Limited-time Free Weekend (Play now)';
+            const rawExpiry = deal.expiry || deal.primaryDeal?.expiry;
+            if (rawExpiry) {
+              let expTime = 0;
+              if (typeof rawExpiry === 'number') {
+                expTime = rawExpiry < 10000000000 ? rawExpiry * 1000 : rawExpiry;
+              } else {
+                expTime = new Date(rawExpiry).getTime();
+              }
+              if (!isNaN(expTime)) {
+                const expUnix = Math.floor(expTime / 1000);
+                expiryText = `  └─ Availability: Ends <t:${expUnix}:R> (<t:${expUnix}:F>)`;
+              }
+            }
 
             return [
-              `❖ **${deal.title}** (Steam)`,
-              `  └─ Active Free Weekend promotion • Regular Price: ${regPrice}`,
-              `  ${expiryText}`,
+              `❖ ${storeBadge} **${deal.title}** (Steam)`,
+              `  └─ Active Free Weekend promotion • Base Retail: ${regPrice}`,
+              expiryText,
               '```diff',
               `- Base Price:    ${regPrice}`,
               `+ Weekend Play:  Free Access (Temporary)`,
@@ -2197,7 +2298,7 @@ export const handler = async (
 
           fields.push({
             name: 'Free Play Events ❖ Play for Free This Weekend',
-            value: eventDescriptions.join('\n'),
+            value: eventDescriptions.join('\n\n'),
             inline: false,
           });
         }
