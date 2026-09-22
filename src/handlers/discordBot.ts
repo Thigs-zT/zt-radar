@@ -21,7 +21,7 @@ import {
   getSteamTrendingGames,
   getSteamMostPlayedGames,
 } from '../utils/platformStatus.js';
-import { fetchGameNews, fetchSystemRequirements, formatHardwareSpecs } from '../utils/steamIntel.js';
+import { fetchGameNews, fetchSystemRequirements, formatHardwareSpecs, sanitizeButtonUrl } from '../utils/steamIntel.js';
 import { buildSalesCalendarEmbed } from '../utils/steamSales.js';
 import {
   resolveSteamId,
@@ -1293,7 +1293,7 @@ export const handler = async (
                   type: 2,
                   style: 5,
                   label: 'View on Steam News',
-                  url: newsUrl,
+                  url: sanitizeButtonUrl(newsUrl, steamAppId || ''),
                 },
               ],
             },
@@ -1318,10 +1318,12 @@ export const handler = async (
         const fields = newsList.map((n) => {
           const timeTag = n.timestamp ? `<t:${n.timestamp}:R>` : n.date;
           const authorText = n.author ? ` • by **${n.author}**` : '';
-          const snippet = n.snippet.length > 175 ? n.snippet.substring(0, 172) + '...' : n.snippet;
+          const cleanTitle = (n.title || 'Announcement').replace(/[\r\n]+/g, ' ').trim().slice(0, 200);
+          const rawSnippet = n.snippet?.trim() || 'No preview summary available.';
+          const snippet = rawSnippet.length > 175 ? rawSnippet.substring(0, 172) + '...' : rawSnippet;
 
           return {
-            name: `❖ ${n.title}`,
+            name: `❖ ${cleanTitle}`,
             value: [
               `▸ ${snippet}`,
               `└─ Published ${timeTag}${authorText}`,
@@ -1330,12 +1332,20 @@ export const handler = async (
           };
         });
 
-        const buttons = newsList.slice(0, 5).map((n, idx) => ({
-          type: 2, // BUTTON
-          style: 5, // LINK
-          label: `News #${idx + 1}: ${n.title.length > 18 ? n.title.substring(0, 15) + '...' : n.title}`,
-          url: n.url,
-        }));
+        const buttons = newsList.slice(0, 5).map((n, idx) => {
+          const cleanTitle = (n.title || '')
+            .replace(/[\r\n]+/g, ' ')
+            .trim();
+          const preview = cleanTitle.length > 25 ? cleanTitle.substring(0, 22) + '...' : cleanTitle;
+          const label = preview ? `Read #${idx + 1}: ${preview}` : `Read Article #${idx + 1}`;
+
+          return {
+            type: 2, // BUTTON
+            style: 5, // LINK
+            label,
+            url: sanitizeButtonUrl(n.url, steamAppId || ''),
+          };
+        });
 
         const components = buttons.length > 0 ? [{ type: 1, components: buttons }] : [];
 
@@ -1403,7 +1413,7 @@ export const handler = async (
                   type: 2,
                   style: 5,
                   label: 'View on Steam News',
-                  url: newsUrl,
+                  url: sanitizeButtonUrl(newsUrl, steamAppId || ''),
                 },
               ],
             },

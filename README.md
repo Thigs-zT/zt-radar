@@ -5,7 +5,7 @@
 [![Runtime: Node.js 22.x](https://img.shields.io/badge/Runtime-Node.js_22.x_LTS-339933?style=flat-square&logo=node.js&logoColor=white)](https://nodejs.org/)
 [![Compute: AWS Lambda Graviton](https://img.shields.io/badge/Compute-AWS_Lambda_Graviton_(arm64)-FF9900?style=flat-square&logo=awslambda&logoColor=white)](https://aws.amazon.com/lambda/)
 [![Database: DynamoDB Single-Table](https://img.shields.io/badge/Database-Amazon_DynamoDB_(On--Demand)-4053D6?style=flat-square&logo=amazondynamodb&logoColor=white)](https://aws.amazon.com/dynamodb/)
-[![Testing: Vitest](https://img.shields.io/badge/Testing-Vitest_(36_Tests_Passing)-6E9F18?style=flat-square&logo=vitest&logoColor=white)](https://vitest.dev/)
+[![Testing: Vitest](https://img.shields.io/badge/Testing-Vitest_(100+_Tests_Passing)-6E9F18?style=flat-square&logo=vitest&logoColor=white)](https://vitest.dev/)
 [![IaC: AWS SAM](https://img.shields.io/badge/IaC-AWS_SAM_CloudFormation-E7157B?style=flat-square&logo=amazonwebservices&logoColor=white)](https://aws.amazon.com/serverless/sam/)
 [![Integration: Discord Interactions v10](https://img.shields.io/badge/API-Discord_Interactions_v10-5865F2?style=flat-square&logo=discord&logoColor=white)](https://discord.com/developers/docs/interactions/overview)
 [![Security: Zero Vulnerabilities](https://img.shields.io/badge/Security-0_Vulnerabilities_(npm_audit)-brightgreen?style=flat-square&logo=securityscorecard&logoColor=white)](https://github.com/Thigs-zT/zt-radar)
@@ -33,7 +33,9 @@
 * **Historical All-Time Low Tracking**: Flags genuine all-time low prices powered by IsThereAnyDeal and CheapShark historical datasets.
 * **Steam OpenID 2.0 Cryptographic Identity**: Zero-dependency official Valve OpenID authentication with single-click browser linking and 10-minute sliding CSRF state tokens.
 * **Multi-Library Co-op Discovery (`/game-match`)**: Cross-references two Steam libraries in memory to instantly pinpoint shared co-op, multiplayer, and split-screen titles for friend sessions.
-* **Steam Library Duels (`/steam-duel`)**: Visual head-to-head library comparison showing playtime dominance, achievement progress, and shared game catalog statistics with dual-embed scoreboards and diff playtime blocks.
+* **Unified Steam Library Duels (`/steam-duel`)**: Visual head-to-head library comparison showing playtime dominance, achievement progress, and shared game catalog statistics with a unified single-embed scoreboard and diff playtime blocks.
+* **Steam Achievement Analytics (`/steam-achievements`)**: Real-time inspection of unlocked, locked, or all achievements for any Steam title, complete with unlock percentages and direct links to Steam Community & SteamHunters.
+* **Steam Seasonal Sales & Fests Radar (`/steam-sales`)**: Live countdowns and timeline calendar for official Valve seasonal sales (Spring, Summer, Autumn, Winter) and Next Fests calibrated against verified SteamDB schedules.
 * **Factual Steam Backlog Valuation (`/steam-backlog`)**: Audits unplayed paid games, calculates real backlog percentages, and computes factual backlog retail MSRP value via batch Storefront API lookups.
 * **Playtime & Value Analysis**: Native Node.js protocol emulation for HowLongToBeat playtime statistics cross-referenced with live prices to calculate dynamic **Cost-per-Hour ($/hr and R$/hr)** metrics.
 * **Dual-Currency Regional Awareness**: Native support for **US Dollars ($)** and official **Brazilian Reais (R$)** regional store pricing with zero synthetic currency conversion.
@@ -154,6 +156,9 @@ Discord restricts component `custom_id` strings to 100 characters. For interacti
 * `duel_p:<page>:<steamIdA>:<steamIdB>` (~44 characters)
 * `backlog_p:<page>:<steamId>` (~32 characters)
 
+#### 6. Discord Application Emojis & Visual Theming Engine
+zT Radar features a dedicated visual theming engine (`src/utils/theme.ts`) that leverages Discord Application Emojis to display custom high-resolution storefront badges (`Steam`, `Epic Games`, `GOG`, `Nuuvem`, and animated Steam icons). In environments without custom emoji access, the engine gracefully falls back to clean, minimalist Unicode indicators (`❖`, `▸`, `[Steam]`), maintaining an enterprise-grade aesthetic with zero generic mobile emojis.
+
 ---
 
 ## ❖ Slash Command Directory
@@ -162,7 +167,8 @@ Discord restricts component `custom_id` strings to 100 characters. For interacti
 
 | Command | Arguments | Visibility | Description |
 | :--- | :--- | :--- | :--- |
-| `/steam-duel` | `<target1> <target2>` | Public | Visual head-to-head library comparison showing playtime dominance, achievement progress, and shared game catalog statistics with dual-embed scoreboards and diff playtime blocks. |
+| `/steam-duel` | `<target1> <target2>` | Public | Visual head-to-head library comparison showing playtime dominance, achievement progress, and shared game catalog statistics with a unified single-embed scoreboard and diff playtime blocks. |
+| `/steam-achievements` | `<game> [target] [filter]` | Public | Inspect unlocked, locked, or all achievements for any Steam title, complete with unlock percentages, ANSI progress bar, pagination, and direct links to Steam Community & SteamHunters. |
 | `/game-match` | `<target1> <target2> [filter]` | Public | Multi-user shared library discovery cross-referencing two Steam libraries in memory. Filter by `coop` (Co-op & Multiplayer) or `all` (All Shared Games) with interactive pagination. |
 | `/steam-backlog` | `[target]` | Public | Factual unplayed library valuation based on pure base retail MSRP via batch Storefront API lookups. Audits unplayed games (0 min playtime), calculates backlog percentage, and computes total backlog MSRP value in USD ($) or BRL (R$). |
 | `/steam-link` | `[target]` | Ephemeral | Link your Steam account via Valve OpenID 2.0 single-click verification, SteamID64, profile link, or vanity URL with 10-minute CSRF state tokens. |
@@ -174,8 +180,9 @@ Discord restricts component `custom_id` strings to 100 characters. For interacti
 | :--- | :--- | :--- | :--- |
 | `/compare` | `<game>` | Public | Compare current prices, active sales, and historical lows across Steam, Epic, GOG, and Nuuvem. |
 | `/can-it-run` | `<game>` | Public | Inspect official minimum and recommended PC hardware requirements (CPU, GPU, RAM, OS). |
-| `/game-news` | `<game>` | Public | Display the latest official developer patch notes, release updates, and announcements. |
+| `/game-news` | `<game>` | Public | Display the latest official developer patch notes, release updates, and announcements with safe URL encoding. |
 | `/how-long-to-beat` | `<game>` | Public | View average completion times (Main Story, Extras, Completionist) with live Cost-per-Hour calculation. |
+| `/steam-sales` | *None* | Public | Check live countdowns and seasonal schedule for official Steam seasonal sales (Spring, Summer, Autumn, Winter) and major Next Fests. |
 | `/steam-trending` | *None* | Public | Display the top 10 trending and surging titles on the Steam Storefront. |
 | `/steam-most-played`| *None* | Public | Display the official top 10 most played games on Steam by live concurrent player count. |
 | `/platform-status` | *None* | Public | Audit operational health and latency for Steam, Epic Games, PlayStation Network, and Xbox Live. |
@@ -245,14 +252,16 @@ npm test
 npm run test:coverage
 ```
 
-#### Test Suite Breakdown (36 Tests Passing)
+#### Test Suite Breakdown (103 Tests Passing — 100% Pass Rate)
 
 | Test Suite | Path | Tests | Key Focus Areas |
 | :--- | :--- | :---: | :--- |
-| **Steam Web & Social** | `tests/unit/steamWeb.test.js` | 11 | Vanity URL resolution, SteamID64 parsing, library deduplication, privacy checks, backlog calculation, and duel analytics. |
+| **Steam Web & Social** | `tests/unit/steamWeb.test.js` | 29 | Vanity URL resolution, SteamID64 parsing, library deduplication, privacy checks, backlog valuation, duel analytics, achievements extraction, and pagination. |
+| **Visual Theming Engine** | `tests/unit/theme.test.js` | 26 | Discord Application Emojis formatting, store badge fallbacks, animated badges, and design token consistency. |
+| **Steam Sales & News** | `tests/unit/steamSales.test.js` | 20 | Valve seasonal sales calendar schedule, active sale detection, countdown calculation, upcoming events timeline, and defensive button URL sanitization. |
 | **ITAD & Store Whitelist** | `tests/unit/itadApi.test.js` | 10 | ITAD API v1-v3 client normalization, strict 4-storefront whitelisting, dual-currency isolation, and error resilience. |
+| **Deal Scanner Integration** | `tests/integration/dealScanner.test.js` | 10 | Hourly scan cycles, auto-healing Steam titles, heuristic discount/rating filters, 24-hour notification cooldowns, and progressive price drop triggers. |
 | **Steam OpenID 2.0** | `tests/unit/steamOpenId.test.js` | 8 | CSRF state token generation, DynamoDB persistence, single-use token consumption, login URL construction, and assertion validation. |
-| **Deal Scanner Integration** | `tests/integration/dealScanner.test.js` | 7 | Hourly scan cycles, auto-healing Steam titles, heuristic discount/rating filters, 24-hour notification cooldowns, and progressive price drop triggers. |
 
 ---
 
@@ -270,7 +279,7 @@ Every push and pull request to the `main` branch is validated against 10 sequent
 | **6** | AWS SAM CLI Setup | `aws-actions/setup-sam@v2` | Provisions AWS SAM CLI for CloudFormation infrastructure validation. |
 | **7** | SAM Template Validation | `sam validate --lint` | Validates `template.yaml` syntax, parameters, and CloudFormation lint rules. |
 | **8** | Strict TypeScript Check | `npm run typecheck` | Compiles codebase via `tsc --noEmit` requiring 0 diagnostic errors. |
-| **9** | Vitest Test Suite | `npm test` | Asserts 100% pass rate across all 36 unit and integration tests. |
+| **9** | Vitest Test Suite | `npm test` | Asserts 100% pass rate across all 103 unit and integration tests. |
 | **10** | V8 Coverage Report | `npm run test:coverage` | Generates detailed V8 code coverage report for CI evaluation. |
 
 ---
@@ -315,7 +324,7 @@ Before initiating a build or deployment, run local verification gates:
 # Verify 0 TypeScript diagnostic errors
 npm run typecheck
 
-# Run full Vitest suite (assert 36 tests pass)
+# Run full Vitest suite (assert 100+ tests pass)
 npm test
 
 # Validate CloudFormation / SAM template
@@ -403,16 +412,20 @@ zt-radar/
 │       ├── hltbNative.ts       # Native Node.js HowLongToBeat protocol emulation (TypeScript)
 │       ├── itadApi.ts          # IsThereAnyDeal API client & store normalization (TypeScript)
 │       ├── platformStatus.ts   # Live gaming platform status & latency probes (TypeScript)
-│       ├── steamIntel.ts       # Steam Storefront trending & hardware specs (TypeScript)
+│       ├── steamIntel.ts       # Steam Storefront trending, hardware specs & URL sanitizer (TypeScript)
 │       ├── steamOpenId.ts      # Steam OpenID 2.0 auth & CSRF state engine (TypeScript)
-│       └── steamWeb.ts         # Valve Steam Web API, backlog & duel engine (TypeScript)
+│       ├── steamSales.ts       # Steam seasonal sales schedule and calendar engine (TypeScript)
+│       ├── steamWeb.ts         # Valve Steam Web API, backlog, duel & achievements engine (TypeScript)
+│       └── theme.ts            # Discord Application Emojis and visual theme engine (TypeScript)
 ├── tests/
 │   ├── integration/
 │   │   └── dealScanner.test.js # Deal scanner integration suite with in-memory AWS mocks
 │   └── unit/
 │       ├── itadApi.test.js     # ITAD API client and store filtering unit tests
 │       ├── steamOpenId.test.js # Steam OpenID 2.0 and CSRF state token unit tests
-│       └── steamWeb.test.js    # Steam vanity, library, and backlog unit tests
+│       ├── steamSales.test.js  # Steam seasonal sales calendar & URL sanitizer unit tests
+│       ├── steamWeb.test.js    # Steam vanity, library, backlog, duel & achievements unit tests
+│       └── theme.test.js       # Discord Application Emojis & brand theme unit tests
 ├── .env.example                # Runtime environment variable template
 ├── .gitignore                  # Git exclusion rules for secrets, build artifacts, and directives
 ├── AGENTS.md                   # Core architecture and agent guidelines

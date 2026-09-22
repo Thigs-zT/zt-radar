@@ -5,7 +5,7 @@ import {
   getUpcomingSales,
   buildSalesCalendarEmbed,
 } from '../../src/utils/steamSales.js';
-import { formatHardwareSpecs, cleanFormatting } from '../../src/utils/steamIntel.js';
+import { formatHardwareSpecs, cleanFormatting, sanitizeButtonUrl } from '../../src/utils/steamIntel.js';
 import { lookupSteamAppDirectory } from '../../src/utils/steamWeb.js';
 import { BRAND_COLORS } from '../../src/utils/theme.js';
 
@@ -290,6 +290,21 @@ Storage: 65 GB available space`;
     it('should return null for unknown games or non-matching inputs', () => {
       expect(lookupSteamAppDirectory('Nonexistent Unknown Game 99999')).toBeNull();
       expect(lookupSteamAppDirectory('')).toBeNull();
+    });
+  });
+
+  describe('sanitizeButtonUrl (steamIntel.ts)', () => {
+    it('should encode unescaped spaces and special characters in external URLs', () => {
+      const rawUrl = 'https://steamstore-a.akamaihd.net/news/externalpost/Rock, Paper, Shotgun/1843481262688771';
+      const sanitized = sanitizeButtonUrl(rawUrl, '1245620');
+      expect(sanitized).toBe('https://steamstore-a.akamaihd.net/news/externalpost/Rock,%20Paper,%20Shotgun/1843481262688771');
+      expect(sanitized).not.toContain(' ');
+    });
+
+    it('should fall back to Steam News hub when URL is invalid, empty, or non-http', () => {
+      expect(sanitizeButtonUrl('', '1086940')).toBe('https://store.steampowered.com/news/app/1086940');
+      expect(sanitizeButtonUrl('javascript:alert(1)', '1086940')).toBe('https://store.steampowered.com/news/app/1086940');
+      expect(sanitizeButtonUrl('not a valid url', '1086940')).toBe('https://store.steampowered.com/news/app/1086940');
     });
   });
 });

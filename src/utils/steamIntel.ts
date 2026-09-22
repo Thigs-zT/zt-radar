@@ -52,6 +52,33 @@ interface SteamNewsApiResponse {
 }
 
 /**
+ * Safely sanitizes external URLs for Discord Link Buttons (style: 5).
+ * Encodes unescaped spaces/characters and falls back to official Steam Community news hub if invalid.
+ */
+export function sanitizeButtonUrl(rawUrl: string, appId: string | number): string {
+  const fallbackUrl = `https://store.steampowered.com/news/app/${appId}`;
+  if (!rawUrl || typeof rawUrl !== 'string') {
+    return fallbackUrl;
+  }
+
+  const trimmed = rawUrl.trim();
+  if (!trimmed) {
+    return fallbackUrl;
+  }
+
+  try {
+    const encoded = encodeURI(trimmed);
+    const parsed = new URL(encoded);
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+      return encoded;
+    }
+    return fallbackUrl;
+  } catch {
+    return fallbackUrl;
+  }
+}
+
+/**
  * Fetches official game news and patch notes directly from Valve Steam Web API.
  */
 export async function fetchGameNews(appId: string | number): Promise<SteamNewsItem[]> {
@@ -76,7 +103,7 @@ export async function fetchGameNews(appId: string | number): Promise<SteamNewsIt
 
       return {
         title: item.title || 'Official Announcement',
-        url: item.url || `https://store.steampowered.com/news/app/${appId}`,
+        url: sanitizeButtonUrl(item.url || '', appId),
         author: item.author || 'Developer',
         date: dateStr,
         timestamp: item.date,
