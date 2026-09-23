@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import dotenv from 'dotenv';
 import { formatExpiryAvailability } from '../src/utils/itadApi.js';
+import { resolveStoreBadge } from '../src/utils/theme.js';
 
 // Load environment variables (.env.dev preferred, then .env)
 if (fs.existsSync('.env.dev')) {
@@ -91,50 +92,75 @@ export function buildFreePlayRadarEmbed(freeToKeep, freePlayEvents, userCurrency
 
   if (freeToKeep.length > 0) {
     const keepDescriptions = freeToKeep.map((deal) => {
-      const regPrice = deal.primaryDeal?.regularPrice
+      const storeBadge = resolveStoreBadge(deal.primaryDeal?.shopName || 'epic');
+      const regPrice = deal.primaryDeal?.regularPrice && deal.primaryDeal.regularPrice > 0
         ? `${sym} ${deal.primaryDeal.regularPrice.toFixed(2)}`
-        : 'Paid';
-      const expiryText = formatExpiryAvailability(deal.expiry || deal.primaryDeal?.expiry);
+        : null;
+      const valueStr = regPrice ? `~~${regPrice}~~ ➔ **FREE**` : '**FREE**';
+
+      let expiryLine = '▸ **Expires**: Limited-time promotion';
+      const rawExpiry = deal.expiry || deal.primaryDeal?.expiry;
+      if (rawExpiry) {
+        let expTime = 0;
+        if (typeof rawExpiry === 'number') {
+          expTime = rawExpiry < 10000000000 ? rawExpiry * 1000 : rawExpiry;
+        } else {
+          expTime = new Date(rawExpiry).getTime();
+        }
+        if (!isNaN(expTime)) {
+          const expUnix = Math.floor(expTime / 1000);
+          expiryLine = `▸ **Expires**: <t:${expUnix}:R> (<t:${expUnix}:f>)`;
+        }
+      }
 
       return [
-        `❖ **${deal.title}** (${deal.primaryDeal.shopName})`,
-        `  └─ Claim for permanent library ownership • Value: ~~${regPrice}~~ ➔ **FREE**`,
-        `  ${expiryText}`,
-        '```diff',
-        `- Regular Price: ${regPrice}`,
-        `+ Promotional:   ${sym} 0.00 (-100%)`,
-        '```',
+        `### ${storeBadge} ${deal.title}`,
+        '▸ **Status**: 100% Free to Keep (Permanent Ownership)',
+        `▸ **Value**: ${valueStr}`,
+        expiryLine,
       ].join('\n');
     });
 
     fields.push({
       name: '100% Free to Keep ❖ Permanent Giveaways',
-      value: keepDescriptions.join('\n'),
+      value: keepDescriptions.join('\n\n'),
       inline: false,
     });
   }
 
   if (freePlayEvents.length > 0) {
     const eventDescriptions = freePlayEvents.map((deal) => {
-      const regPrice = deal.primaryDeal?.regularPrice
+      const storeBadge = resolveStoreBadge(deal.primaryDeal?.shopName || 'steam');
+      const regPrice = deal.primaryDeal?.regularPrice && deal.primaryDeal.regularPrice > 0
         ? `${sym} ${deal.primaryDeal.regularPrice.toFixed(2)}`
         : 'Standard';
-      const expiryText = formatExpiryAvailability(deal.expiry || deal.primaryDeal?.expiry);
+
+      let expiryLine = '▸ **Expires**: Limited-time Free Weekend';
+      const rawExpiry = deal.expiry || deal.primaryDeal?.expiry;
+      if (rawExpiry) {
+        let expTime = 0;
+        if (typeof rawExpiry === 'number') {
+          expTime = rawExpiry < 10000000000 ? rawExpiry * 1000 : rawExpiry;
+        } else {
+          expTime = new Date(rawExpiry).getTime();
+        }
+        if (!isNaN(expTime)) {
+          const expUnix = Math.floor(expTime / 1000);
+          expiryLine = `▸ **Expires**: <t:${expUnix}:R> (<t:${expUnix}:f>)`;
+        }
+      }
 
       return [
-        `❖ **${deal.title}** (Steam)`,
-        `  └─ Active Free Weekend promotion • Regular Price: ${regPrice}`,
-        `  ${expiryText}`,
-        '```diff',
-        `- Base Price:    ${regPrice}`,
-        `+ Weekend Play:  Free Access (Temporary)`,
-        '```',
+        `### ${storeBadge} ${deal.title}`,
+        '▸ **Status**: Free Play Event (Play for Free This Weekend)',
+        `▸ **Value**: Base Retail: ${regPrice} (Temporary Access)`,
+        expiryLine,
       ].join('\n');
     });
 
     fields.push({
       name: 'Free Play Events ❖ Play for Free This Weekend',
-      value: eventDescriptions.join('\n'),
+      value: eventDescriptions.join('\n\n'),
       inline: false,
     });
   }
@@ -147,10 +173,11 @@ export function buildFreePlayRadarEmbed(freeToKeep, freePlayEvents, userCurrency
 
     if (deal.primaryDeal?.url && !seenButtonUrls.has(deal.primaryDeal.url)) {
       seenButtonUrls.add(deal.primaryDeal.url);
+      const buttonLabel = 'Claim: ' + (deal.title.length > 20 ? deal.title.substring(0, 17) + '...' : deal.title);
       buttons.push({
         type: 2, // BUTTON
         style: 5, // LINK
-        label: `Claim on ${deal.primaryDeal.shopName}`,
+        label: buttonLabel,
         url: deal.primaryDeal.url,
       });
     }
@@ -159,10 +186,11 @@ export function buildFreePlayRadarEmbed(freeToKeep, freePlayEvents, userCurrency
       const steamDbUrl = `https://steamdb.info/app/${deal.steamAppId}/`;
       if (!seenButtonUrls.has(steamDbUrl)) {
         seenButtonUrls.add(steamDbUrl);
+        const steamDbLabel = 'SteamDB: ' + (deal.title.length > 15 ? deal.title.substring(0, 12) + '...' : deal.title);
         buttons.push({
           type: 2,
           style: 5,
-          label: `SteamDB (${deal.title.substring(0, 15)})`,
+          label: steamDbLabel,
           url: steamDbUrl,
         });
       }
@@ -172,8 +200,11 @@ export function buildFreePlayRadarEmbed(freeToKeep, freePlayEvents, userCurrency
   const components = buttons.length > 0 ? [{ type: 1, components: buttons.slice(0, 5) }] : [];
   const featuredImage = allFreeDeals.find((d) => d.imageUrl)?.imageUrl || null;
 
+  const steamBadge = resolveStoreBadge('steam');
+  const epicBadge = resolveStoreBadge('epic');
+
   const embed = {
-    title: 'zT Radar ❖ Free Play & Giveaway Intelligence',
+    title: `${steamBadge} ${epicBadge} Free Play & Giveaway Intelligence`,
     description: 'Currently detected 100% free promotions and active Free Weekend events.',
     color: freeToKeep.length > 0 ? 0x57F287 : 0x9B59B6,
     fields,
@@ -184,7 +215,7 @@ export function buildFreePlayRadarEmbed(freeToKeep, freePlayEvents, userCurrency
   };
 
   if (featuredImage) {
-    embed.thumbnail = { url: featuredImage };
+    embed.image = { url: featuredImage };
   }
 
   return { embed, components };

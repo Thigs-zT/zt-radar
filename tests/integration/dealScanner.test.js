@@ -600,4 +600,66 @@ describe('Deal Scanner Integration & In-Memory AWS Mocks', () => {
       expect(embedField).not.toContain('$ 19.99');
     });
   });
+
+  describe('Multi-Storefront Wishlist Anti-Spam & Promo State Machine', () => {
+    it('should NEVER reset last_notified_price when primary store is full price but alternative store has active discount', async () => {
+      const wishlistItem = {
+        PK: `USER#${MOCK_USER_ID}`,
+        SK: 'GAME#steam_1771300',
+        user_id: MOCK_USER_ID,
+        external_game_id: 'steam:1771300',
+        game_title: 'Kingdom Come: Deliverance II',
+        min_discount: 50,
+        alert_steep_discount: true,
+        last_notified_price: 89.99,
+        last_notified_cut: 70,
+        last_notified_at: new Date().toISOString(),
+      };
+
+      ddbMock.on(ScanCommand).resolves({
+        Items: [wishlistItem],
+      });
+      ddbMock.on(UpdateCommand).resolves({});
+
+      // Multi-storefront mismatch: Steam is full price (0% cut), Nuuvem has -70% active discount
+      getGameDealInfo.mockResolvedValueOnce({
+        title: 'Kingdom Come: Deliverance II',
+        dealType: 'CURATED_DEAL',
+        isAllTimeLow: false,
+        reviewScore: 90,
+        primaryDeal: {
+          shopName: 'Steam',
+          salePrice: 299.00,
+          regularPrice: 299.00,
+          cutPercent: 0,
+          currency: 'BRL',
+          currencySymbol: 'R$',
+        },
+        cheaperAlternative: {
+          shopName: 'Nuuvem',
+          salePrice: 89.99,
+          regularPrice: 299.00,
+          cutPercent: 70,
+          currency: 'BRL',
+          currencySymbol: 'R$',
+        },
+      });
+
+      const response = await handler();
+      expect(response.statusCode).toBe(200);
+
+      // Verify that NO retail reset UpdateCommand was called
+      const updateCalls = ddbMock.commandCalls(UpdateCommand);
+      const resetCall = updateCalls.find((call) =>
+        call.args[0].input.UpdateExpression?.includes('SET last_notified_price = :nullVal')
+      );
+      expect(resetCall).toBeUndefined();
+
+      // Verify that NO duplicate alert was sent because effectivePrice (89.99) >= last_notified_price (89.99)
+      const discordMessagesCall = globalThis.fetch.mock.calls.find((call) =>
+        String(call[0]).includes('/messages')
+      );
+      expect(discordMessagesCall).toBeUndefined();
+    });
+  });
 });

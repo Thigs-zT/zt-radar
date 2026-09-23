@@ -2389,12 +2389,13 @@ export const handler = async (
 
         if (freeToKeep.length > 0) {
           const keepDescriptions = freeToKeep.map((deal) => {
-            const regPrice = deal.primaryDeal?.regularPrice
+            const storeBadge = resolveStoreBadge(deal.primaryDeal?.shopName || 'epic');
+            const regPrice = deal.primaryDeal?.regularPrice && deal.primaryDeal.regularPrice > 0
               ? `${sym} ${deal.primaryDeal.regularPrice.toFixed(2)}`
-              : 'Paid';
-            const storeBadge = resolveStoreBadge(deal.primaryDeal?.shopName || 'store');
+              : null;
+            const valueStr = regPrice ? `~~${regPrice}~~ ➔ **FREE**` : '**FREE**';
 
-            let expiryText = '  └─ Availability: Limited-time promotion (Claim ASAP)';
+            let expiryLine = '▸ **Expires**: Limited-time promotion';
             const rawExpiry = deal.expiry || deal.primaryDeal?.expiry;
             if (rawExpiry) {
               let expTime = 0;
@@ -2405,18 +2406,15 @@ export const handler = async (
               }
               if (!isNaN(expTime)) {
                 const expUnix = Math.floor(expTime / 1000);
-                expiryText = `  └─ Availability: Ends <t:${expUnix}:R> (<t:${expUnix}:F>)`;
+                expiryLine = `▸ **Expires**: <t:${expUnix}:R> (<t:${expUnix}:f>)`;
               }
             }
 
             return [
-              `❖ ${storeBadge} **${deal.title}** (${deal.primaryDeal.shopName})`,
-              `  └─ Claim for permanent library ownership • Value: ~~${regPrice}~~ ➔ **FREE**`,
-              expiryText,
-              '```diff',
-              `- Regular Price: ${regPrice}`,
-              `+ Promotional:   ${sym} 0.00 (-100%)`,
-              '```',
+              `### ${storeBadge} ${deal.title}`,
+              '▸ **Status**: 100% Free to Keep (Permanent Ownership)',
+              `▸ **Value**: ${valueStr}`,
+              expiryLine,
             ].join('\n');
           });
 
@@ -2429,12 +2427,12 @@ export const handler = async (
 
         if (freePlayEvents.length > 0) {
           const eventDescriptions = freePlayEvents.map((deal) => {
-            const regPrice = deal.primaryDeal?.regularPrice
+            const storeBadge = resolveStoreBadge(deal.primaryDeal?.shopName || 'steam');
+            const regPrice = deal.primaryDeal?.regularPrice && deal.primaryDeal.regularPrice > 0
               ? `${sym} ${deal.primaryDeal.regularPrice.toFixed(2)}`
               : 'Standard';
-            const storeBadge = resolveStoreBadge('steam');
 
-            let expiryText = '  └─ Availability: Limited-time Free Weekend (Play now)';
+            let expiryLine = '▸ **Expires**: Limited-time Free Weekend';
             const rawExpiry = deal.expiry || deal.primaryDeal?.expiry;
             if (rawExpiry) {
               let expTime = 0;
@@ -2445,18 +2443,15 @@ export const handler = async (
               }
               if (!isNaN(expTime)) {
                 const expUnix = Math.floor(expTime / 1000);
-                expiryText = `  └─ Availability: Ends <t:${expUnix}:R> (<t:${expUnix}:F>)`;
+                expiryLine = `▸ **Expires**: <t:${expUnix}:R> (<t:${expUnix}:f>)`;
               }
             }
 
             return [
-              `❖ ${storeBadge} **${deal.title}** (Steam)`,
-              `  └─ Active Free Weekend promotion • Base Retail: ${regPrice}`,
-              expiryText,
-              '```diff',
-              `- Base Price:    ${regPrice}`,
-              `+ Weekend Play:  Free Access (Temporary)`,
-              '```',
+              `### ${storeBadge} ${deal.title}`,
+              '▸ **Status**: Free Play Event (Play for Free This Weekend)',
+              `▸ **Value**: Base Retail: ${regPrice} (Temporary Access)`,
+              expiryLine,
             ].join('\n');
           });
 
@@ -2469,18 +2464,19 @@ export const handler = async (
 
         // Add store link buttons (up to 5 buttons in an Action Row)
         const allFreeDeals = [...freeToKeep, ...freePlayEvents];
-        const seenButtonUrls = new Set();
+        const seenButtonUrls = new Set<string>();
 
         for (const deal of allFreeDeals) {
           if (buttons.length >= 5) break;
 
           if (deal.primaryDeal?.url && !seenButtonUrls.has(deal.primaryDeal.url)) {
             seenButtonUrls.add(deal.primaryDeal.url);
+            const buttonLabel = 'Claim: ' + (deal.title.length > 20 ? deal.title.substring(0, 17) + '...' : deal.title);
             buttons.push({
               type: 2, // BUTTON
               style: 5, // LINK
-              label: `Claim on ${deal.primaryDeal.shopName}`,
-              url: deal.primaryDeal.url,
+              label: buttonLabel,
+              url: sanitizeButtonUrl(deal.primaryDeal.url, deal.steamAppId || ''),
             });
           }
 
@@ -2488,11 +2484,12 @@ export const handler = async (
             const steamDbUrl = `https://steamdb.info/app/${deal.steamAppId}/`;
             if (!seenButtonUrls.has(steamDbUrl)) {
               seenButtonUrls.add(steamDbUrl);
+              const steamDbLabel = 'SteamDB: ' + (deal.title.length > 15 ? deal.title.substring(0, 12) + '...' : deal.title);
               buttons.push({
                 type: 2,
                 style: 5,
-                label: `SteamDB (${deal.title.substring(0, 15)})`,
-                url: steamDbUrl,
+                label: steamDbLabel,
+                url: sanitizeButtonUrl(steamDbUrl, deal.steamAppId),
               });
             }
           }
@@ -2516,7 +2513,7 @@ export const handler = async (
         };
 
         if (featuredImage) {
-          embed.thumbnail = { url: featuredImage };
+          embed.image = { url: featuredImage };
         }
 
         return {

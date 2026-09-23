@@ -252,15 +252,15 @@ npm test
 npm run test:coverage
 ```
 
-#### Test Suite Breakdown (103 Tests Passing — 100% Pass Rate)
+#### Test Suite Breakdown (104 Tests Passing — 100% Pass Rate)
 
 | Test Suite | Path | Tests | Key Focus Areas |
 | :--- | :--- | :---: | :--- |
 | **Steam Web & Social** | `tests/unit/steamWeb.test.js` | 29 | Vanity URL resolution, SteamID64 parsing, library deduplication, privacy checks, backlog valuation, duel analytics, achievements extraction, and pagination. |
 | **Visual Theming Engine** | `tests/unit/theme.test.js` | 26 | Discord Application Emojis formatting, store badge fallbacks, animated badges, and design token consistency. |
 | **Steam Sales & News** | `tests/unit/steamSales.test.js` | 20 | Valve seasonal sales calendar schedule, active sale detection, countdown calculation, upcoming events timeline, and defensive button URL sanitization. |
+| **Deal Scanner Integration** | `tests/integration/dealScanner.test.js` | 11 | Hourly scan cycles, auto-healing Steam titles, multi-storefront anti-spam state machine, heuristic discount/rating filters, 24-hour cooldowns, and progressive price drop triggers. |
 | **ITAD & Store Whitelist** | `tests/unit/itadApi.test.js` | 10 | ITAD API v1-v3 client normalization, strict 4-storefront whitelisting, dual-currency isolation, and error resilience. |
-| **Deal Scanner Integration** | `tests/integration/dealScanner.test.js` | 10 | Hourly scan cycles, auto-healing Steam titles, heuristic discount/rating filters, 24-hour notification cooldowns, and progressive price drop triggers. |
 | **Steam OpenID 2.0** | `tests/unit/steamOpenId.test.js` | 8 | CSRF state token generation, DynamoDB persistence, single-use token consumption, login URL construction, and assertion validation. |
 
 ---
@@ -279,7 +279,7 @@ Every push and pull request to the `main` branch is validated against 10 sequent
 | **6** | AWS SAM CLI Setup | `aws-actions/setup-sam@v2` | Provisions AWS SAM CLI for CloudFormation infrastructure validation. |
 | **7** | SAM Template Validation | `sam validate --lint` | Validates `template.yaml` syntax, parameters, and CloudFormation lint rules. |
 | **8** | Strict TypeScript Check | `npm run typecheck` | Compiles codebase via `tsc --noEmit` requiring 0 diagnostic errors. |
-| **9** | Vitest Test Suite | `npm test` | Asserts 100% pass rate across all 103 unit and integration tests. |
+| **9** | Vitest Test Suite | `npm test` | Asserts 100% pass rate across all 104 unit and integration tests. |
 | **10** | V8 Coverage Report | `npm run test:coverage` | Generates detailed V8 code coverage report for CI evaluation. |
 
 ---
