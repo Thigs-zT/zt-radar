@@ -661,5 +661,251 @@ describe('Deal Scanner Integration & In-Memory AWS Mocks', () => {
       );
       expect(discordMessagesCall).toBeUndefined();
     });
+
+    it('should NOT reset last_notified_price when transient ITAD lookup failure or degraded store check occurs', async () => {
+      const wishlistItem = {
+        PK: `USER#${MOCK_USER_ID}`,
+        SK: 'GAME#steam_1771300',
+        user_id: MOCK_USER_ID,
+        external_game_id: 'steam:1771300',
+        game_title: 'Kingdom Come: Deliverance II',
+        min_discount: 50,
+        alert_steep_discount: true,
+        last_notified_price: 89.99,
+        last_notified_cut: 70,
+        last_notified_at: new Date().toISOString(),
+      };
+
+      ddbMock.on(ScanCommand).resolves({
+        Items: [wishlistItem],
+      });
+      ddbMock.on(UpdateCommand).resolves({});
+
+      // Steam responds at full retail price, but ITAD comparison query degraded/failed
+      getGameDealInfo.mockResolvedValueOnce({
+        title: 'Kingdom Come: Deliverance II',
+        dealType: 'CURATED_DEAL',
+        isAllTimeLow: false,
+        reviewScore: 90,
+        primaryDeal: {
+          shopName: 'Steam',
+          salePrice: 299.00,
+          regularPrice: 299.00,
+          cutPercent: 0,
+          currency: 'BRL',
+          currencySymbol: 'R$',
+        },
+        alternativeCheckStatus: 'degraded',
+        alternativeCheckDegraded: true,
+        cheaperAlternative: null,
+      });
+
+      const response = await handler();
+      expect(response.statusCode).toBe(200);
+
+      // Verify that NO retail reset UpdateCommand was issued despite Steam being at retail
+      const updateCalls = ddbMock.commandCalls(UpdateCommand);
+      const resetCall = updateCalls.find((call) =>
+        call.args[0].input.UpdateExpression?.includes('SET last_notified_price = :nullVal')
+      );
+      expect(resetCall).toBeUndefined();
+
+      // Verify no notification was sent
+      const discordMessagesCall = globalThis.fetch.mock.calls.find((call) =>
+        String(call[0]).includes('/messages')
+      );
+      expect(discordMessagesCall).toBeUndefined();
+    });
+
+    it('should NOT reset last_notified_price when discount originated from alternative store and ITAD returns no alternatives in single cycle', async () => {
+      const wishlistItem = {
+        PK: `USER#${MOCK_USER_ID}`,
+        SK: 'GAME#steam_1771300',
+        user_id: MOCK_USER_ID,
+        external_game_id: 'steam:1771300',
+        game_title: 'Kingdom Come: Deliverance II',
+        min_discount: 50,
+        alert_steep_discount: true,
+        last_notified_price: 89.99,
+        last_notified_cut: 70,
+        last_notified_store: 'Nuuvem',
+        last_notified_at: new Date().toISOString(),
+      };
+
+      ddbMock.on(ScanCommand).resolves({
+        Items: [wishlistItem],
+      });
+      ddbMock.on(UpdateCommand).resolves({});
+
+      // Steam is at base retail, cheaperAlternative is missing/null in this single cycle
+      getGameDealInfo.mockResolvedValueOnce({
+        title: 'Kingdom Come: Deliverance II',
+        dealType: 'CURATED_DEAL',
+        isAllTimeLow: false,
+        reviewScore: 90,
+        primaryDeal: {
+          shopName: 'Steam',
+          salePrice: 299.00,
+          regularPrice: 299.00,
+          cutPercent: 0,
+          currency: 'BRL',
+          currencySymbol: 'R$',
+        },
+        cheaperAlternative: null,
+        alternativeCheckStatus: 'confirmed',
+        alternativeCheckDegraded: false,
+      });
+
+      const response = await handler();
+      expect(response.statusCode).toBe(200);
+
+      // Verify that promo state is NOT wiped simply because ITAD returned no alternatives
+      const updateCalls = ddbMock.commandCalls(UpdateCommand);
+      const resetCall = updateCalls.find((call) =>
+        call.args[0].input.UpdateExpression?.includes('SET last_notified_price = :nullVal')
+      );
+      expect(resetCall).toBeUndefined();
+
+      // Verify no duplicate DM was sent
+      const discordMessagesCall = globalThis.fetch.mock.calls.find((call) =>
+        String(call[0]).includes('/messages')
+      );
+      expect(discordMessagesCall).toBeUndefined();
+    });
+
+    it('should reset last_notified_price to null when alternative store is explicitly confirmed at full base retail', async () => {
+      const wishlistItem = {
+        PK: `USER#${MOCK_USER_ID}`,
+        SK: 'GAME#steam_1771300',
+        user_id: MOCK_USER_ID,
+        external_game_id: 'steam:1771300',
+        game_title: 'Kingdom Come: Deliverance II',
+        min_discount: 50,
+        alert_steep_discount: true,
+        last_notified_price: 89.99,
+        last_notified_cut: 70,
+        last_notified_store: 'Nuuvem',
+        last_notified_at: new Date().toISOString(),
+      };
+
+      ddbMock.on(ScanCommand).resolves({
+        Items: [wishlistItem],
+      });
+      ddbMock.on(UpdateCommand).resolves({});
+
+      // Both Steam and Nuuvem confirmed at base retail price (0% cut)
+      getGameDealInfo.mockResolvedValueOnce({
+        title: 'Kingdom Come: Deliverance II',
+        dealType: 'CURATED_DEAL',
+        isAllTimeLow: false,
+        reviewScore: 90,
+        primaryDeal: {
+          shopName: 'Steam',
+          salePrice: 299.00,
+          regularPrice: 299.00,
+          cutPercent: 0,
+          currency: 'BRL',
+          currencySymbol: 'R$',
+        },
+        cheaperAlternative: null,
+        storeBreakdown: {
+          Steam: {
+            shopName: 'Steam',
+            salePrice: 299.00,
+            regularPrice: 299.00,
+            cutPercent: 0,
+            url: 'https://store.steampowered.com/app/1771300/',
+            expiry: null,
+            currency: 'BRL',
+            currencySymbol: 'R$',
+          },
+          Nuuvem: {
+            shopName: 'Nuuvem',
+            salePrice: 299.00,
+            regularPrice: 299.00,
+            cutPercent: 0,
+            url: 'https://www.nuuvem.com/item/kingdom-come-deliverance-ii',
+            expiry: null,
+            currency: 'BRL',
+            currencySymbol: 'R$',
+          },
+        },
+        alternativeCheckStatus: 'confirmed',
+        alternativeCheckDegraded: false,
+      });
+
+      const response = await handler();
+      expect(response.statusCode).toBe(200);
+
+      // Verify that retail reset UpdateCommand WAS called
+      const updateCalls = ddbMock.commandCalls(UpdateCommand);
+      const resetCall = updateCalls.find((call) =>
+        call.args[0].input.UpdateExpression?.includes('SET last_notified_price = :nullVal, last_notified_cut = :zeroVal')
+      );
+      expect(resetCall).toBeDefined();
+      expect(resetCall.args[0].input.ExpressionAttributeValues[':nullVal']).toBeNull();
+      expect(resetCall.args[0].input.ExpressionAttributeValues[':zeroVal']).toBe(0);
+    });
+
+    it('should persist last_notified_store when alerting for an alternative storefront promotion', async () => {
+      const wishlistItem = {
+        PK: `USER#${MOCK_USER_ID}`,
+        SK: 'GAME#steam_1771300',
+        user_id: MOCK_USER_ID,
+        external_game_id: 'steam:1771300',
+        game_title: 'Kingdom Come: Deliverance II',
+        min_discount: 50,
+        alert_steep_discount: true,
+        last_notified_price: null,
+        last_notified_cut: 0,
+      };
+
+      ddbMock.on(ScanCommand).resolves({
+        Items: [wishlistItem],
+      });
+      ddbMock.on(UpdateCommand).resolves({});
+
+      getGameDealInfo.mockResolvedValueOnce({
+        title: 'Kingdom Come: Deliverance II',
+        dealType: 'CURATED_DEAL',
+        isAllTimeLow: true,
+        reviewScore: 90,
+        primaryDeal: {
+          shopName: 'Steam',
+          salePrice: 299.00,
+          regularPrice: 299.00,
+          cutPercent: 0,
+          currency: 'BRL',
+          currencySymbol: 'R$',
+        },
+        cheaperAlternative: {
+          shopName: 'Nuuvem',
+          salePrice: 89.99,
+          regularPrice: 299.00,
+          cutPercent: 70,
+          currency: 'BRL',
+          currencySymbol: 'R$',
+        },
+      });
+
+      const response = await handler();
+      expect(response.statusCode).toBe(200);
+
+      // Verify alert was sent
+      const discordMessagesCall = globalThis.fetch.mock.calls.find((call) =>
+        String(call[0]).includes('/messages')
+      );
+      expect(discordMessagesCall).toBeDefined();
+
+      // Verify last_notified_store was persisted as 'Nuuvem'
+      const updateCalls = ddbMock.commandCalls(UpdateCommand);
+      const alertUpdateCall = updateCalls.find((call) =>
+        call.args[0].input.UpdateExpression?.includes('SET last_notified_price = :price')
+      );
+      expect(alertUpdateCall).toBeDefined();
+      expect(alertUpdateCall.args[0].input.ExpressionAttributeValues[':store']).toBe('Nuuvem');
+      expect(alertUpdateCall.args[0].input.ExpressionAttributeValues[':price']).toBe(89.99);
+      expect(alertUpdateCall.args[0].input.ExpressionAttributeValues[':cut']).toBe(70);
+    });
   });
 });

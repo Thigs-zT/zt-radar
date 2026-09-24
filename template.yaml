@@ -125,7 +125,7 @@ Resources:
     Properties:
       CodeUri: .
       Handler: src/handlers/dealScanner.handler
-      Timeout: 30
+      Timeout: 120
       Environment:
         Variables:
           TABLE_NAME: !Ref DealsTable
@@ -140,6 +140,8 @@ Resources:
           Properties:
             Schedule: rate(1 hour)
             Description: Scans market deals and monitored wishlists hourly
+            RetryPolicy:
+              MaximumRetryAttempts: 0
 
 Outputs:
   InteractionsEndpoint:

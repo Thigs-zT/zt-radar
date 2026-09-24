@@ -147,6 +147,10 @@ export interface GameDealInfo {
   cheaperAlternative?: StoreDeal | null;
   /** Raw per-store breakdown keyed by store name. */
   storeBreakdown?: Record<string, StoreDeal>;
+  /** Status of alternative store lookup: 'confirmed' | 'degraded' | 'skipped'. */
+  alternativeCheckStatus?: 'confirmed' | 'degraded' | 'skipped';
+  /** Flag indicating whether the alternative store pricing query was skipped or degraded. */
+  alternativeCheckDegraded?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -233,6 +237,8 @@ export interface DynamoDbWishlistItem {
   last_notified_price?: number | null;
   /** Discount cut percentage at the time of the last sent notification. */
   last_notified_cut?: number | null;
+  /** Storefront name where the last sent notification offer originated (e.g. "Steam", "Nuuvem", "Epic Games Store"). */
+  last_notified_store?: string | null;
   /** ISO 8601 timestamp of the last sent notification. */
   last_notified_at?: string | null;
   /** ISO 8601 creation timestamp. */

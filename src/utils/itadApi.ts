@@ -330,9 +330,18 @@ export async function getGameDealInfo(
   rawGameIdentifier: string,
   preferredCurrency: string = 'USD',
   titleFallback: string | null = null,
+  externalSignal?: AbortSignal,
 ): Promise<GameDealInfo | null> {
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 4500);
+  const timeoutId = setTimeout(() => controller.abort(), 2500);
+
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      controller.abort();
+    } else {
+      externalSignal.addEventListener('abort', () => controller.abort(), { once: true });
+    }
+  }
 
   const country = preferredCurrency === 'BRL' ? 'br' : 'us';
   const currencySymbol = preferredCurrency === 'BRL' ? 'R$' : '$';
@@ -418,6 +427,9 @@ export async function getGameDealInfo(
       storeBreakdown['Steam'] = steamDeal;
     }
 
+    let alternativeCheckStatus: 'confirmed' | 'degraded' | 'skipped' = 'confirmed';
+    let alternativeCheckDegraded = false;
+
     const itadKey = process.env.ITAD_API_KEY || ITAD_API_KEY;
     if (itadKey) {
       try {
@@ -433,6 +445,9 @@ export async function getGameDealInfo(
           if (lookupRes.ok) {
             const lookupData = (await lookupRes.json()) as RawItadLookupResponse;
             itadGameId = lookupData?.game?.id || null;
+          } else {
+            alternativeCheckDegraded = true;
+            alternativeCheckStatus = 'degraded';
           }
         }
 
@@ -476,17 +491,27 @@ export async function getGameDealInfo(
                 };
               }
             }
+          } else {
+            alternativeCheckDegraded = true;
+            alternativeCheckStatus = 'degraded';
           }
 
           if (historyRes.ok) {
             const historyData = (await historyRes.json()) as RawItadHistoryLowItem[];
             historyLow = historyData?.[0]?.low?.price?.amount ?? null;
           }
+        } else {
+          alternativeCheckDegraded = true;
+          alternativeCheckStatus = 'degraded';
         }
       } catch (itadErr: unknown) {
+        alternativeCheckDegraded = true;
+        alternativeCheckStatus = 'degraded';
         const msg = itadErr instanceof Error ? itadErr.message : String(itadErr);
         console.error('ITAD comparison query error:', msg);
       }
+    } else {
+      alternativeCheckStatus = 'skipped';
     }
 
     const availableDeals = Object.values(storeBreakdown);
@@ -563,6 +588,8 @@ export async function getGameDealInfo(
       primaryDeal,
       cheaperAlternative,
       storeBreakdown,
+      alternativeCheckStatus,
+      alternativeCheckDegraded,
     };
   } catch (error: unknown) {
     clearTimeout(timeoutId);

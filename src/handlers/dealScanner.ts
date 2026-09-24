@@ -229,240 +229,300 @@ export const handler = async (): Promise<{ statusCode: number; body: string }> =
 
     // 1. Process Individual Wishlists (DMs)
     if (wishlistItems.length > 0) {
-      for (const item of wishlistItems) {
-        const userId = item.user_id || item.PK?.replace('USER#', '');
-        const currentDmCount = userDmCountMap.get(userId) || 0;
-        if (currentDmCount >= MAX_DM_PER_USER) {
-          continue;
-        }
+      const BATCH_SIZE = 5;
+      for (let i = 0; i < wishlistItems.length; i += BATCH_SIZE) {
+        const chunk = wishlistItems.slice(i, i + BATCH_SIZE);
 
-        const preferredCurrency = userCurrencyMap.get(userId) || (item as any).currency || (item as any).preferred_currency || 'USD';
-        const deal = await getGameDealInfo(item.external_game_id, preferredCurrency, item.game_title);
-        if (!deal || !deal.primaryDeal) continue;
+        const batchResults = await Promise.all(
+          chunk.map(async (item) => {
+            const userId = item.user_id || item.PK?.replace('USER#', '');
+            const currentDmCount = userDmCountMap.get(userId) || 0;
+            if (currentDmCount >= MAX_DM_PER_USER) {
+              return { item, deal: null, preferredCurrency: 'USD', userId, skippedDmCap: true };
+            }
 
-        // Strict currency validation for BRL users
-        if (preferredCurrency === 'BRL') {
-          if (deal.primaryDeal.currency !== 'BRL' || deal.primaryDeal.currencySymbol !== 'R$') {
-            if (deal.steamAppId) {
-              const brlPrice = await fetchSteamRegionalBrlPrice(deal.steamAppId);
-              if (brlPrice) {
-                deal.primaryDeal.salePrice = brlPrice.salePrice;
-                deal.primaryDeal.regularPrice = brlPrice.regularPrice;
-                deal.primaryDeal.cutPercent = brlPrice.cutPercent;
-                deal.primaryDeal.currency = 'BRL';
-                deal.primaryDeal.currencySymbol = 'R$';
+            const preferredCurrency =
+              userCurrencyMap.get(userId) || (item as any).currency || (item as any).preferred_currency || 'USD';
+            try {
+              const timeoutSignal = AbortSignal.timeout(2500);
+              const deal = await getGameDealInfo(item.external_game_id, preferredCurrency, item.game_title, timeoutSignal);
+              return { item, deal, preferredCurrency, userId, skippedDmCap: false };
+            } catch (fetchErr: unknown) {
+              console.warn(
+                `Transient deal query failure for ${item.SK}:`,
+                fetchErr instanceof Error ? fetchErr.message : String(fetchErr)
+              );
+              return { item, deal: null, preferredCurrency, userId, skippedDmCap: false };
+            }
+          })
+        );
+
+        for (const { item, deal, preferredCurrency, userId, skippedDmCap } of batchResults) {
+          if (skippedDmCap || !deal || !deal.primaryDeal) continue;
+
+          const currentDmCount = userDmCountMap.get(userId) || 0;
+          if (currentDmCount >= MAX_DM_PER_USER) {
+            continue;
+          }
+
+          // Strict currency validation for BRL users
+          if (preferredCurrency === 'BRL') {
+            if (deal.primaryDeal.currency !== 'BRL' || deal.primaryDeal.currencySymbol !== 'R$') {
+              if (deal.steamAppId) {
+                const brlPrice = await fetchSteamRegionalBrlPrice(deal.steamAppId);
+                if (brlPrice) {
+                  deal.primaryDeal.salePrice = brlPrice.salePrice;
+                  deal.primaryDeal.regularPrice = brlPrice.regularPrice;
+                  deal.primaryDeal.cutPercent = brlPrice.cutPercent;
+                  deal.primaryDeal.currency = 'BRL';
+                  deal.primaryDeal.currencySymbol = 'R$';
+                } else {
+                  continue; // Discard non-BRL deal from BRL user queue
+                }
               } else {
                 continue; // Discard non-BRL deal from BRL user queue
               }
-            } else {
-              continue; // Discard non-BRL deal from BRL user queue
             }
           }
-        }
 
-        // Auto-heal & clean resolved display title
-        const resolvedTitle = deal.title && !deal.title.startsWith('Steam App #') ? deal.title : item.game_title;
+          // Auto-heal & clean resolved display title
+          const resolvedTitle = deal.title && !deal.title.startsWith('Steam App #') ? deal.title : item.game_title;
 
-        if (item.game_title?.startsWith('Steam App #') && deal.title && !deal.title.startsWith('Steam App #')) {
-          try {
-            await docClient.send(
-              new UpdateCommand({
-                TableName: TABLE_NAME,
-                Key: { PK: item.PK, SK: item.SK },
-                UpdateExpression: 'SET game_title = :title, updated_at = :now',
-                ExpressionAttributeValues: {
-                  ':title': deal.title,
-                  ':now': new Date().toISOString(),
-                },
-              })
-            );
-            item.game_title = deal.title;
-            console.log(`Auto-healed generic title for ${item.SK} -> "${deal.title}"`);
-          } catch (autoHealErr: unknown) {
-            const msg = autoHealErr instanceof Error ? autoHealErr.message : String(autoHealErr);
-            console.error(`Failed to auto-heal generic title for ${item.SK}:`, msg);
-          }
-        }
-
-        const effectivePrice = deal.cheaperAlternative?.salePrice ?? deal.primaryDeal?.salePrice ?? 0;
-        const effectiveCut = deal.cheaperAlternative?.cutPercent ?? deal.primaryDeal?.cutPercent ?? 0;
-        const regularPrice = deal.cheaperAlternative?.regularPrice ?? deal.primaryDeal?.regularPrice ?? 0;
-        const sym = preferredCurrency === 'BRL' ? 'R$' : (deal.primaryDeal?.currencySymbol || '$');
-
-        // Check if ANY monitored storefront offers an active promotional discount below retail
-        const primaryHasActiveDiscount =
-          (deal.primaryDeal?.cutPercent ?? 0) > 0 &&
-          (deal.primaryDeal?.salePrice ?? 0) < (deal.primaryDeal?.regularPrice ?? 0);
-
-        const alternativeHasActiveDiscount =
-          Boolean(deal.cheaperAlternative) &&
-          (deal.cheaperAlternative?.cutPercent ?? 0) > 0 &&
-          (deal.cheaperAlternative?.salePrice ?? 0) < (deal.cheaperAlternative?.regularPrice ?? 0);
-
-        const hasAnyStoreDiscount = primaryHasActiveDiscount || alternativeHasActiveDiscount;
-
-        // Reset notification state ONLY if ALL stores returned to full retail price
-        // (effectiveCut === 0 and effectivePrice >= regularPrice, with regularPrice > 0)
-        const isEffectiveAtRetail =
-          effectiveCut === 0 &&
-          regularPrice > 0 &&
-          effectivePrice >= regularPrice;
-
-        const isBaseRetail =
-          !hasAnyStoreDiscount &&
-          isEffectiveAtRetail &&
-          deal.dealType !== 'FREE_TO_KEEP' &&
-          deal.dealType !== 'FREE_PLAY_DAYS';
-
-        if (isBaseRetail) {
-          if (item.last_notified_price != null || (item.last_notified_cut != null && item.last_notified_cut > 0)) {
+          if (item.game_title?.startsWith('Steam App #') && deal.title && !deal.title.startsWith('Steam App #')) {
             try {
               await docClient.send(
                 new UpdateCommand({
                   TableName: TABLE_NAME,
                   Key: { PK: item.PK, SK: item.SK },
-                  UpdateExpression: 'SET last_notified_price = :nullVal, last_notified_cut = :zeroVal, updated_at = :now',
+                  UpdateExpression: 'SET game_title = :title, updated_at = :now',
                   ExpressionAttributeValues: {
-                    ':nullVal': null,
-                    ':zeroVal': 0,
+                    ':title': deal.title,
                     ':now': new Date().toISOString(),
                   },
                 })
               );
-              item.last_notified_price = null;
-              item.last_notified_cut = 0;
-              console.log(`Reset promo state for ${item.SK} (returned to base retail price).`);
-            } catch (resetErr: unknown) {
-              const msg = resetErr instanceof Error ? resetErr.message : String(resetErr);
-              console.error(`Failed to reset promo state for ${item.SK}:`, msg);
+              item.game_title = deal.title;
+              console.log(`Auto-healed generic title for ${item.SK} -> "${deal.title}"`);
+            } catch (autoHealErr: unknown) {
+              const msg = autoHealErr instanceof Error ? autoHealErr.message : String(autoHealErr);
+              console.error(`Failed to auto-heal generic title for ${item.SK}:`, msg);
             }
           }
-          continue;
-        }
 
-        // Enforce that promotional alerts strictly require an active discount
-        const hasActiveDiscount = hasAnyStoreDiscount || (effectiveCut > 0 && effectivePrice < regularPrice);
+          const effectivePrice = deal.cheaperAlternative?.salePrice ?? deal.primaryDeal?.salePrice ?? 0;
+          const effectiveCut = deal.cheaperAlternative?.cutPercent ?? deal.primaryDeal?.cutPercent ?? 0;
+          const regularPrice = deal.cheaperAlternative?.regularPrice ?? deal.primaryDeal?.regularPrice ?? 0;
+          const sym = preferredCurrency === 'BRL' ? 'R$' : (deal.primaryDeal?.currencySymbol || '$');
 
-        const minDiscount = item.min_discount ?? 70;
-        const minRating = item.min_rating ?? null;
+          // Check if ANY monitored storefront offers an active promotional discount below retail
+          const primaryHasActiveDiscount =
+            (deal.primaryDeal?.cutPercent ?? 0) > 0 &&
+            (deal.primaryDeal?.salePrice ?? 0) < (deal.primaryDeal?.regularPrice ?? 0);
 
-        // Skip title if it fails the user's minimum review score requirement
-        if (minRating !== null && deal.reviewScore !== null && deal.reviewScore !== undefined && deal.reviewScore < minRating) {
-          continue;
-        }
+          const alternativeHasActiveDiscount =
+            Boolean(deal.cheaperAlternative) &&
+            (deal.cheaperAlternative?.cutPercent ?? 0) > 0 &&
+            (deal.cheaperAlternative?.salePrice ?? 0) < (deal.cheaperAlternative?.regularPrice ?? 0);
 
-        let shouldAlert = false;
-        let alertReason = '';
-        let embedColor: number = ALERT_PALETTE.CURATED_DEAL;
+          const hasAnyStoreDiscount = primaryHasActiveDiscount || alternativeHasActiveDiscount;
 
-        if (deal.dealType === 'FREE_TO_KEEP' || (item.alert_free && effectivePrice === 0 && (effectiveCut > 0 || regularPrice > 0))) {
-          shouldAlert = true;
-          alertReason = '100% FREE TO KEEP (Permanent Ownership)';
-          embedColor = ALERT_PALETTE.FREE_TO_KEEP;
-        } else if (deal.dealType === 'FREE_PLAY_DAYS') {
-          shouldAlert = true;
-          alertReason = 'FREE PLAY EVENT (Play For Free This Weekend)';
-          embedColor = ALERT_PALETTE.FREE_PLAY_DAYS;
-        } else if (hasActiveDiscount && item.target_price && effectivePrice <= Number(item.target_price)) {
-          shouldAlert = true;
-          alertReason = `TARGET PRICE REACHED (≤ ${sym} ${Number(item.target_price).toFixed(2)})`;
-          embedColor = ALERT_PALETTE.ALL_TIME_LOW;
-        } else if (hasActiveDiscount && effectiveCut >= minDiscount) {
-          if (deal.isAllTimeLow && item.alert_all_time_low) {
+          const isPrimaryAtRetail =
+            (deal.primaryDeal?.cutPercent ?? 0) === 0 &&
+            (deal.primaryDeal?.regularPrice ?? 0) > 0 &&
+            (deal.primaryDeal?.salePrice ?? 0) >= (deal.primaryDeal?.regularPrice ?? 0);
+
+          const isEffectiveAtRetail =
+            effectiveCut === 0 &&
+            regularPrice > 0 &&
+            effectivePrice >= regularPrice;
+
+          const isAlternativeCheckDegraded =
+            Boolean(deal.alternativeCheckDegraded) ||
+            deal.alternativeCheckStatus === 'degraded' ||
+            deal.alternativeCheckStatus === 'skipped';
+
+          const wasNotifiedFromAlternative =
+            Boolean(item.last_notified_store) &&
+            item.last_notified_store !== deal.primaryDeal.shopName;
+
+          const alternativeConfirmedAtRetail = wasNotifiedFromAlternative
+            ? Boolean(
+                deal.storeBreakdown?.[item.last_notified_store!] &&
+                (deal.storeBreakdown[item.last_notified_store!].cutPercent ?? 0) === 0 &&
+                (deal.storeBreakdown[item.last_notified_store!].salePrice ?? 0) >= (deal.storeBreakdown[item.last_notified_store!].regularPrice ?? 0)
+              )
+            : true;
+
+          // Reset notification state ONLY if:
+          // 1. No store has an active discount
+          // 2. Primary storefront is explicitly confirmed at retail
+          // 3. Overall effective price is at retail
+          // 4. Alternative store check was NOT skipped or degraded
+          // 5. If previous alert was from alternative store, that alternative store is confirmed at retail
+          // 6. Not a free promotional event
+          const isBaseRetail =
+            !hasAnyStoreDiscount &&
+            isPrimaryAtRetail &&
+            isEffectiveAtRetail &&
+            !isAlternativeCheckDegraded &&
+            alternativeConfirmedAtRetail &&
+            deal.dealType !== 'FREE_TO_KEEP' &&
+            deal.dealType !== 'FREE_PLAY_DAYS';
+
+          if (isBaseRetail) {
+            if (item.last_notified_price != null || (item.last_notified_cut != null && item.last_notified_cut > 0)) {
+              try {
+                await docClient.send(
+                  new UpdateCommand({
+                    TableName: TABLE_NAME,
+                    Key: { PK: item.PK, SK: item.SK },
+                    UpdateExpression: 'SET last_notified_price = :nullVal, last_notified_cut = :zeroVal, last_notified_store = :nullVal, updated_at = :now',
+                    ExpressionAttributeValues: {
+                      ':nullVal': null,
+                      ':zeroVal': 0,
+                      ':now': new Date().toISOString(),
+                    },
+                  })
+                );
+                item.last_notified_price = null;
+                item.last_notified_cut = 0;
+                item.last_notified_store = null;
+                console.log(`Reset promo state for ${item.SK} (returned to base retail price).`);
+              } catch (resetErr: unknown) {
+                const msg = resetErr instanceof Error ? resetErr.message : String(resetErr);
+                console.error(`Failed to reset promo state for ${item.SK}:`, msg);
+              }
+            }
+            continue;
+          }
+
+          // Enforce that promotional alerts strictly require an active discount
+          const hasActiveDiscount = hasAnyStoreDiscount || (effectiveCut > 0 && effectivePrice < regularPrice);
+
+          const minDiscount = item.min_discount ?? 70;
+          const minRating = item.min_rating ?? null;
+
+          // Skip title if it fails the user's minimum review score requirement
+          if (minRating !== null && deal.reviewScore !== null && deal.reviewScore !== undefined && deal.reviewScore < minRating) {
+            continue;
+          }
+
+          let shouldAlert = false;
+          let alertReason = '';
+          let embedColor: number = ALERT_PALETTE.CURATED_DEAL;
+
+          if (deal.dealType === 'FREE_TO_KEEP' || (item.alert_free && effectivePrice === 0 && (effectiveCut > 0 || regularPrice > 0))) {
             shouldAlert = true;
-            alertReason = `HISTORICAL ALL-TIME LOW PRICE HIT (-${effectiveCut}% OFF)`;
+            alertReason = '100% FREE TO KEEP (Permanent Ownership)';
+            embedColor = ALERT_PALETTE.FREE_TO_KEEP;
+          } else if (deal.dealType === 'FREE_PLAY_DAYS') {
+            shouldAlert = true;
+            alertReason = 'FREE PLAY EVENT (Play For Free This Weekend)';
+            embedColor = ALERT_PALETTE.FREE_PLAY_DAYS;
+          } else if (hasActiveDiscount && item.target_price && effectivePrice <= Number(item.target_price)) {
+            shouldAlert = true;
+            alertReason = `TARGET PRICE REACHED (≤ ${sym} ${Number(item.target_price).toFixed(2)})`;
             embedColor = ALERT_PALETTE.ALL_TIME_LOW;
-          } else if (item.alert_steep_discount) {
-            shouldAlert = true;
-            alertReason = `MAJOR PROMOTION: -${effectiveCut}% OFF`;
-            embedColor = ALERT_PALETTE.CURATED_DEAL;
-          }
-        }
-
-        const lastNotifiedPrice = item.last_notified_price != null ? Number(item.last_notified_price) : null;
-
-        const isNewAlert =
-          lastNotifiedPrice === null ||
-          effectivePrice < lastNotifiedPrice;
-
-        if (shouldAlert && isNewAlert) {
-          console.log(`DM Alert triggered for user ${userId} on ${resolvedTitle}: ${alertReason}`);
-
-          const primarySym = deal.primaryDeal.currencySymbol || sym;
-          const diffPricing = formatPriceComparisonDiff(deal.primaryDeal, deal.cheaperAlternative, primarySym);
-          const fieldName = deal.cheaperAlternative
-            ? `Storefront Comparison ❖ ${deal.primaryDeal.shopName} vs ${deal.cheaperAlternative.shopName}`
-            : `Storefront Offer ❖ ${deal.primaryDeal.shopName}`;
-
-          const fields: DiscordEmbedField[] = [
-            {
-              name: fieldName,
-              value: diffPricing,
-              inline: false,
-            },
-          ];
-
-          if (deal.allTimeLowPrice !== null && deal.allTimeLowPrice !== undefined) {
-            const atlText =
-              deal.isAllTimeLow && hasActiveDiscount
-                ? `**${primarySym} ${deal.allTimeLowPrice.toFixed(2)}** (★ Matches ATL)`
-                : `**${primarySym} ${deal.allTimeLowPrice.toFixed(2)}**`;
-            fields.push({
-              name: 'Historical Low',
-              value: atlText,
-              inline: true,
-            });
+          } else if (hasActiveDiscount && effectiveCut >= minDiscount) {
+            if (deal.isAllTimeLow && item.alert_all_time_low) {
+              shouldAlert = true;
+              alertReason = `HISTORICAL ALL-TIME LOW PRICE HIT (-${effectiveCut}% OFF)`;
+              embedColor = ALERT_PALETTE.ALL_TIME_LOW;
+            } else if (item.alert_steep_discount) {
+              shouldAlert = true;
+              alertReason = `MAJOR PROMOTION: -${effectiveCut}% OFF`;
+              embedColor = ALERT_PALETTE.CURATED_DEAL;
+            }
           }
 
-          if (deal.reviewScore) {
-            fields.push({
-              name: 'Community Score',
-              value: `▸ **${deal.reviewScore}/100** approval`,
-              inline: true,
-            });
-          }
+          const lastNotifiedPrice = item.last_notified_price != null ? Number(item.last_notified_price) : null;
 
-          const embed: DiscordEmbed = {
-            title: `zT Radar ❖ Wishlist Alert: ${resolvedTitle}`,
-            description: `**${alertReason}**`,
-            color: embedColor,
-            fields,
-            footer: {
-              text: 'zT Radar • Direct Wishlist Dispatch',
-            },
-            timestamp: new Date().toISOString(),
-          };
+          const isNewAlert =
+            lastNotifiedPrice === null ||
+            effectivePrice < lastNotifiedPrice;
 
-          if (deal.imageUrl) {
-            embed.image = { url: deal.imageUrl };
-          }
+          if (shouldAlert && isNewAlert) {
+            console.log(`DM Alert triggered for user ${userId} on ${resolvedTitle}: ${alertReason}`);
 
-          const components = createStoreButtons(deal);
-          const sent = await sendDiscordDm(userId, embed, components);
+            const primarySym = deal.primaryDeal.currencySymbol || sym;
+            const diffPricing = formatPriceComparisonDiff(deal.primaryDeal, deal.cheaperAlternative, primarySym);
+            const fieldName = deal.cheaperAlternative
+              ? `Storefront Comparison ❖ ${deal.primaryDeal.shopName} vs ${deal.cheaperAlternative.shopName}`
+              : `Storefront Offer ❖ ${deal.primaryDeal.shopName}`;
 
-          if (sent) {
-            userDmCountMap.set(userId, currentDmCount + 1);
-            try {
-              const sanitizedPrice = typeof effectivePrice === 'number' && !isNaN(effectivePrice) ? effectivePrice : 0;
-              const sanitizedCut = typeof effectiveCut === 'number' && !isNaN(effectiveCut) ? effectiveCut : 0;
+            const fields: DiscordEmbedField[] = [
+              {
+                name: fieldName,
+                value: diffPricing,
+                inline: false,
+              },
+            ];
 
-              await docClient.send(
-                new UpdateCommand({
-                  TableName: TABLE_NAME,
-                  Key: { PK: item.PK, SK: item.SK },
-                  UpdateExpression: 'SET last_notified_price = :price, last_notified_cut = :cut, last_notified_at = :now, game_title = :title',
-                  ExpressionAttributeValues: {
-                    ':price': sanitizedPrice,
-                    ':cut': sanitizedCut,
-                    ':now': new Date().toISOString(),
-                    ':title': resolvedTitle,
-                  },
-                })
-              );
-              item.last_notified_price = sanitizedPrice;
-              item.last_notified_cut = sanitizedCut;
-            } catch (dbError) {
-              console.error(`Failed to update notification state for ${item.SK}:`, dbError);
+            if (deal.allTimeLowPrice !== null && deal.allTimeLowPrice !== undefined) {
+              const atlText =
+                deal.isAllTimeLow && hasActiveDiscount
+                  ? `**${primarySym} ${deal.allTimeLowPrice.toFixed(2)}** (★ Matches ATL)`
+                  : `**${primarySym} ${deal.allTimeLowPrice.toFixed(2)}**`;
+              fields.push({
+                name: 'Historical Low',
+                value: atlText,
+                inline: true,
+              });
+            }
+
+            if (deal.reviewScore) {
+              fields.push({
+                name: 'Community Score',
+                value: `▸ **${deal.reviewScore}/100** approval`,
+                inline: true,
+              });
+            }
+
+            const embed: DiscordEmbed = {
+              title: `zT Radar ❖ Wishlist Alert: ${resolvedTitle}`,
+              description: `**${alertReason}**`,
+              color: embedColor,
+              fields,
+              footer: {
+                text: 'zT Radar • Direct Wishlist Dispatch',
+              },
+              timestamp: new Date().toISOString(),
+            };
+
+            if (deal.imageUrl) {
+              embed.image = { url: deal.imageUrl };
+            }
+
+            const components = createStoreButtons(deal);
+            const sent = await sendDiscordDm(userId, embed, components);
+
+            if (sent) {
+              userDmCountMap.set(userId, currentDmCount + 1);
+              try {
+                const sanitizedPrice = typeof effectivePrice === 'number' && !isNaN(effectivePrice) ? effectivePrice : 0;
+                const sanitizedCut = typeof effectiveCut === 'number' && !isNaN(effectiveCut) ? effectiveCut : 0;
+                const notifiedStore = deal.cheaperAlternative ? deal.cheaperAlternative.shopName : deal.primaryDeal.shopName;
+
+                await docClient.send(
+                  new UpdateCommand({
+                    TableName: TABLE_NAME,
+                    Key: { PK: item.PK, SK: item.SK },
+                    UpdateExpression: 'SET last_notified_price = :price, last_notified_cut = :cut, last_notified_store = :store, last_notified_at = :now, game_title = :title',
+                    ExpressionAttributeValues: {
+                      ':price': sanitizedPrice,
+                      ':cut': sanitizedCut,
+                      ':store': notifiedStore,
+                      ':now': new Date().toISOString(),
+                      ':title': resolvedTitle,
+                    },
+                  })
+                );
+                item.last_notified_price = sanitizedPrice;
+                item.last_notified_cut = sanitizedCut;
+                item.last_notified_store = notifiedStore;
+              } catch (dbError) {
+                console.error(`Failed to update notification state for ${item.SK}:`, dbError);
+              }
             }
           }
         }
