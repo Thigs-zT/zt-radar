@@ -178,6 +178,18 @@ Resources:
         - DynamoDBReadPolicy:
             TableName: !Ref DealsTable
       Events:
+        GetPublicMarketList:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref DiscordApi
+            Path: /public/market
+            Method: get
+        GetPublicMarketTrending:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref DiscordApi
+            Path: /public/market/trending
+            Method: get
         GetPublicMarket:
           Type: HttpApi
           Properties:

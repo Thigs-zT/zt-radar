@@ -138,6 +138,86 @@ describe('Public Web API Handler', () => {
     });
   });
 
+  describe('Route: GET /public/market', () => {
+    it('should return 200 and an array of curated market games matching domain types', async () => {
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/market',
+        rawPath: '/public/market',
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/market',
+          },
+        },
+      };
+
+      const response = await handler(event);
+
+      expect(response.statusCode).toBe(200);
+      expect(response.headers['Content-Type']).toBe('application/json');
+      expect(response.headers['Access-Control-Allow-Origin']).toBe('*');
+
+      const data = JSON.parse(response.body);
+      expect(Array.isArray(data)).toBe(true);
+      expect(data.length).toBeGreaterThan(0);
+      expect(data[0].appId).toBeDefined();
+      expect(data[0].primaryDeal).toBeDefined();
+      expect(data[0].primaryDeal.shopName).toBe('Steam');
+    });
+
+    it('should return filtered game array when appId query parameter is provided', async () => {
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/market',
+        rawPath: '/public/market',
+        queryStringParameters: {
+          appId: '1091500',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/market',
+          },
+        },
+      };
+
+      const response = await handler(event);
+
+      expect(response.statusCode).toBe(200);
+      const data = JSON.parse(response.body);
+      expect(Array.isArray(data)).toBe(true);
+      expect(data.length).toBe(1);
+      expect(data[0].appId).toBe('1091500');
+    });
+  });
+
+  describe('Route: GET /public/market/trending', () => {
+    it('should return 200 and an array of trending games matching domain types', async () => {
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/market/trending',
+        rawPath: '/public/market/trending',
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/market/trending',
+          },
+        },
+      };
+
+      const response = await handler(event);
+
+      expect(response.statusCode).toBe(200);
+      expect(response.headers['Content-Type']).toBe('application/json');
+      expect(response.headers['Access-Control-Allow-Origin']).toBe('*');
+
+      const data = JSON.parse(response.body);
+      expect(Array.isArray(data)).toBe(true);
+      expect(data.length).toBeGreaterThan(0);
+      expect(data[0].rank).toBe(1);
+      expect(data[0].name).toBeDefined();
+      expect(data[0].priceText).toBeDefined();
+    });
+  });
+
   describe('Route: GET /public/duel/{duelId}', () => {
     it('should return 200 and duel payload when duel is found in DynamoDB', async () => {
       const mockPayload = {
