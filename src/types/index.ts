@@ -663,3 +663,20 @@ export interface SteamSaleStatus {
   isActive: boolean;
 }
 
+// ---------------------------------------------------------------------------
+// Public Web API Intelligence
+// ---------------------------------------------------------------------------
+
+/** Public Market telemetry response for Web / PWA companion. */
+export interface PublicMarketTelemetry extends GameDealInfo {
+  appId: string;
+  updatedAt: string;
+}
+
+/** Public Duel payload response retrieved from DynamoDB. */
+export interface PublicDuelResponse {
+  duelId: string;
+  payload: Record<string, unknown>;
+  createdAt?: string;
+}
+

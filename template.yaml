@@ -47,6 +47,18 @@ Resources:
       DefaultRouteSettings:
         ThrottlingBurstLimit: 20
         ThrottlingRateLimit: 10
+      CorsConfiguration:
+        AllowOrigins:
+          - "http://localhost:5173"
+          - "http://localhost:4173"
+          - "https://*.pages.dev"
+        AllowMethods:
+          - "GET"
+          - "OPTIONS"
+        AllowHeaders:
+          - "Content-Type"
+          - "Authorization"
+        MaxAge: 600
 
   # DynamoDB Table (Single-Table Design)
   DealsTable:
@@ -143,7 +155,46 @@ Resources:
             RetryPolicy:
               MaximumRetryAttempts: 0
 
+  # Public Web / PWA Companion API Handler
+  PublicApiFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: "node22"
+        Sourcemap: true
+        EntryPoints:
+          - src/handlers/publicApi.ts
+    Properties:
+      CodeUri: .
+      Handler: src/handlers/publicApi.handler
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref DealsTable
+          ITAD_API_KEY: !Ref ItadApiKey
+          STEAM_API_KEY: !Ref SteamApiKey
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref DealsTable
+      Events:
+        GetPublicMarket:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref DiscordApi
+            Path: /public/market/{appId}
+            Method: get
+        GetPublicDuel:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref DiscordApi
+            Path: /public/duel/{duelId}
+            Method: get
+
 Outputs:
   InteractionsEndpoint:
     Description: "Discord Interactions Endpoint URL to paste in Discord Developer Portal"
     Value: !Sub "https://${DiscordApi}.execute-api.${AWS::Region}.amazonaws.com/prod/interactions"
+  PublicApiEndpoint:
+    Description: "Base URL of the public HTTP API Gateway for Web / PWA companion"
+    Value: !Sub "https://${DiscordApi}.execute-api.${AWS::Region}.amazonaws.com/prod"
