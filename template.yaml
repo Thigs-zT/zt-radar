@@ -51,7 +51,7 @@ Resources:
         AllowOrigins:
           - "http://localhost:5173"
           - "http://localhost:4173"
-          - "https://*.pages.dev"
+          - "*"
         AllowMethods:
           - "GET"
           - "OPTIONS"
