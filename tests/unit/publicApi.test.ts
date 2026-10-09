@@ -534,6 +534,53 @@ describe('Public Web API Handler', () => {
       expect(data[0].primaryDeal.currency).toBe('BRL');
       expect(data[0].primaryDeal.currencySymbol).toBe('R$');
     });
+
+    it('should confirm USD is the strict global default currency when currency parameter is omitted or set to USD', async () => {
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/market',
+        rawPath: '/public/market',
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/market',
+          },
+        },
+      };
+
+      const response = await handler(event);
+
+      expect(response.statusCode).toBe(200);
+      const data = JSON.parse(response.body);
+      expect(Array.isArray(data)).toBe(true);
+      expect(data[0].primaryDeal.currency).toBe('USD');
+      expect(data[0].primaryDeal.currencySymbol).toBe('$');
+      expect(getGameDealInfo).toHaveBeenCalledWith(expect.any(String), 'USD');
+    });
+
+    it('should confirm USD default when unsupported currency code is supplied', async () => {
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/market',
+        rawPath: '/public/market',
+        queryStringParameters: {
+          currency: 'EUR',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/market',
+          },
+        },
+      };
+
+      const response = await handler(event);
+
+      expect(response.statusCode).toBe(200);
+      const data = JSON.parse(response.body);
+      expect(Array.isArray(data)).toBe(true);
+      expect(data[0].primaryDeal.currency).toBe('USD');
+      expect(data[0].primaryDeal.currencySymbol).toBe('$');
+      expect(getGameDealInfo).toHaveBeenCalledWith(expect.any(String), 'USD');
+    });
   });
 
   describe('Route: GET /public/market/trending', () => {
@@ -575,6 +622,180 @@ describe('Public Web API Handler', () => {
 
       expect(data[2].rank).toBe(3);
       expect(data[2].appId).toBe(1245620); // ELDEN RING
+    });
+
+    it('should filter out Valve hardware and physical peripherals from trending games', async () => {
+      const mockHardwareAndGames: SteamTrendingEntry[] = [
+        {
+          rank: 1,
+          appId: 1675200,
+          name: 'Steam Deck OLED',
+          currentPlayers: null,
+          priceText: '$ 549.00',
+          headerImage: 'https://example.com/steam_deck.jpg',
+        },
+        {
+          rank: 2,
+          appId: 1091500,
+          name: 'Cyberpunk 2077',
+          currentPlayers: 54000,
+          priceText: '$ 29.99 (-50%)',
+          headerImage: 'https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/1091500/header.jpg',
+        },
+        {
+          rank: 3,
+          appId: 1059530,
+          name: 'Valve Index VR Kit',
+          currentPlayers: null,
+          priceText: '$ 999.00',
+          headerImage: 'https://example.com/valve_index.jpg',
+        },
+        {
+          rank: 4,
+          appId: 353370,
+          name: 'Steam Controller',
+          currentPlayers: null,
+          priceText: '$ 49.99',
+          headerImage: 'https://example.com/controller.jpg',
+        },
+        {
+          rank: 5,
+          appId: 1086940,
+          name: "Baldur's Gate 3",
+          currentPlayers: 82000,
+          priceText: '$ 47.99 (-20%)',
+          headerImage: 'https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/1086940/header.jpg',
+        },
+        {
+          rank: 6,
+          appId: 9999999,
+          name: 'Steam Frame VR Headset',
+          currentPlayers: null,
+          priceText: '$ 799.00',
+          headerImage: 'https://example.com/frame.jpg',
+        },
+        {
+          rank: 7,
+          appId: 1245620,
+          name: 'ELDEN RING',
+          currentPlayers: 67000,
+          priceText: '$ 35.99 (-40%)',
+          headerImage: 'https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/1245620/header.jpg',
+        },
+      ];
+
+      vi.mocked(getSteamTrendingGames).mockResolvedValueOnce(mockHardwareAndGames);
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/market/trending',
+        rawPath: '/public/market/trending',
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/market/trending',
+          },
+        },
+      };
+
+      const response = await handler(event);
+
+      expect(response.statusCode).toBe(200);
+      const data = JSON.parse(response.body);
+      expect(Array.isArray(data)).toBe(true);
+      expect(data.length).toBe(3);
+
+      const appIds = data.map((g: SteamTrendingEntry) => g.appId);
+      expect(appIds).not.toContain(1675200);
+      expect(appIds).not.toContain(1059530);
+      expect(appIds).not.toContain(353370);
+      expect(appIds).not.toContain(9999999);
+
+      expect(data[0].rank).toBe(1);
+      expect(data[0].name).toBe('Cyberpunk 2077');
+      expect(data[1].rank).toBe(2);
+      expect(data[1].name).toBe("Baldur's Gate 3");
+      expect(data[2].rank).toBe(3);
+      expect(data[2].name).toBe('ELDEN RING');
+    });
+
+    it('should strictly deduplicate items by appId and preserve sequential ranks', async () => {
+      const mockDuplicates: SteamTrendingEntry[] = [
+        {
+          rank: 1,
+          appId: 1091500,
+          name: 'Cyberpunk 2077',
+          currentPlayers: 54000,
+          priceText: '$ 29.99 (-50%)',
+          headerImage: 'https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/1091500/header.jpg',
+        },
+        {
+          rank: 2,
+          appId: 1091500,
+          name: 'Cyberpunk 2077 (Duplicate)',
+          currentPlayers: 54000,
+          priceText: '$ 29.99 (-50%)',
+          headerImage: 'https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/1091500/header.jpg',
+        },
+        {
+          rank: 3,
+          appId: 1086940,
+          name: "Baldur's Gate 3",
+          currentPlayers: 82000,
+          priceText: '$ 47.99 (-20%)',
+          headerImage: 'https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/1086940/header.jpg',
+        },
+        {
+          rank: 4,
+          appId: 1091500,
+          name: 'Cyberpunk 2077 (Triple)',
+          currentPlayers: 54000,
+          priceText: '$ 29.99 (-50%)',
+          headerImage: 'https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/1091500/header.jpg',
+        },
+        {
+          rank: 5,
+          appId: 1245620,
+          name: 'ELDEN RING',
+          currentPlayers: 67000,
+          priceText: '$ 35.99 (-40%)',
+          headerImage: 'https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/1245620/header.jpg',
+        },
+        {
+          rank: 6,
+          appId: 1086940,
+          name: "Baldur's Gate 3 (Duplicate)",
+          currentPlayers: 82000,
+          priceText: '$ 47.99 (-20%)',
+          headerImage: 'https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/1086940/header.jpg',
+        },
+      ];
+
+      vi.mocked(getSteamTrendingGames).mockResolvedValueOnce(mockDuplicates);
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/market/trending',
+        rawPath: '/public/market/trending',
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/market/trending',
+          },
+        },
+      };
+
+      const response = await handler(event);
+
+      expect(response.statusCode).toBe(200);
+      const data = JSON.parse(response.body);
+      expect(Array.isArray(data)).toBe(true);
+      expect(data.length).toBe(3);
+
+      expect(data[0].rank).toBe(1);
+      expect(data[0].appId).toBe(1091500);
+      expect(data[1].rank).toBe(2);
+      expect(data[1].appId).toBe(1086940);
+      expect(data[2].rank).toBe(3);
+      expect(data[2].appId).toBe(1245620);
     });
 
     it('should gracefully fallback to curated trending games if live probe fails', async () => {
@@ -705,9 +926,29 @@ describe('Public Web API Handler', () => {
       const response = await handler(event);
 
       expect(response.statusCode).toBe(404);
+      expect(response.headers['Access-Control-Allow-Origin']).toBe('*');
       const data = JSON.parse(response.body);
       expect(data.error).toBe('NotFound');
       expect(data.message).toContain('non-existent-duel');
+    });
+
+    it('should return 204 with CORS headers on OPTIONS preflight request for duel endpoint', async () => {
+      const event: HttpApiEvent = {
+        requestContext: {
+          http: {
+            method: 'OPTIONS',
+            path: '/public/duel/test-duel-123',
+          },
+        },
+      };
+
+      const response = await handler(event);
+
+      expect(response.statusCode).toBe(204);
+      expect(response.body).toBe('');
+      expect(response.headers['Access-Control-Allow-Origin']).toBe('*');
+      expect(response.headers['Access-Control-Allow-Methods']).toBe('GET, OPTIONS');
+      expect(response.headers['Access-Control-Allow-Headers']).toBe('Content-Type, Authorization');
     });
 
     it('should return 400 Bad Request when duelId is missing or empty', async () => {

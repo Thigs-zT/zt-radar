@@ -73,7 +73,34 @@ export const KNOWN_GAME_TITLES: Record<string, string> = {
 export const CURATED_MARKET_APP_IDS: string[] = ['1091500', '1086940', '1245620', '292030'];
 
 /** Institutional Free-to-Play titles to exclude from trending deals. */
-const KNOWN_F2P_APP_IDS = new Set<number>([730, 570, 440, 1172470, 230410, 578080]);
+export const KNOWN_F2P_APP_IDS = new Set<number>([730, 570, 440, 1172470, 230410, 578080]);
+
+/** Known Valve hardware and physical peripheral Steam AppIDs to exclude from game charts. */
+export const KNOWN_HARDWARE_APP_IDS = new Set<number>([
+  1675200, // Steam Deck
+  2133010, // Steam Deck Docking Station
+  1059530, // Valve Index VR Kit
+  1059550, // Valve Index Headset
+  1059570, // Valve Index Controllers
+  1059540, // Valve Index Base Station
+  353370,  // Steam Controller
+  353380,  // Steam Link
+]);
+
+/** Hardware and physical peripheral name patterns to exclude from trending game charts. */
+export const HARDWARE_NAME_PATTERNS: RegExp[] = [
+  /\bsteam deck\b/i,
+  /\bsteam frame\b/i,
+  /\bsteam machine\b/i,
+  /\bvalve index\b/i,
+  /\bsteam controller\b/i,
+  /\bsteam link\b/i,
+  /\bcontroller\b/i,
+  /\bheadset\b/i,
+  /\bdocking station\b/i,
+  /\bbase station\b/i,
+  /\bvr kit\b/i,
+];
 
 /**
  * Constructs a standardized HTTP API Gateway response with security and CORS headers.
@@ -256,8 +283,12 @@ export function buildTrendingGamesList(): SteamTrendingEntry[] {
 }
 
 /**
- * Resolves trending games on Steam, filtering out Free-to-Play games and games without active deals.
- * Gracefully falls back to curated trending games on timeout or upstream failure.
+ * Resolves trending games on Steam:
+ * - Filters out Free-to-Play titles and non-discounted promotional labels.
+ * - Filters out Valve hardware and physical peripherals (Steam Deck, Valve Index, Controller, etc.).
+ * - Deduplicates items by appId so identical games never appear more than once.
+ * - Re-indexes sequential ranks (1, 2, 3...) after filtering.
+ * - Gracefully falls back to curated trending games on timeout or upstream failure.
  */
 export async function resolveTrendingGames(): Promise<SteamTrendingEntry[]> {
   try {
@@ -266,18 +297,46 @@ export async function resolveTrendingGames(): Promise<SteamTrendingEntry[]> {
       new Promise<SteamTrendingEntry[]>((resolve) => setTimeout(() => resolve([]), 2000)),
     ]);
 
-    const filtered = (rawTrending || []).filter((game) => {
-      if (KNOWN_F2P_APP_IDS.has(game.appId)) return false;
+    const seenAppIds = new Set<number>();
+    const filtered: SteamTrendingEntry[] = [];
+
+    for (const game of rawTrending || []) {
+      // 1. Deduplicate by appId
+      if (!game.appId || seenAppIds.has(game.appId)) {
+        continue;
+      }
+
+      // 2. Filter out institutional Free-to-Play titles
+      if (KNOWN_F2P_APP_IDS.has(game.appId)) {
+        continue;
+      }
+
+      // 3. Filter out Free to Play price text
       const priceLower = (game.priceText || '').toLowerCase();
-      if (priceLower.includes('free')) return false;
-      return true;
-    });
+      if (priceLower.includes('free')) {
+        continue;
+      }
+
+      // 4. Filter out known hardware AppIDs
+      if (KNOWN_HARDWARE_APP_IDS.has(game.appId)) {
+        continue;
+      }
+
+      // 5. Filter out hardware and physical peripheral titles
+      const name = game.name || '';
+      if (HARDWARE_NAME_PATTERNS.some((pattern) => pattern.test(name))) {
+        continue;
+      }
+
+      seenAppIds.add(game.appId);
+      filtered.push({
+        ...game,
+        rank: filtered.length + 1,
+      });
+    }
 
     if (filtered.length > 0) {
-      return filtered.map((game, index) => ({
-        ...game,
-        rank: index + 1,
-      }));
+      return filtered;
     }
   } catch (error) {
     console.error(
