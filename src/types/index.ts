@@ -680,3 +680,31 @@ export interface PublicDuelResponse {
   createdAt?: string;
 }
 
+/** A single enriched wishlist item for Web / PWA companion. */
+export interface PublicWishlistItem {
+  appId: string;
+  title: string;
+  imageUrl: string;
+  url: string;
+  store: string;
+  priority: number;
+  dateAdded: number;
+  salePrice: number | null;
+  regularPrice: number | null;
+  discountPercent: number;
+  isFree: boolean;
+  currency: string;
+  currencySymbol: string;
+  primaryDeal?: StoreDeal | null;
+  cheaperAlternative?: StoreDeal | null;
+  storeBreakdown?: Record<string, StoreDeal>;
+}
+
+/** Public Wishlist telemetry response payload for Web / PWA companion. */
+export interface PublicWishlistResponse {
+  steamId: string;
+  totalSteamWishlist: number;
+  currency: string;
+  items: PublicWishlistItem[];
+}
+

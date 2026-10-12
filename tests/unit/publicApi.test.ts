@@ -21,17 +21,35 @@ vi.mock('../../src/utils/platformStatus.js', async (importOriginal) => {
   };
 });
 
+vi.mock('../../src/utils/steamWeb.js', async (importOriginal) => {
+  const actual = await importOriginal<Record<string, unknown>>();
+  return {
+    ...actual,
+    resolveSteamId: vi.fn(),
+    fetchSteamWishlist: vi.fn(),
+    batchFetchSteamAppPrices: vi.fn(),
+    resolveSteamAppTitles: vi.fn(),
+  };
+});
+
 import {
   handler,
   createJsonResponse,
   buildMarketTelemetryPlaceholder,
   buildTrendingGamesList,
+  resolveWishlistTelemetry,
   CORS_HEADERS,
   KNOWN_GAME_TITLES,
   CURATED_MARKET_APP_IDS,
 } from '../../src/handlers/publicApi.js';
 import { getGameDealInfo } from '../../src/utils/itadApi.js';
 import { getSteamTrendingGames } from '../../src/utils/platformStatus.js';
+import {
+  resolveSteamId,
+  fetchSteamWishlist,
+  batchFetchSteamAppPrices,
+  resolveSteamAppTitles,
+} from '../../src/utils/steamWeb.js';
 
 describe('Public Web API Handler', () => {
   const ddbMock = mockClient(DynamoDBDocumentClient);
@@ -243,6 +261,52 @@ describe('Public Web API Handler', () => {
 
     // Default mock implementation for getSteamTrendingGames
     vi.mocked(getSteamTrendingGames).mockResolvedValue(mockTrendingRaw);
+
+    // Default mock implementations for Steam Web utilities
+    vi.mocked(resolveSteamId).mockImplementation(async (target) => {
+      const trimmed = (target || '').trim();
+      if (/^\d{17}$/.test(trimmed)) return trimmed;
+      if (trimmed === 'zthigs') return '76561198327022168';
+      if (trimmed.includes('76561198327022168')) return '76561198327022168';
+      if (trimmed.includes('zthigs')) return '76561198327022168';
+      return null;
+    });
+
+    vi.mocked(fetchSteamWishlist).mockResolvedValue({
+      success: true,
+      items: [
+        { appId: '1086940', priority: 1, dateAdded: 1700000000 },
+        { appId: '1091500', priority: 2, dateAdded: 1690000000 },
+      ],
+    });
+
+    vi.mocked(batchFetchSteamAppPrices).mockResolvedValue(
+      new Map([
+        [
+          1086940,
+          {
+            initial: 59.99,
+            final: 47.99,
+            isFree: false,
+          },
+        ],
+        [
+          1091500,
+          {
+            initial: 59.99,
+            final: 29.99,
+            isFree: false,
+          },
+        ],
+      ]),
+    );
+
+    vi.mocked(resolveSteamAppTitles).mockResolvedValue(
+      new Map([
+        ['1086940', "Baldur's Gate 3"],
+        ['1091500', 'Cyberpunk 2077'],
+      ]),
+    );
   });
 
   afterEach(() => {
@@ -995,6 +1059,393 @@ describe('Public Web API Handler', () => {
       const data = JSON.parse(response.body);
       expect(data.error).toBe('ConfigurationError');
       consoleSpy.mockRestore();
+    });
+  });
+
+  describe('Route: GET /public/wishlist/{target}', () => {
+    it('should successfully retrieve and enrich public wishlist telemetry using a numeric SteamID64', async () => {
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/wishlist/{target}',
+        rawPath: '/public/wishlist/76561198327022168',
+        pathParameters: {
+          target: '76561198327022168',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/wishlist/76561198327022168',
+          },
+        },
+      };
+
+      const response = await handler(event);
+
+      expect(response.statusCode).toBe(200);
+      expect(response.headers['Access-Control-Allow-Origin']).toBe('*');
+
+      const data = JSON.parse(response.body);
+      expect(data.steamId).toBe('76561198327022168');
+      expect(data.totalSteamWishlist).toBe(2);
+      expect(data.currency).toBe('USD');
+      expect(Array.isArray(data.items)).toBe(true);
+      expect(data.items).toHaveLength(2);
+
+      const firstItem = data.items[0];
+      expect(firstItem.appId).toBe('1086940');
+      expect(firstItem.title).toBe("Baldur's Gate 3");
+      expect(firstItem.imageUrl).toContain('1086940');
+      expect(firstItem.url).toBe('https://store.steampowered.com/app/1086940');
+      expect(firstItem.store).toBe('Steam');
+      expect(firstItem.currency).toBe('USD');
+      expect(firstItem.currencySymbol).toBe('$');
+      expect(firstItem.regularPrice).toBe(59.99);
+      expect(firstItem.salePrice).toBe(47.99);
+      expect(firstItem.discountPercent).toBe(20);
+      expect(firstItem.isFree).toBe(false);
+      expect(firstItem.primaryDeal).toBeDefined();
+      expect(firstItem.primaryDeal.shopName).toBe('Steam');
+    });
+
+    it('should successfully resolve vanity username and return public wishlist telemetry', async () => {
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/wishlist/{target}',
+        rawPath: '/public/wishlist/zthigs',
+        pathParameters: {
+          target: 'zthigs',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/wishlist/zthigs',
+          },
+        },
+      };
+
+      const response = await handler(event);
+
+      expect(response.statusCode).toBe(200);
+      const data = JSON.parse(response.body);
+      expect(data.steamId).toBe('76561198327022168');
+      expect(data.totalSteamWishlist).toBe(2);
+    });
+
+    it('should successfully resolve full profile URL and return wishlist telemetry', async () => {
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/wishlist/{target}',
+        rawPath: '/public/wishlist/https%3A%2F%2Fsteamcommunity.com%2Fid%2Fzthigs',
+        pathParameters: {
+          target: 'https%3A%2F%2Fsteamcommunity.com%2Fid%2Fzthigs',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/wishlist/https%3A%2F%2Fsteamcommunity.com%2Fid%2Fzthigs',
+          },
+        },
+      };
+
+      const response = await handler(event);
+
+      expect(response.statusCode).toBe(200);
+      const data = JSON.parse(response.body);
+      expect(data.steamId).toBe('76561198327022168');
+    });
+
+    it('should support regional BRL currency (?currency=BRL) across items and pricing', async () => {
+      vi.mocked(batchFetchSteamAppPrices).mockResolvedValueOnce(
+        new Map([
+          [
+            1086940,
+            {
+              initial: 199.99,
+              final: 159.99,
+              isFree: false,
+            },
+          ],
+        ]),
+      );
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/wishlist/{target}',
+        rawPath: '/public/wishlist/76561198327022168',
+        pathParameters: {
+          target: '76561198327022168',
+        },
+        queryStringParameters: {
+          currency: 'BRL',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/wishlist/76561198327022168',
+          },
+        },
+      };
+
+      const response = await handler(event);
+
+      expect(response.statusCode).toBe(200);
+      const data = JSON.parse(response.body);
+      expect(data.currency).toBe('BRL');
+      expect(data.items[0].currency).toBe('BRL');
+      expect(data.items[0].currencySymbol).toBe('R$');
+      expect(data.items[0].regularPrice).toBe(199.99);
+      expect(data.items[0].salePrice).toBe(159.99);
+      expect(vi.mocked(batchFetchSteamAppPrices)).toHaveBeenCalledWith(
+        expect.any(Array),
+        'br',
+        100,
+      );
+    });
+
+    it('should enrich top wishlist items with multi-store deal intelligence when available', async () => {
+      vi.mocked(getGameDealInfo).mockResolvedValueOnce(mockDealBaldursGate);
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/wishlist/{target}',
+        rawPath: '/public/wishlist/76561198327022168',
+        pathParameters: {
+          target: '76561198327022168',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/wishlist/76561198327022168',
+          },
+        },
+      };
+
+      const response = await handler(event);
+
+      expect(response.statusCode).toBe(200);
+      const data = JSON.parse(response.body);
+      const bg3 = data.items[0];
+      expect(bg3.cheaperAlternative).toBeDefined();
+      expect(bg3.cheaperAlternative?.shopName).toBe('GOG');
+      expect(bg3.storeBreakdown?.['GOG']).toBeDefined();
+    });
+
+    it('should return empty items array when wishlist is empty', async () => {
+      vi.mocked(fetchSteamWishlist).mockResolvedValueOnce({
+        success: true,
+        items: [],
+      });
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/wishlist/{target}',
+        rawPath: '/public/wishlist/76561198327022168',
+        pathParameters: {
+          target: '76561198327022168',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/wishlist/76561198327022168',
+          },
+        },
+      };
+
+      const response = await handler(event);
+
+      expect(response.statusCode).toBe(200);
+      const data = JSON.parse(response.body);
+      expect(data.totalSteamWishlist).toBe(0);
+      expect(data.items).toEqual([]);
+    });
+
+    it('should return 403 WishlistPrivate when Steam profile is private', async () => {
+      vi.mocked(fetchSteamWishlist).mockResolvedValueOnce({
+        success: false,
+        error: 'PRIVATE_OR_NOT_FOUND',
+      });
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/wishlist/{target}',
+        rawPath: '/public/wishlist/76561198327022168',
+        pathParameters: {
+          target: '76561198327022168',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/wishlist/76561198327022168',
+          },
+        },
+      };
+
+      const response = await handler(event);
+
+      expect(response.statusCode).toBe(403);
+      expect(response.headers['Access-Control-Allow-Origin']).toBe('*');
+      const data = JSON.parse(response.body);
+      expect(data.error).toBe('WishlistPrivate');
+      expect(data.message).toBe('This Steam profile is private or does not exist.');
+    });
+
+    it('should return 404 NotFound when target vanity cannot be resolved to a SteamID', async () => {
+      vi.mocked(resolveSteamId).mockResolvedValueOnce(null);
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/wishlist/{target}',
+        rawPath: '/public/wishlist/unknownuser999',
+        pathParameters: {
+          target: 'unknownuser999',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/wishlist/unknownuser999',
+          },
+        },
+      };
+
+      const response = await handler(event);
+
+      expect(response.statusCode).toBe(404);
+      expect(response.headers['Access-Control-Allow-Origin']).toBe('*');
+      const data = JSON.parse(response.body);
+      expect(data.error).toBe('NotFound');
+      expect(data.message).toContain('Unable to resolve Steam profile');
+    });
+
+    it('should return 400 BadRequest when target parameter is missing or whitespace', async () => {
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/wishlist/{target}',
+        rawPath: '/public/wishlist/',
+        pathParameters: {
+          target: '   ',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/wishlist/',
+          },
+        },
+      };
+
+      const response = await handler(event);
+
+      expect(response.statusCode).toBe(400);
+      const data = JSON.parse(response.body);
+      expect(data.error).toBe('BadRequest');
+    });
+
+    it('should return 400 BadRequest when requesting base /public/wishlist without target', async () => {
+      const event: HttpApiEvent = {
+        rawPath: '/public/wishlist',
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/wishlist',
+          },
+        },
+      };
+
+      const response = await handler(event);
+
+      expect(response.statusCode).toBe(400);
+      const data = JSON.parse(response.body);
+      expect(data.error).toBe('BadRequest');
+    });
+
+    it('should return 500 ConfigurationError when Steam API key is missing', async () => {
+      vi.mocked(fetchSteamWishlist).mockResolvedValueOnce({
+        success: false,
+        error: 'CONFIG_REQUIRED',
+      });
+
+      const event: HttpApiEvent = {
+        pathParameters: {
+          target: '76561198327022168',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/wishlist/76561198327022168',
+          },
+        },
+      };
+
+      const response = await handler(event);
+
+      expect(response.statusCode).toBe(500);
+      const data = JSON.parse(response.body);
+      expect(data.error).toBe('ConfigurationError');
+    });
+
+    it('should return 502 UpstreamError when Steam API returns a network or server error', async () => {
+      vi.mocked(fetchSteamWishlist).mockResolvedValueOnce({
+        success: false,
+        error: 'FETCH_ERROR',
+      });
+
+      const event: HttpApiEvent = {
+        pathParameters: {
+          target: '76561198327022168',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/wishlist/76561198327022168',
+          },
+        },
+      };
+
+      const response = await handler(event);
+
+      expect(response.statusCode).toBe(502);
+      const data = JSON.parse(response.body);
+      expect(data.error).toBe('UpstreamError');
+    });
+
+    it('should return 204 with CORS headers on OPTIONS preflight request to wishlist route', async () => {
+      const event: HttpApiEvent = {
+        requestContext: {
+          http: {
+            method: 'OPTIONS',
+            path: '/public/wishlist/76561198327022168',
+          },
+        },
+      };
+
+      const response = await handler(event);
+
+      expect(response.statusCode).toBe(204);
+      expect(response.body).toBe('');
+      expect(response.headers['Access-Control-Allow-Origin']).toBe('*');
+      expect(response.headers['Access-Control-Allow-Methods']).toBe('GET, OPTIONS');
+    });
+
+    it('should cap target items to 100 while preserving totalSteamWishlist count when wishlist is large', async () => {
+      const largeItems = Array.from({ length: 150 }, (_, i) => ({
+        appId: String(200000 + i),
+        priority: i + 1,
+        dateAdded: 1700000000 - i * 1000,
+      }));
+
+      vi.mocked(fetchSteamWishlist).mockResolvedValueOnce({
+        success: true,
+        items: largeItems,
+      });
+
+      const event: HttpApiEvent = {
+        pathParameters: {
+          target: '76561198327022168',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/wishlist/76561198327022168',
+          },
+        },
+      };
+
+      const response = await handler(event);
+
+      expect(response.statusCode).toBe(200);
+      const data = JSON.parse(response.body);
+      expect(data.totalSteamWishlist).toBe(150);
+      expect(data.items).toHaveLength(100);
     });
   });
 

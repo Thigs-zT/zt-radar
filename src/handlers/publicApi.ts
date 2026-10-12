@@ -6,13 +6,28 @@
  * - GET /public/market/trending: Retrieves trending game telemetry on Steam (excluding Free-to-Play).
  * - GET /public/market/{appId}: Retrieves market telemetry and multi-store deal intelligence for a specific game.
  * - GET /public/duel/{duelId}: Retrieves historical library duel comparison payload from DynamoDB.
+ * - GET /public/wishlist/{target}: Retrieves public Steam wishlist telemetry with live pricing and store attribution.
  */
 
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, QueryCommand } from '@aws-sdk/lib-dynamodb';
-import type { PublicMarketTelemetry, SteamTrendingEntry, StoreDeal } from '../types/index.js';
+import type {
+  PublicMarketTelemetry,
+  SteamTrendingEntry,
+  StoreDeal,
+  PublicWishlistItem,
+  PublicWishlistResponse,
+  GameDealInfo,
+} from '../types/index.js';
 import { getGameDealInfo } from '../utils/itadApi.js';
 import { getSteamTrendingGames } from '../utils/platformStatus.js';
+import {
+  resolveSteamId,
+  fetchSteamWishlist,
+  batchFetchSteamAppPrices,
+  resolveSteamAppTitles,
+  APP_DIRECTORY,
+} from '../utils/steamWeb.js';
 
 const ddbClient = new DynamoDBClient({});
 export const docClient = DynamoDBDocumentClient.from(ddbClient);
@@ -348,6 +363,211 @@ export async function resolveTrendingGames(): Promise<SteamTrendingEntry[]> {
   return buildTrendingGamesList();
 }
 
+export type WishlistTelemetryResult =
+  | { success: true; data: PublicWishlistResponse }
+  | { success: false; statusCode: number; error: string; message: string };
+
+/**
+ * Resolves public Steam wishlist telemetry for a user:
+ * - Accepts SteamID64, vanity username, or full profile URL.
+ * - Resolves target into SteamID64.
+ * - Fetches user's wishlist games sorted by date_added descending.
+ * - Enriches items with pricing, active discount %, and store attribution.
+ * - Enforces defensive limits to stay well within Lambda execution constraints.
+ */
+export async function resolveWishlistTelemetry(
+  target: string,
+  preferredCurrency: string = 'USD',
+): Promise<WishlistTelemetryResult> {
+  const cleanTarget = target.trim();
+  if (!cleanTarget) {
+    return {
+      success: false,
+      statusCode: 400,
+      error: 'BadRequest',
+      message: 'Missing or invalid target parameter.',
+    };
+  }
+
+  const steamApiKey = process.env.STEAM_API_KEY || '';
+  const steamId = await resolveSteamId(cleanTarget, steamApiKey);
+  if (!steamId) {
+    return {
+      success: false,
+      statusCode: 404,
+      error: 'NotFound',
+      message: `Unable to resolve Steam profile for '${cleanTarget}'.`,
+    };
+  }
+
+  const wishlistResult = await fetchSteamWishlist(steamId, steamApiKey);
+  if (!wishlistResult.success) {
+    if (wishlistResult.error === 'PRIVATE_OR_NOT_FOUND') {
+      return {
+        success: false,
+        statusCode: 403,
+        error: 'WishlistPrivate',
+        message: 'This Steam profile is private or does not exist.',
+      };
+    }
+    if (wishlistResult.error === 'CONFIG_REQUIRED') {
+      return {
+        success: false,
+        statusCode: 500,
+        error: 'ConfigurationError',
+        message: 'Steam API configuration is missing.',
+      };
+    }
+    if (wishlistResult.error === 'INVALID_ID') {
+      return {
+        success: false,
+        statusCode: 400,
+        error: 'BadRequest',
+        message: 'Invalid SteamID provided.',
+      };
+    }
+    return {
+      success: false,
+      statusCode: 502,
+      error: 'UpstreamError',
+      message: 'Failed to communicate with Steam servers.',
+    };
+  }
+
+  const rawItems = wishlistResult.items || [];
+  const totalSteamWishlist = rawItems.length;
+
+  const isBrl = preferredCurrency.toUpperCase() === 'BRL';
+  const currency = isBrl ? 'BRL' : 'USD';
+  const currencySymbol = isBrl ? 'R$' : '$';
+  const countryCode = isBrl ? 'br' : 'us';
+
+  if (totalSteamWishlist === 0) {
+    return {
+      success: true,
+      data: {
+        steamId,
+        totalSteamWishlist: 0,
+        currency,
+        items: [],
+      },
+    };
+  }
+
+  // Sort items by dateAdded descending
+  const sortedItems = [...rawItems].sort((a, b) => b.dateAdded - a.dateAdded);
+  // Cap at top 100 items to prevent Lambda timeout
+  const targetItems = sortedItems.slice(0, 100);
+  const targetAppIds = targetItems.map((item) => item.appId);
+
+  // Fetch prices in batch and resolve known titles concurrently
+  const [priceMap, titleMap] = await Promise.all([
+    batchFetchSteamAppPrices(targetAppIds, countryCode, 100),
+    resolveSteamAppTitles(targetAppIds, 1200),
+  ]);
+
+  // Enrich top items (up to 10) with multi-store deal intelligence
+  const enrichmentCandidates = targetItems.slice(0, 10);
+  const dealMap = new Map<string, GameDealInfo>();
+  try {
+    const dealSettled = await Promise.allSettled(
+      enrichmentCandidates.map(async (candidate) => {
+        const deal = await getGameDealInfo(candidate.appId, currency);
+        return { appId: candidate.appId, deal };
+      }),
+    );
+    for (const res of dealSettled) {
+      if (res.status === 'fulfilled' && res.value.deal) {
+        dealMap.set(res.value.appId, res.value.deal);
+      }
+    }
+  } catch {
+    // Graceful fallback to batch cache if ITAD enrichment encounters issues
+  }
+
+  const items: PublicWishlistItem[] = targetItems.map((item) => {
+    const appId = item.appId;
+    const priceInfo = priceMap.get(Number(appId));
+    const dealInfo = dealMap.get(appId);
+
+    const resolvedTitle =
+      (dealInfo?.title && dealInfo.title !== 'Monitored Title' ? dealInfo.title : null) ||
+      APP_DIRECTORY[appId] ||
+      KNOWN_GAME_TITLES[appId] ||
+      titleMap.get(appId) ||
+      titleMap.get(Number(appId)) ||
+      `Steam App #${appId}`;
+
+    let isFree = false;
+    let regularPrice: number | null = null;
+    let salePrice: number | null = null;
+    let discountPercent = 0;
+    let primaryDeal: StoreDeal | null = null;
+    let cheaperAlternative: StoreDeal | null = null;
+    let storeBreakdown: Record<string, StoreDeal> | undefined = undefined;
+
+    if (dealInfo && dealInfo.primaryDeal) {
+      isFree = dealInfo.primaryDeal.salePrice === 0 || dealInfo.primaryDeal.cutPercent === 100;
+      salePrice = dealInfo.primaryDeal.salePrice;
+      regularPrice = dealInfo.primaryDeal.regularPrice;
+      discountPercent = dealInfo.primaryDeal.cutPercent;
+      primaryDeal = dealInfo.primaryDeal;
+      cheaperAlternative = dealInfo.cheaperAlternative || null;
+      storeBreakdown = dealInfo.storeBreakdown;
+    } else if (priceInfo) {
+      isFree = Boolean(priceInfo.isFree);
+      regularPrice = isFree ? 0 : (priceInfo.initial ?? null);
+      salePrice = isFree ? 0 : (priceInfo.final ?? null);
+      if (!isFree && regularPrice && salePrice !== null && regularPrice > 0 && salePrice < regularPrice) {
+        discountPercent = Math.round(((regularPrice - salePrice) / regularPrice) * 100);
+      }
+      if (regularPrice !== null && salePrice !== null) {
+        const steamDeal: StoreDeal = {
+          shopName: 'Steam',
+          salePrice,
+          regularPrice,
+          cutPercent: discountPercent,
+          url: `https://store.steampowered.com/app/${appId}`,
+          expiry: null,
+          currency,
+          currencySymbol,
+        };
+        primaryDeal = steamDeal;
+        storeBreakdown = { Steam: steamDeal };
+      }
+    }
+
+    return {
+      appId,
+      title: resolvedTitle,
+      imageUrl: `https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/${appId}/header.jpg`,
+      url: `https://store.steampowered.com/app/${appId}`,
+      store: 'Steam',
+      priority: item.priority,
+      dateAdded: item.dateAdded,
+      salePrice,
+      regularPrice,
+      discountPercent,
+      isFree,
+      currency,
+      currencySymbol,
+      primaryDeal,
+      cheaperAlternative,
+      storeBreakdown,
+    };
+  });
+
+  return {
+    success: true,
+    data: {
+      steamId,
+      totalSteamWishlist,
+      currency,
+      items,
+    },
+  };
+}
+
 /**
  * Main Lambda handler for the Public Web API companion endpoints.
  */
@@ -483,6 +703,60 @@ export const handler = async (event: HttpApiEvent): Promise<PublicApiResponse> =
       const duelRecord = queryResult.Items[0];
       const payload = duelRecord.payload ?? duelRecord;
       return createJsonResponse(200, payload);
+    }
+
+    // Route 5: GET /public/wishlist/{target}
+    const isWishlistBaseRoute =
+      rawPath === '/public/wishlist' ||
+      rawPath === '/public/wishlist/' ||
+      rawPath.endsWith('/prod/public/wishlist') ||
+      rawPath.endsWith('/prod/public/wishlist/');
+
+    if (isWishlistBaseRoute && (!event.pathParameters || !event.pathParameters.target)) {
+      return createJsonResponse(400, {
+        error: 'BadRequest',
+        message: 'Missing or invalid target parameter.',
+      });
+    }
+
+    const isExplicitWishlistRoute = event.routeKey === 'GET /public/wishlist/{target}';
+    const hasWishlistTargetParam = Boolean(event.pathParameters && 'target' in event.pathParameters);
+    const hasWishlistSubpath =
+      rawPath.includes('/public/wishlist/') &&
+      Boolean(rawPath.split('/public/wishlist/')[1]?.split('?')[0]?.trim());
+
+    if (isExplicitWishlistRoute || hasWishlistTargetParam || hasWishlistSubpath) {
+      let target = event.pathParameters?.target;
+      if (!target && rawPath.includes('/public/wishlist/')) {
+        const parts = rawPath.split('/public/wishlist/');
+        target = parts[1]?.split('?')[0];
+      }
+
+      if (!target || target.trim() === '') {
+        return createJsonResponse(400, {
+          error: 'BadRequest',
+          message: 'Missing or invalid target parameter.',
+        });
+      }
+
+      let cleanTarget = target.trim();
+      try {
+        cleanTarget = decodeURIComponent(cleanTarget).trim();
+      } catch {
+        // Fallback to raw target
+      }
+
+      const currencyParam = event.queryStringParameters?.currency;
+      const preferredCurrency = (currencyParam || 'USD').toUpperCase() === 'BRL' ? 'BRL' : 'USD';
+      const result = await resolveWishlistTelemetry(cleanTarget, preferredCurrency);
+      if (!result.success) {
+        return createJsonResponse(result.statusCode, {
+          error: result.error,
+          message: result.message,
+        });
+      }
+
+      return createJsonResponse(200, result.data);
     }
 
     return createJsonResponse(404, {

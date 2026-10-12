@@ -4453,6 +4453,8 @@ export const handler = async (
           const importedCount = itemsToInsert.length;
           const importedTitles = itemsToInsert.slice(0, 10).map((e) => e.title);
 
+          const webAppUrl = process.env['WEB_APP_URL'] || 'https://zt-radar.pages.dev/wishlist';
+
           // Build summary embed fields
           const summaryLines = [
             `▸ Total Steam wishlist entries processed: **${targetItems.length}**${wasCapped ? ` (of ${totalWishlistCount} total)` : ''}`,
@@ -4466,7 +4468,9 @@ export const handler = async (
           }
 
           if (wasCapped) {
-            summaryLines.push('▸ Note: Synced top 100 most recently added wishlist titles.');
+            summaryLines.push(`▸ Notice: Capped at top 100 for bot alert monitoring (${totalWishlistCount} total on web)`);
+          } else {
+            summaryLines.push(`▸ Status: All ${totalWishlistCount} wishlist items synchronized`);
           }
 
           const summaryFields = [
@@ -4489,17 +4493,41 @@ export const handler = async (
             });
           }
 
+          const description = wasCapped
+            ? [
+                `Successfully synchronized the **100 most recent wishlist titles** into your tracking registry.`,
+                `Imported titles will trigger alerts when promotions reach at least **-${userMinDiscount}% off** or on 100% free giveaways.`,
+                '',
+                `▸ **Notice (100-Title Limit)**: Only the 100 most recent titles were imported for active bot alert monitoring. You can inspect and browse your entire collection of **${totalWishlistCount}** games on the web dashboard.`,
+              ].join('\n')
+            : [
+                `Successfully synchronized all **${totalWishlistCount}** games from your Steam wishlist into your tracking registry.`,
+                `Imported titles will trigger alerts when promotions reach at least **-${userMinDiscount}% off** or on 100% free giveaways.`,
+                '',
+                `You can also inspect and manage your collection on the web dashboard.`,
+              ].join('\n');
+
           const syncEmbed = {
             title: 'Steam Wishlist Sync Complete ❖',
-            description: wasCapped
-              ? `Successfully synchronized top 100 most recently added wishlist titles into the zT Radar tracking registry.\nImported titles will trigger alerts when promotions reach at least -${userMinDiscount}% off or on 100% free giveaways.`
-              : `Successfully synchronized your Steam wishlist into the zT Radar tracking registry.\nImported titles will trigger alerts when promotions reach at least -${userMinDiscount}% off or on 100% free giveaways.`,
+            description,
             color: importedCount > 0 ? PALETTE.SUCCESS : PALETTE.NEUTRAL,
             fields: summaryFields,
             footer: {
               text: 'zT Radar • Steam Wishlist Intelligence',
             },
             timestamp: now,
+          };
+
+          const linkButtonRow = {
+            type: 1,
+            components: [
+              {
+                type: 2,
+                style: 5,
+                label: wasCapped ? 'Inspect Full Wishlist on Web' : 'Open Web Wishlist',
+                url: sanitizeButtonUrl(webAppUrl, ''),
+              },
+            ],
           };
 
           return {
@@ -4510,6 +4538,7 @@ export const handler = async (
               data: {
                 flags: MESSAGE_FLAGS.EPHEMERAL,
                 embeds: [syncEmbed],
+                components: [linkButtonRow],
               },
             }),
           };
