@@ -29,6 +29,15 @@ vi.mock('../../src/utils/steamWeb.js', async (importOriginal) => {
     fetchSteamWishlist: vi.fn(),
     batchFetchSteamAppPrices: vi.fn(),
     resolveSteamAppTitles: vi.fn(),
+    getPlayerLibraryDetailed: vi.fn(),
+  };
+});
+
+vi.mock('../../src/utils/hltbNative.js', async (importOriginal) => {
+  const actual = await importOriginal<Record<string, unknown>>();
+  return {
+    ...actual,
+    getHowLongToBeatStats: vi.fn(),
   };
 });
 
@@ -38,10 +47,13 @@ import {
   buildMarketTelemetryPlaceholder,
   buildTrendingGamesList,
   resolveWishlistTelemetry,
+  resolveBacklogTelemetry,
+  formatCurrency,
   CORS_HEADERS,
   KNOWN_GAME_TITLES,
   CURATED_MARKET_APP_IDS,
 } from '../../src/handlers/publicApi.js';
+import { getHowLongToBeatStats } from '../../src/utils/hltbNative.js';
 import { getGameDealInfo } from '../../src/utils/itadApi.js';
 import { getSteamTrendingGames } from '../../src/utils/platformStatus.js';
 import {
@@ -49,6 +61,7 @@ import {
   fetchSteamWishlist,
   batchFetchSteamAppPrices,
   resolveSteamAppTitles,
+  getPlayerLibraryDetailed,
 } from '../../src/utils/steamWeb.js';
 
 describe('Public Web API Handler', () => {
@@ -307,6 +320,49 @@ describe('Public Web API Handler', () => {
         ['1091500', 'Cyberpunk 2077'],
       ]),
     );
+
+    vi.mocked(getPlayerLibraryDetailed).mockResolvedValue({
+      isPrivate: false,
+      gameCount: 3,
+      games: [
+        {
+          appid: 1086940,
+          name: "Baldur's Gate 3",
+          playtime_forever: 0,
+          img_icon_url: 'icon_bg3',
+        },
+        {
+          appid: 1091500,
+          name: 'Cyberpunk 2077',
+          playtime_forever: 0,
+          img_icon_url: 'icon_cp2077',
+        },
+        {
+          appid: 1245620,
+          name: 'ELDEN RING',
+          playtime_forever: 3600,
+          img_icon_url: 'icon_er',
+        },
+      ],
+    });
+
+    vi.mocked(getHowLongToBeatStats).mockImplementation(async (name) => {
+      if (name.includes("Baldur's Gate")) {
+        return {
+          success: true,
+          gameTitle: "Baldur's Gate 3",
+          mainStoryHours: 75,
+        };
+      }
+      if (name.includes('Cyberpunk')) {
+        return {
+          success: true,
+          gameTitle: 'Cyberpunk 2077',
+          mainStoryHours: 30,
+        };
+      }
+      return { success: false, error: 'DATA_UNAVAILABLE' };
+    });
   });
 
   afterEach(() => {
@@ -1446,6 +1502,367 @@ describe('Public Web API Handler', () => {
       const data = JSON.parse(response.body);
       expect(data.totalSteamWishlist).toBe(150);
       expect(data.items).toHaveLength(100);
+    });
+  });
+
+  describe('Route: GET /public/backlog/{target}', () => {
+    it('should successfully retrieve and calculate backlog telemetry for numeric SteamID64', async () => {
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/backlog/{target}',
+        rawPath: '/public/backlog/76561198327022168',
+        pathParameters: {
+          target: '76561198327022168',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/backlog/76561198327022168',
+          },
+        },
+      };
+
+      const response = await handler(event);
+
+      expect(response.statusCode).toBe(200);
+      expect(response.headers['Access-Control-Allow-Origin']).toBe('*');
+
+      const data = JSON.parse(response.body);
+      expect(data.steamId).toBe('76561198327022168');
+      expect(data.target).toBe('76561198327022168');
+      expect(data.currency).toBe('USD');
+      expect(data.currencySymbol).toBe('$');
+      expect(data.totalGamesOwned).toBe(3);
+      expect(data.unplayedCount).toBe(2);
+      expect(data.unplayedRatioPercent).toBe(66.7);
+      expect(data.totalBacklogValue).toBe(77.98);
+      expect(data.totalBacklogValueFormatted).toBe('$ 77.98');
+      expect(data.estimatedHoursToClear).toBe(105);
+      expect(Array.isArray(data.unplayedItems)).toBe(true);
+      expect(data.unplayedItems).toHaveLength(2);
+
+      const firstItem = data.unplayedItems[0];
+      expect(firstItem.appId).toBe(1086940);
+      expect(firstItem.title).toBe("Baldur's Gate 3");
+      expect(firstItem.playtimeForever).toBe(0);
+      expect(firstItem.price).toBe(47.99);
+      expect(firstItem.priceFormatted).toBe('$ 47.99');
+      expect(firstItem.estimatedHours).toBe(75);
+      expect(firstItem.imageUrl).toContain('1086940');
+    });
+
+    it('should resolve vanity username and calculate backlog metrics', async () => {
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/backlog/{target}',
+        rawPath: '/public/backlog/zthigs',
+        pathParameters: {
+          target: 'zthigs',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/backlog/zthigs',
+          },
+        },
+      };
+
+      const response = await handler(event);
+
+      expect(response.statusCode).toBe(200);
+      const data = JSON.parse(response.body);
+      expect(data.steamId).toBe('76561198327022168');
+      expect(data.target).toBe('zthigs');
+      expect(data.unplayedCount).toBe(2);
+    });
+
+    it('should resolve full Steam profile URL', async () => {
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/backlog/{target}',
+        rawPath: '/public/backlog/https%3A%2F%2Fsteamcommunity.com%2Fid%2Fzthigs',
+        pathParameters: {
+          target: 'https%3A%2F%2Fsteamcommunity.com%2Fid%2Fzthigs',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/backlog/https%3A%2F%2Fsteamcommunity.com%2Fid%2Fzthigs',
+          },
+        },
+      };
+
+      const response = await handler(event);
+
+      expect(response.statusCode).toBe(200);
+      const data = JSON.parse(response.body);
+      expect(data.steamId).toBe('76561198327022168');
+      expect(data.target).toBe('zthigs');
+    });
+
+    it('should support regional BRL currency (?currency=BRL) with factual store data and pt-BR formatting', async () => {
+      vi.mocked(batchFetchSteamAppPrices).mockResolvedValueOnce(
+        new Map([
+          [
+            1086940,
+            {
+              initial: 199.99,
+              final: 159.99,
+              isFree: false,
+            },
+          ],
+          [
+            1091500,
+            {
+              initial: 199.99,
+              final: 99.99,
+              isFree: false,
+            },
+          ],
+        ]),
+      );
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/backlog/{target}',
+        rawPath: '/public/backlog/76561198327022168',
+        pathParameters: {
+          target: '76561198327022168',
+        },
+        queryStringParameters: {
+          currency: 'BRL',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/backlog/76561198327022168',
+          },
+        },
+      };
+
+      const response = await handler(event);
+
+      expect(response.statusCode).toBe(200);
+      const data = JSON.parse(response.body);
+      expect(data.currency).toBe('BRL');
+      expect(data.currencySymbol).toBe('R$');
+      expect(data.totalBacklogValue).toBe(259.98);
+      expect(data.totalBacklogValueFormatted).toBe('R$ 259,98');
+      expect(data.unplayedItems[0].priceFormatted).toBe('R$ 159,99');
+      expect(vi.mocked(batchFetchSteamAppPrices)).toHaveBeenCalledWith(
+        expect.any(Array),
+        'br',
+        100,
+      );
+    });
+
+    it('should handle 100% completed library with zero unplayed titles', async () => {
+      vi.mocked(getPlayerLibraryDetailed).mockResolvedValueOnce({
+        isPrivate: false,
+        gameCount: 2,
+        games: [
+          { appid: 1086940, name: "Baldur's Gate 3", playtime_forever: 500, img_icon_url: null },
+          { appid: 1091500, name: 'Cyberpunk 2077', playtime_forever: 1200, img_icon_url: null },
+        ],
+      });
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/backlog/{target}',
+        rawPath: '/public/backlog/76561198327022168',
+        pathParameters: {
+          target: '76561198327022168',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/backlog/76561198327022168',
+          },
+        },
+      };
+
+      const response = await handler(event);
+
+      expect(response.statusCode).toBe(200);
+      const data = JSON.parse(response.body);
+      expect(data.unplayedCount).toBe(0);
+      expect(data.unplayedRatioPercent).toBe(0);
+      expect(data.totalBacklogValue).toBe(0);
+      expect(data.totalBacklogValueFormatted).toBe('$ 0.00');
+      expect(data.estimatedHoursToClear).toBe(0);
+      expect(data.unplayedItems).toEqual([]);
+    });
+
+    it('should return 403 LibraryPrivate when Steam library is set to private', async () => {
+      vi.mocked(getPlayerLibraryDetailed).mockResolvedValueOnce({
+        isPrivate: true,
+        gameCount: 0,
+        games: [],
+      });
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/backlog/{target}',
+        rawPath: '/public/backlog/76561198327022168',
+        pathParameters: {
+          target: '76561198327022168',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/backlog/76561198327022168',
+          },
+        },
+      };
+
+      const response = await handler(event);
+
+      expect(response.statusCode).toBe(403);
+      expect(response.headers['Access-Control-Allow-Origin']).toBe('*');
+      const data = JSON.parse(response.body);
+      expect(data.error).toBe('LibraryPrivate');
+      expect(data.message).toBe('This Steam library is private or does not exist.');
+    });
+
+    it('should return 404 NotFound when target vanity cannot be resolved', async () => {
+      vi.mocked(resolveSteamId).mockResolvedValueOnce(null);
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/backlog/{target}',
+        rawPath: '/public/backlog/unknownuser999',
+        pathParameters: {
+          target: 'unknownuser999',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/backlog/unknownuser999',
+          },
+        },
+      };
+
+      const response = await handler(event);
+
+      expect(response.statusCode).toBe(404);
+      expect(response.headers['Access-Control-Allow-Origin']).toBe('*');
+      const data = JSON.parse(response.body);
+      expect(data.error).toBe('NotFound');
+      expect(data.message).toContain('Unable to resolve Steam profile');
+    });
+
+    it('should return 400 BadRequest when target parameter is missing or whitespace', async () => {
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/backlog/{target}',
+        rawPath: '/public/backlog/',
+        pathParameters: {
+          target: '   ',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/backlog/',
+          },
+        },
+      };
+
+      const response = await handler(event);
+
+      expect(response.statusCode).toBe(400);
+      const data = JSON.parse(response.body);
+      expect(data.error).toBe('BadRequest');
+    });
+
+    it('should return 400 BadRequest when base /public/backlog route is accessed without target', async () => {
+      const event: HttpApiEvent = {
+        rawPath: '/public/backlog',
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/backlog',
+          },
+        },
+      };
+
+      const response = await handler(event);
+
+      expect(response.statusCode).toBe(400);
+      const data = JSON.parse(response.body);
+      expect(data.error).toBe('BadRequest');
+    });
+
+    it('should return 502 UpstreamError when Steam API fails to return library data', async () => {
+      vi.mocked(getPlayerLibraryDetailed).mockResolvedValueOnce(null);
+
+      const event: HttpApiEvent = {
+        pathParameters: {
+          target: '76561198327022168',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/backlog/76561198327022168',
+          },
+        },
+      };
+
+      const response = await handler(event);
+
+      expect(response.statusCode).toBe(502);
+      const data = JSON.parse(response.body);
+      expect(data.error).toBe('UpstreamError');
+    });
+
+    it('should return 204 with CORS headers on OPTIONS preflight request to backlog route', async () => {
+      const event: HttpApiEvent = {
+        requestContext: {
+          http: {
+            method: 'OPTIONS',
+            path: '/public/backlog/76561198327022168',
+          },
+        },
+      };
+
+      const response = await handler(event);
+
+      expect(response.statusCode).toBe(204);
+      expect(response.body).toBe('');
+      expect(response.headers['Access-Control-Allow-Origin']).toBe('*');
+      expect(response.headers['Access-Control-Allow-Methods']).toBe('GET, OPTIONS');
+    });
+
+    it('should cap unplayedItems at 100 titles while reflecting total unplayedCount', async () => {
+      const largeGames = Array.from({ length: 150 }, (_, i) => ({
+        appid: 300000 + i,
+        name: `Backlog Game ${i}`,
+        playtime_forever: 0,
+        img_icon_url: null,
+      }));
+
+      vi.mocked(getPlayerLibraryDetailed).mockResolvedValueOnce({
+        isPrivate: false,
+        gameCount: 150,
+        games: largeGames,
+      });
+
+      const event: HttpApiEvent = {
+        pathParameters: {
+          target: '76561198327022168',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/backlog/76561198327022168',
+          },
+        },
+      };
+
+      const response = await handler(event);
+
+      expect(response.statusCode).toBe(200);
+      const data = JSON.parse(response.body);
+      expect(data.unplayedCount).toBe(150);
+      expect(data.unplayedItems).toHaveLength(100);
+    });
+
+    it('should format currency correctly via formatCurrency helper', () => {
+      expect(formatCurrency(4520.5, 'BRL')).toBe('R$ 4.520,50');
+      expect(formatCurrency(4520.5, 'USD')).toBe('$ 4,520.50');
+      expect(formatCurrency(0, 'BRL')).toBe('R$ 0,00');
+      expect(formatCurrency(0, 'USD')).toBe('$ 0.00');
     });
   });
 

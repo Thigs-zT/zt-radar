@@ -208,6 +208,12 @@ Resources:
             ApiId: !Ref DiscordApi
             Path: /public/wishlist/{target}
             Method: get
+        GetPublicBacklog:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref DiscordApi
+            Path: /public/backlog/{target}
+            Method: get
 
 Outputs:
   InteractionsEndpoint:

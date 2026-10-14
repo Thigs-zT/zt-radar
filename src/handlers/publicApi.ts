@@ -7,6 +7,7 @@
  * - GET /public/market/{appId}: Retrieves market telemetry and multi-store deal intelligence for a specific game.
  * - GET /public/duel/{duelId}: Retrieves historical library duel comparison payload from DynamoDB.
  * - GET /public/wishlist/{target}: Retrieves public Steam wishlist telemetry with live pricing and store attribution.
+ * - GET /public/backlog/{target}: Retrieves public Backlog Vault telemetry with playtime metrics and live store valuation.
  */
 
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
@@ -17,8 +18,12 @@ import type {
   StoreDeal,
   PublicWishlistItem,
   PublicWishlistResponse,
+  PublicBacklogItem,
+  BacklogTelemetrySummary,
+  SteamAppPriceInfo,
   GameDealInfo,
 } from '../types/index.js';
+import { getHowLongToBeatStats } from '../utils/hltbNative.js';
 import { getGameDealInfo } from '../utils/itadApi.js';
 import { getSteamTrendingGames } from '../utils/platformStatus.js';
 import {
@@ -26,6 +31,7 @@ import {
   fetchSteamWishlist,
   batchFetchSteamAppPrices,
   resolveSteamAppTitles,
+  getPlayerLibraryDetailed,
   APP_DIRECTORY,
 } from '../utils/steamWeb.js';
 
@@ -569,6 +575,244 @@ export async function resolveWishlistTelemetry(
 }
 
 /**
+ * Formats a numeric price into a localized currency string with canonical symbols.
+ * BRL uses pt-BR formatting (e.g. R$ 4.520,50), USD uses en-US formatting (e.g. $ 4,520.50).
+ */
+export function formatCurrency(value: number, currency: string = 'USD'): string {
+  const isBrl = currency.toUpperCase() === 'BRL';
+  const sym = isBrl ? 'R$' : '$';
+  const locale = isBrl ? 'pt-BR' : 'en-US';
+  const formatted = Number(value || 0).toLocaleString(locale, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+  return `${sym} ${formatted}`;
+}
+
+export type BacklogTelemetryApiResult =
+  | { success: true; data: BacklogTelemetrySummary }
+  | { success: false; statusCode: number; error: string; message: string };
+
+/**
+ * Resolves public Steam Backlog Vault telemetry for a user:
+ * - Accepts SteamID64, vanity username, or full profile URL.
+ * - Resolves target into SteamID64.
+ * - Queries user's owned games library using IPlayerService/GetOwnedGames/v1.
+ * - Filters unplayed titles (playtime_forever === 0) and non-F2P.
+ * - Computes total backlog MSRP valuation and HLTB completion hours without synthetic conversion.
+ * - Supports dual-currency (BRL/USD).
+ */
+export async function resolveBacklogTelemetry(
+  target: string,
+  preferredCurrency: string = 'USD',
+): Promise<BacklogTelemetryApiResult> {
+  const cleanTarget = (target || '').trim();
+  if (!cleanTarget) {
+    return {
+      success: false,
+      statusCode: 400,
+      error: 'BadRequest',
+      message: 'Missing or invalid target parameter.',
+    };
+  }
+
+  const steamApiKey = process.env.STEAM_API_KEY || '';
+  const steamId = await resolveSteamId(cleanTarget, steamApiKey);
+  if (!steamId) {
+    return {
+      success: false,
+      statusCode: 404,
+      error: 'NotFound',
+      message: `Unable to resolve Steam profile for '${cleanTarget}'.`,
+    };
+  }
+
+  const library = await getPlayerLibraryDetailed(steamId, steamApiKey);
+  if (!library) {
+    return {
+      success: false,
+      statusCode: 502,
+      error: 'UpstreamError',
+      message: 'Failed to communicate with Steam servers.',
+    };
+  }
+
+  if (library.isPrivate) {
+    return {
+      success: false,
+      statusCode: 403,
+      error: 'LibraryPrivate',
+      message: 'This Steam library is private or does not exist.',
+    };
+  }
+
+  let displayTarget = cleanTarget;
+  const vanityMatch = cleanTarget.match(/steamcommunity\.com\/id\/([^/?#]+)/i);
+  if (vanityMatch) {
+    displayTarget = vanityMatch[1];
+  } else {
+    const profileMatch = cleanTarget.match(/steamcommunity\.com\/profiles\/(\d{17})/i);
+    if (profileMatch) {
+      displayTarget = profileMatch[1];
+    }
+  }
+
+  const allGames = library.games || [];
+  const totalGamesOwned = library.gameCount || allGames.length;
+
+  // Filter paid games (excluding known institutional F2P games)
+  const paidGames = allGames.filter((g) => {
+    if (!g) return false;
+    const appId = Number(g.appid ?? 0);
+    if (KNOWN_F2P_APP_IDS.has(appId)) return false;
+    if (g.is_free || g.is_free_to_play) return false;
+    return true;
+  });
+
+  // Filter unplayed titles (playtime_forever === 0)
+  const unplayedGames = paidGames.filter((g) => (g.playtime_forever ?? 0) === 0);
+  const unplayedCount = unplayedGames.length;
+  const unplayedRatioPercent =
+    totalGamesOwned > 0 ? Number(((unplayedCount / totalGamesOwned) * 100).toFixed(1)) : 0;
+
+  const isBrl = preferredCurrency.toUpperCase() === 'BRL';
+  const currency = isBrl ? 'BRL' : 'USD';
+  const currencySymbol = isBrl ? 'R$' : '$';
+  const countryCode = isBrl ? 'br' : 'us';
+
+  if (unplayedCount === 0) {
+    return {
+      success: true,
+      data: {
+        steamId,
+        target: displayTarget,
+        currency,
+        currencySymbol,
+        totalGamesOwned,
+        unplayedCount: 0,
+        unplayedRatioPercent: 0,
+        estimatedHoursToClear: 0,
+        totalBacklogValue: 0,
+        totalBacklogValueFormatted: formatCurrency(0, currency),
+        unplayedItems: [],
+      },
+    };
+  }
+
+  // Cap items to enrich at 100 to prevent Lambda timeouts
+  const targetGames = unplayedGames.slice(0, 100);
+  const targetAppIds = targetGames.map((g) => g.appid);
+
+  let priceMap = new Map<number, SteamAppPriceInfo>();
+  try {
+    priceMap = await batchFetchSteamAppPrices(targetAppIds, countryCode, 100);
+  } catch {
+    // Graceful fallback on price fetch failure
+  }
+
+  // Query HLTB stats concurrently for top 8 unplayed titles
+  const hltbCandidates = targetGames.slice(0, 8);
+  const hltbMap = new Map<number, number>();
+  try {
+    const hltbSettled = await Promise.allSettled(
+      hltbCandidates.map(async (g) => {
+        const name = g.name || APP_DIRECTORY[g.appid] || KNOWN_GAME_TITLES[g.appid];
+        if (!name) return { appId: g.appid, hours: null };
+        const stats = await getHowLongToBeatStats(name, 1200);
+        const hours = stats.success ? stats.mainStoryHours || stats.allPlayStylesHours || null : null;
+        return { appId: g.appid, hours };
+      }),
+    );
+    for (const res of hltbSettled) {
+      if (res.status === 'fulfilled' && res.value.hours) {
+        hltbMap.set(res.value.appId, res.value.hours);
+      }
+    }
+  } catch {
+    // Non-blocking fallback
+  }
+
+  const DEFAULT_MEDIAN_HOURS = 14.5;
+  let totalBacklogValue = 0;
+  let totalHours = 0;
+
+  const unplayedItems: PublicBacklogItem[] = targetGames.map((g) => {
+    const appId = g.appid;
+    const resolvedName =
+      g.name && !g.name.startsWith('App #')
+        ? g.name
+        : APP_DIRECTORY[appId] || KNOWN_GAME_TITLES[appId] || g.name || `Steam App #${appId}`;
+
+    const priceInfo = priceMap.get(appId);
+    let price: number | null = null;
+    let priceFormatted = 'Unpriced';
+
+    if (priceInfo) {
+      if (priceInfo.isFree) {
+        price = 0;
+        priceFormatted = 'Free / Included';
+      } else if (priceInfo.isDelisted) {
+        price = null;
+        priceFormatted = 'Delisted / Legacy';
+      } else {
+        const rawPrice = priceInfo.final ?? priceInfo.initial ?? null;
+        if (rawPrice !== null && rawPrice > 0) {
+          price = rawPrice;
+          totalBacklogValue += rawPrice;
+          priceFormatted = formatCurrency(rawPrice, currency);
+        }
+      }
+    }
+
+    const hours = hltbMap.get(appId) ?? null;
+    totalHours += hours ?? DEFAULT_MEDIAN_HOURS;
+
+    const iconUrl = g.img_icon_url
+      ? `http://media.steampowered.com/steamcommunity/public/images/apps/${appId}/${g.img_icon_url}.jpg`
+      : null;
+
+    return {
+      appId,
+      name: resolvedName,
+      title: resolvedName,
+      playtimeMinutes: g.playtime_forever ?? 0,
+      playtimeForever: g.playtime_forever ?? 0,
+      imageUrl: `https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/${appId}/header.jpg`,
+      iconUrl,
+      url: `https://store.steampowered.com/app/${appId}`,
+      price,
+      priceFormatted,
+      estimatedHours: hours,
+    };
+  });
+
+  // For any remaining unplayed games beyond the first 100:
+  if (unplayedCount > targetGames.length) {
+    totalHours += (unplayedCount - targetGames.length) * DEFAULT_MEDIAN_HOURS;
+  }
+
+  const roundedBacklogValue = Number(totalBacklogValue.toFixed(2));
+  const estimatedHoursToClear = Math.round(totalHours);
+
+  return {
+    success: true,
+    data: {
+      steamId,
+      target: displayTarget,
+      currency,
+      currencySymbol,
+      totalGamesOwned,
+      unplayedCount,
+      unplayedRatioPercent,
+      estimatedHoursToClear,
+      totalBacklogValue: roundedBacklogValue,
+      totalBacklogValueFormatted: formatCurrency(roundedBacklogValue, currency),
+      unplayedItems,
+    },
+  };
+}
+
+/**
  * Main Lambda handler for the Public Web API companion endpoints.
  */
 export const handler = async (event: HttpApiEvent): Promise<PublicApiResponse> => {
@@ -720,10 +964,12 @@ export const handler = async (event: HttpApiEvent): Promise<PublicApiResponse> =
     }
 
     const isExplicitWishlistRoute = event.routeKey === 'GET /public/wishlist/{target}';
-    const hasWishlistTargetParam = Boolean(event.pathParameters && 'target' in event.pathParameters);
     const hasWishlistSubpath =
       rawPath.includes('/public/wishlist/') &&
       Boolean(rawPath.split('/public/wishlist/')[1]?.split('?')[0]?.trim());
+    const hasWishlistTargetParam =
+      Boolean(event.pathParameters && 'target' in event.pathParameters) &&
+      (rawPath.includes('/public/wishlist') || isExplicitWishlistRoute);
 
     if (isExplicitWishlistRoute || hasWishlistTargetParam || hasWishlistSubpath) {
       let target = event.pathParameters?.target;
@@ -749,6 +995,62 @@ export const handler = async (event: HttpApiEvent): Promise<PublicApiResponse> =
       const currencyParam = event.queryStringParameters?.currency;
       const preferredCurrency = (currencyParam || 'USD').toUpperCase() === 'BRL' ? 'BRL' : 'USD';
       const result = await resolveWishlistTelemetry(cleanTarget, preferredCurrency);
+      if (!result.success) {
+        return createJsonResponse(result.statusCode, {
+          error: result.error,
+          message: result.message,
+        });
+      }
+
+      return createJsonResponse(200, result.data);
+    }
+
+    // Route 6: GET /public/backlog/{target}
+    const isBacklogBaseRoute =
+      rawPath === '/public/backlog' ||
+      rawPath === '/public/backlog/' ||
+      rawPath.endsWith('/prod/public/backlog') ||
+      rawPath.endsWith('/prod/public/backlog/');
+
+    if (isBacklogBaseRoute && (!event.pathParameters || !event.pathParameters.target)) {
+      return createJsonResponse(400, {
+        error: 'BadRequest',
+        message: 'Missing or invalid target parameter.',
+      });
+    }
+
+    const isExplicitBacklogRoute = event.routeKey === 'GET /public/backlog/{target}';
+    const hasBacklogSubpath =
+      rawPath.includes('/public/backlog/') &&
+      Boolean(rawPath.split('/public/backlog/')[1]?.split('?')[0]?.trim());
+    const hasBacklogTargetParam =
+      Boolean(event.pathParameters && 'target' in event.pathParameters) &&
+      (rawPath.includes('/public/backlog') || isExplicitBacklogRoute);
+
+    if (isExplicitBacklogRoute || hasBacklogTargetParam || hasBacklogSubpath) {
+      let target = event.pathParameters?.target;
+      if (!target && rawPath.includes('/public/backlog/')) {
+        const parts = rawPath.split('/public/backlog/');
+        target = parts[1]?.split('?')[0];
+      }
+
+      if (!target || target.trim() === '') {
+        return createJsonResponse(400, {
+          error: 'BadRequest',
+          message: 'Missing or invalid target parameter.',
+        });
+      }
+
+      let cleanTarget = target.trim();
+      try {
+        cleanTarget = decodeURIComponent(cleanTarget).trim();
+      } catch {
+        // Fallback to raw target
+      }
+
+      const currencyParam = event.queryStringParameters?.currency;
+      const preferredCurrency = (currencyParam || 'USD').toUpperCase() === 'BRL' ? 'BRL' : 'USD';
+      const result = await resolveBacklogTelemetry(cleanTarget, preferredCurrency);
       if (!result.success) {
         return createJsonResponse(result.statusCode, {
           error: result.error,

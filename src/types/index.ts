@@ -708,3 +708,34 @@ export interface PublicWishlistResponse {
   items: PublicWishlistItem[];
 }
 
+/** A single unplayed backlog game item for Web / PWA companion. */
+export interface PublicBacklogItem {
+  appId: number;
+  name: string;
+  title: string;
+  playtimeMinutes: number;
+  playtimeForever: number;
+  imageUrl: string;
+  iconUrl?: string | null;
+  url: string;
+  price: number | null;
+  priceFormatted: string;
+  estimatedHours?: number | null;
+}
+
+/** Public Backlog Vault telemetry response payload for Web / PWA companion. */
+export interface BacklogTelemetrySummary {
+  steamId: string;
+  target: string;
+  currency: string;
+  currencySymbol: string;
+  totalGamesOwned: number;
+  unplayedCount: number;
+  unplayedRatioPercent: number;
+  estimatedHoursToClear: number;
+  totalBacklogValue: number;
+  totalBacklogValueFormatted: string;
+  unplayedItems: PublicBacklogItem[];
+}
+
+
