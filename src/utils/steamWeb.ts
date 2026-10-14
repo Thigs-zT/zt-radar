@@ -33,6 +33,8 @@ import type {
   PlayerAchievementsResult,
 } from '../types/index.js';
 import { BRAND_COLORS } from './theme.js';
+import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import { BatchGetCommand, BatchWriteCommand } from '@aws-sdk/lib-dynamodb';
 
 const USER_AGENT = 'zT-Radar-Bot/1.0 (https://github.com/zt-radar)';
 const API_BASE = 'https://api.steampowered.com';
@@ -1260,6 +1262,7 @@ export function calculateBacklogMsrp(
 /**
  * Batch fetches Steam Storefront price overview for multiple application IDs.
  * Divides IDs into chunks of 25 to respect URL and API limitations.
+ * Captures authentic header_image from store details when available.
  */
 export async function batchFetchSteamAppPrices(
   appIds: Array<number | string>,
@@ -1284,6 +1287,8 @@ export async function batchFetchSteamAppPrices(
   type AppDetailsResponse = Record<string, {
     success: boolean;
     data?: {
+      name?: string;
+      header_image?: string;
       is_free?: boolean;
       price_overview?: {
         initial?: number;
@@ -1298,13 +1303,13 @@ export async function batchFetchSteamAppPrices(
     await Promise.all(
       chunks.map(async (chunk) => {
         try {
-          const url = `https://store.steampowered.com/api/appdetails?appids=${chunk.join(',')}&cc=${countryCode}&filters=price_overview`;
+          const url = `https://store.steampowered.com/api/appdetails?appids=${chunk.join(',')}&cc=${countryCode}&filters=price_overview,basic`;
           const res = await fetch(url, {
             headers: { 'User-Agent': USER_AGENT },
             signal: controller.signal,
           });
           if (!res.ok) return;
-          const data = await res.json() as AppDetailsResponse;
+          const data = (await res.json()) as AppDetailsResponse;
           if (!data || typeof data !== 'object') return;
 
           for (const [idStr, appObj] of Object.entries(data)) {
@@ -1313,8 +1318,9 @@ export async function batchFetchSteamAppPrices(
               priceMap.set(appId, { isDelisted: true });
               continue;
             }
+            const headerImage = appObj.data?.header_image;
             if (appObj.data?.is_free) {
-              priceMap.set(appId, { isFree: true });
+              priceMap.set(appId, { isFree: true, headerImage });
               continue;
             }
             const overview = appObj.data?.price_overview;
@@ -1327,7 +1333,10 @@ export async function batchFetchSteamAppPrices(
                 initialFormatted: overview.initial_formatted ?? '',
                 finalFormatted: overview.final_formatted ?? '',
                 isFree: false,
+                headerImage,
               });
+            } else if (headerImage) {
+              priceMap.set(appId, { headerImage });
             }
           }
         } catch {
@@ -1341,6 +1350,220 @@ export async function batchFetchSteamAppPrices(
 
   return priceMap;
 }
+
+/**
+ * Returns the canonical fallback header image URL for a Steam AppID on the Akamai CDN.
+ */
+export function getCanonicalHeaderImageUrl(appId: string | number): string {
+  const cleanId = String(appId).trim();
+  return `https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/${cleanId}/header.jpg`;
+}
+
+export interface ResolveArtworkOptions {
+  ddbDocClient?: DynamoDBDocumentClient;
+  tableName?: string;
+  fetchedHeaders?: Map<string | number, string | null | undefined>;
+}
+
+/**
+ * Resolves authentic Steam artwork URLs with DynamoDB caching:
+ * - Checks DynamoDB cache under PK: ASSET#<appId>, SK: METADATA.
+ * - Uses cached headerImage if present and fresh (TTL 30 days).
+ * - If not in cache, uses fetchedHeaders (from store API appdetails / price batch if available).
+ * - If still missing, queries Valve's store API (or falls back to canonical akamai header.jpg).
+ * - Persists newly resolved artwork URLs to DynamoDB with a 30-day TTL.
+ */
+export async function batchResolveAuthenticArtwork(
+  appIds: Array<string | number>,
+  options: ResolveArtworkOptions = {},
+): Promise<Map<string, string>> {
+  const artworkMap = new Map<string, string>();
+  if (!appIds || appIds.length === 0) {
+    return artworkMap;
+  }
+
+  const cleanIds = Array.from(new Set(appIds.map((id) => String(id).trim()).filter(Boolean)));
+  if (cleanIds.length === 0) {
+    return artworkMap;
+  }
+
+  const { ddbDocClient, tableName, fetchedHeaders } = options;
+  const now = Math.floor(Date.now() / 1000);
+  const TTL_30_DAYS = 30 * 24 * 60 * 60; // 2592000 seconds
+  const missingFromCache: string[] = [];
+
+  // 1. Check DynamoDB Cache
+  if (ddbDocClient && tableName) {
+    try {
+      const BATCH_SIZE = 100;
+      for (let i = 0; i < cleanIds.length; i += BATCH_SIZE) {
+        const chunk = cleanIds.slice(i, i + BATCH_SIZE);
+        const res = await ddbDocClient.send(
+          new BatchGetCommand({
+            RequestItems: {
+              [tableName]: {
+                Keys: chunk.map((appId) => ({
+                  PK: `ASSET#${appId}`,
+                  SK: 'METADATA',
+                })),
+              },
+            },
+          }),
+        );
+
+        const items = res?.Responses?.[tableName] || [];
+        const foundIds = new Set<string>();
+
+        for (const item of items) {
+          const rawAppId = String(item.appId || (item.PK ? item.PK.replace('ASSET#', '') : '')).trim();
+          if (rawAppId && item.headerImage && typeof item.headerImage === 'string') {
+            if (!item.ttl || Number(item.ttl) > now) {
+              artworkMap.set(rawAppId, item.headerImage);
+              foundIds.add(rawAppId);
+            }
+          }
+        }
+
+        for (const id of chunk) {
+          if (!foundIds.has(id)) {
+            missingFromCache.push(id);
+          }
+        }
+      }
+    } catch (err) {
+      console.warn('Error reading asset metadata from DynamoDB cache:', err instanceof Error ? err.message : err);
+      missingFromCache.push(...cleanIds.filter((id) => !artworkMap.has(id)));
+    }
+  } else {
+    missingFromCache.push(...cleanIds);
+  }
+
+  if (missingFromCache.length === 0) {
+    return artworkMap;
+  }
+
+  // 2. Resolve missing items from fetchedHeaders or Valve Store API
+  const newlyResolved: Array<{ appId: string; headerImage: string }> = [];
+  const needStoreFetch: string[] = [];
+
+  for (const appId of missingFromCache) {
+    const fetched = fetchedHeaders?.get(appId) || fetchedHeaders?.get(Number(appId));
+    if (fetched && typeof fetched === 'string' && fetched.trim().length > 0) {
+      artworkMap.set(appId, fetched.trim());
+      newlyResolved.push({ appId, headerImage: fetched.trim() });
+    } else {
+      needStoreFetch.push(appId);
+    }
+  }
+
+  // 3. Query Valve Store API for any remaining unmapped titles (bounded concurrency)
+  if (needStoreFetch.length > 0) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 2000);
+
+    try {
+      const STORE_CHUNK = 25;
+      for (let i = 0; i < needStoreFetch.length; i += STORE_CHUNK) {
+        const chunk = needStoreFetch.slice(i, i + STORE_CHUNK);
+        try {
+          const url = `https://store.steampowered.com/api/appdetails?appids=${chunk.join(',')}&filters=basic`;
+          const res = await fetch(url, {
+            headers: { 'User-Agent': USER_AGENT },
+            signal: controller.signal,
+          });
+
+          if (res.ok) {
+            const data = (await res.json()) as Record<string, { success?: boolean; data?: { header_image?: string } }>;
+            for (const appId of chunk) {
+              const header = data?.[appId]?.data?.header_image;
+              if (header && typeof header === 'string') {
+                artworkMap.set(appId, header);
+                newlyResolved.push({ appId, headerImage: header });
+              } else {
+                const fallback = getCanonicalHeaderImageUrl(appId);
+                artworkMap.set(appId, fallback);
+                newlyResolved.push({ appId, headerImage: fallback });
+              }
+            }
+          } else {
+            for (const appId of chunk) {
+              const fallback = getCanonicalHeaderImageUrl(appId);
+              artworkMap.set(appId, fallback);
+              newlyResolved.push({ appId, headerImage: fallback });
+            }
+          }
+        } catch {
+          for (const appId of chunk) {
+            const fallback = getCanonicalHeaderImageUrl(appId);
+            artworkMap.set(appId, fallback);
+            newlyResolved.push({ appId, headerImage: fallback });
+          }
+        }
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  // 4. Save newly resolved assets into DynamoDB cache (chunked up to 25 items)
+  if (ddbDocClient && tableName && newlyResolved.length > 0) {
+    try {
+      const WRITE_CHUNK = 25;
+      for (let i = 0; i < newlyResolved.length; i += WRITE_CHUNK) {
+        const chunk = newlyResolved.slice(i, i + WRITE_CHUNK);
+        await ddbDocClient.send(
+          new BatchWriteCommand({
+            RequestItems: {
+              [tableName]: chunk.map((item) => ({
+                PutRequest: {
+                  Item: {
+                    PK: `ASSET#${item.appId}`,
+                    SK: 'METADATA',
+                    appId: item.appId,
+                    headerImage: item.headerImage,
+                    ttl: now + TTL_30_DAYS,
+                    updatedAt: new Date().toISOString(),
+                  },
+                },
+              })),
+            },
+          }),
+        );
+      }
+    } catch (err) {
+      console.warn('Error saving asset metadata to DynamoDB cache:', err instanceof Error ? err.message : err);
+    }
+  }
+
+  return artworkMap;
+}
+
+/**
+ * Resolves authentic Steam artwork for a single AppID with DynamoDB cache.
+ */
+export async function resolveAuthenticArtwork(
+  appId: string | number,
+  options: {
+    ddbDocClient?: DynamoDBDocumentClient;
+    tableName?: string;
+    fetchedHeader?: string | null;
+  } = {},
+): Promise<string> {
+  const cleanId = String(appId).trim();
+  const fetchedHeaders = new Map<string, string | null>();
+  if (options.fetchedHeader) {
+    fetchedHeaders.set(cleanId, options.fetchedHeader);
+  }
+
+  const res = await batchResolveAuthenticArtwork([cleanId], {
+    ddbDocClient: options.ddbDocClient,
+    tableName: options.tableName,
+    fetchedHeaders,
+  });
+
+  return res.get(cleanId) || getCanonicalHeaderImageUrl(cleanId);
+}
+
 
 /**
  * End-to-end backlog telemetry retrieval and analysis for a Steam ID.

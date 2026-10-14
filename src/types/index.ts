@@ -322,6 +322,17 @@ export interface SteamAppPriceInfo {
   isDelisted?: boolean;
   price?: number;
   currency?: string;
+  headerImage?: string;
+}
+
+/** Cached Steam store asset record stored in DynamoDB under PK: ASSET#<appId>, SK: METADATA. */
+export interface CachedAssetMetadata {
+  PK: string;
+  SK: string;
+  appId: string;
+  headerImage: string;
+  ttl: number;
+  updatedAt: string;
 }
 
 // ---------------------------------------------------------------------------

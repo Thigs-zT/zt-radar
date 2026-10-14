@@ -170,9 +170,9 @@ export async function getSteamMostPlayedGames(): Promise<SteamMostPlayedEntry[]>
 }
 
 /**
- * Fetches Top 10 Trending titles on Steam (Top sellers surging in activity).
+ * Fetches trending titles on Steam (aggregating Top Sellers and Specials up to 50 candidates).
  */
-export async function getSteamTrendingGames(): Promise<SteamTrendingEntry[]> {
+export async function getSteamTrendingGames(limit: number = 50): Promise<SteamTrendingEntry[]> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 4000);
 
@@ -197,9 +197,28 @@ export async function getSteamTrendingGames(): Promise<SteamTrendingEntry[]> {
       return [];
     }
 
-    const data = await res.json() as { top_sellers?: { items?: TopSellerItem[] } };
-    const topSellers = data?.top_sellers?.items ?? [];
-    const validItems = topSellers.filter((i) => i.id && i.name).slice(0, 10);
+    const data = (await res.json()) as {
+      top_sellers?: { items?: TopSellerItem[] };
+      specials?: { items?: TopSellerItem[] };
+    };
+
+    // Aggregate candidates from top_sellers and specials to ensure sufficient raw depth (40~50 items)
+    const rawItems: TopSellerItem[] = [
+      ...(data?.top_sellers?.items ?? []),
+      ...(data?.specials?.items ?? []),
+    ];
+
+    const seenIds = new Set<number>();
+    const uniqueItems: TopSellerItem[] = [];
+    for (const item of rawItems) {
+      if (item.id && !seenIds.has(item.id)) {
+        seenIds.add(item.id);
+        uniqueItems.push(item);
+      }
+    }
+
+    const maxItems = Math.max(10, Math.min(limit, 50));
+    const validItems = uniqueItems.filter((i) => i.id && i.name).slice(0, maxItems);
 
     const enriched = await Promise.all(
       validItems.map(async (item, idx): Promise<SteamTrendingEntry> => {
@@ -211,7 +230,7 @@ export async function getSteamTrendingGames(): Promise<SteamTrendingEntry[]> {
             signal: controller.signal,
           });
           if (playersRes.ok) {
-            const pData = await playersRes.json() as { response?: { player_count?: number } };
+            const pData = (await playersRes.json()) as { response?: { player_count?: number } };
             players = pData?.response?.player_count ?? null;
           }
         } catch {

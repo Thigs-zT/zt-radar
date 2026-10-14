@@ -32,6 +32,9 @@ import {
   batchFetchSteamAppPrices,
   resolveSteamAppTitles,
   getPlayerLibraryDetailed,
+  batchResolveAuthenticArtwork,
+  resolveAuthenticArtwork,
+  getCanonicalHeaderImageUrl,
   APP_DIRECTORY,
 } from '../utils/steamWeb.js';
 
@@ -143,7 +146,7 @@ export function buildMarketTelemetryPlaceholder(
 ): PublicMarketTelemetry {
   const cleanAppId = appId.trim();
   const storeUrl = `https://store.steampowered.com/app/${cleanAppId}`;
-  const bannerUrl = `https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/${cleanAppId}/header.jpg`;
+  const bannerUrl = getCanonicalHeaderImageUrl(cleanAppId);
   const title = KNOWN_GAME_TITLES[cleanAppId] || `Steam Application ${cleanAppId}`;
 
   const isBrl = preferredCurrency.toUpperCase() === 'BRL';
@@ -193,9 +196,10 @@ export function buildMarketTelemetryPlaceholder(
 export async function resolveMarketTelemetry(
   appId: string,
   preferredCurrency: string = 'USD',
+  ddbDocClient: DynamoDBDocumentClient = docClient,
+  tableName: string = process.env.TABLE_NAME || '',
 ): Promise<PublicMarketTelemetry> {
   const cleanAppId = appId.trim();
-  const cdnBannerUrl = `https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/${cleanAppId}/header.jpg`;
   const isBrl = preferredCurrency.toUpperCase() === 'BRL';
   const currency = isBrl ? 'BRL' : 'USD';
 
@@ -213,12 +217,18 @@ export async function resolveMarketTelemetry(
           ? dealInfo.storeBreakdown
           : { [primaryDeal.shopName]: primaryDeal };
 
+      const authenticImageUrl = await resolveAuthenticArtwork(cleanAppId, {
+        ddbDocClient,
+        tableName,
+        fetchedHeader: dealInfo.imageUrl,
+      });
+
       return {
         ...dealInfo,
         appId: cleanAppId,
         gameId: dealInfo.gameId || `steam_${cleanAppId}`,
         title: resolvedTitle,
-        imageUrl: dealInfo.imageUrl || cdnBannerUrl,
+        imageUrl: authenticImageUrl,
         steamAppId: cleanAppId,
         primaryDeal,
         cheaperAlternative: dealInfo.cheaperAlternative || null,
@@ -249,9 +259,11 @@ export function buildCuratedMarketList(preferredCurrency: string = 'USD'): Publi
  */
 export async function resolveCuratedMarketList(
   preferredCurrency: string = 'USD',
+  ddbDocClient: DynamoDBDocumentClient = docClient,
+  tableName: string = process.env.TABLE_NAME || '',
 ): Promise<PublicMarketTelemetry[]> {
   const settled = await Promise.allSettled(
-    CURATED_MARKET_APP_IDS.map((appId) => resolveMarketTelemetry(appId, preferredCurrency)),
+    CURATED_MARKET_APP_IDS.map((appId) => resolveMarketTelemetry(appId, preferredCurrency, ddbDocClient, tableName)),
   );
 
   return settled.map((result, idx) => {
@@ -274,7 +286,7 @@ export function buildTrendingGamesList(): SteamTrendingEntry[] {
       name: 'Cyberpunk 2077',
       currentPlayers: 54000,
       priceText: '$ 29.99 (-50%)',
-      headerImage: 'https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/1091500/header.jpg',
+      headerImage: 'https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/1091500/header.jpg',
     },
     {
       rank: 2,
@@ -282,7 +294,7 @@ export function buildTrendingGamesList(): SteamTrendingEntry[] {
       name: "Baldur's Gate 3",
       currentPlayers: 82000,
       priceText: '$ 47.99 (-20%)',
-      headerImage: 'https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/1086940/header.jpg',
+      headerImage: 'https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/1086940/header.jpg',
     },
     {
       rank: 3,
@@ -290,7 +302,7 @@ export function buildTrendingGamesList(): SteamTrendingEntry[] {
       name: 'ELDEN RING',
       currentPlayers: 67000,
       priceText: '$ 35.99 (-40%)',
-      headerImage: 'https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/1245620/header.jpg',
+      headerImage: 'https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/1245620/header.jpg',
     },
     {
       rank: 4,
@@ -298,24 +310,58 @@ export function buildTrendingGamesList(): SteamTrendingEntry[] {
       name: 'The Witcher 3: Wild Hunt',
       currentPlayers: 31000,
       priceText: '$ 9.99 (-75%)',
-      headerImage: 'https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/292030/header.jpg',
+      headerImage: 'https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/292030/header.jpg',
+    },
+    {
+      rank: 5,
+      appId: 582010,
+      name: 'MONSTER HUNTER: WORLD',
+      currentPlayers: 28000,
+      priceText: '$ 14.99 (-50%)',
+      headerImage: 'https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/582010/header.jpg',
+    },
+    {
+      rank: 6,
+      appId: 1174180,
+      name: 'Red Dead Redemption 2',
+      currentPlayers: 39000,
+      priceText: '$ 19.79 (-67%)',
+      headerImage: 'https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/1174180/header.jpg',
+    },
+    {
+      rank: 7,
+      appId: 990080,
+      name: 'Hogwarts Legacy',
+      currentPlayers: 21000,
+      priceText: '$ 29.99 (-50%)',
+      headerImage: 'https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/990080/header.jpg',
+    },
+    {
+      rank: 8,
+      appId: 2358720,
+      name: 'Black Myth: Wukong',
+      currentPlayers: 65000,
+      priceText: '$ 59.99',
+      headerImage: 'https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/2358720/header.jpg',
     },
   ];
 }
 
 /**
  * Resolves trending games on Steam:
+ * - Collects raw candidates from top sellers & specials (up to 50 items).
  * - Filters out Free-to-Play titles and non-discounted promotional labels.
  * - Filters out Valve hardware and physical peripherals (Steam Deck, Valve Index, Controller, etc.).
  * - Deduplicates items by appId so identical games never appear more than once.
+ * - Backfills from curated commercial games if needed to guarantee between 6 and 8 entries.
  * - Re-indexes sequential ranks (1, 2, 3...) after filtering.
  * - Gracefully falls back to curated trending games on timeout or upstream failure.
  */
 export async function resolveTrendingGames(): Promise<SteamTrendingEntry[]> {
   try {
     const rawTrending = await Promise.race([
-      getSteamTrendingGames(),
-      new Promise<SteamTrendingEntry[]>((resolve) => setTimeout(() => resolve([]), 2000)),
+      getSteamTrendingGames(50),
+      new Promise<SteamTrendingEntry[]>((resolve) => setTimeout(() => resolve([]), 4000)),
     ]);
 
     const seenAppIds = new Set<number>();
@@ -354,10 +400,34 @@ export async function resolveTrendingGames(): Promise<SteamTrendingEntry[]> {
         ...game,
         rank: filtered.length + 1,
       });
+
+      if (filtered.length >= 8) {
+        break;
+      }
+    }
+
+    // Backfill from curated commercial games if filtered count is less than 6
+    if (filtered.length < 6) {
+      const fallbackGames = buildTrendingGamesList();
+      for (const fallback of fallbackGames) {
+        if (!seenAppIds.has(fallback.appId)) {
+          seenAppIds.add(fallback.appId);
+          filtered.push({
+            ...fallback,
+            rank: filtered.length + 1,
+          });
+          if (filtered.length >= 8) {
+            break;
+          }
+        }
+      }
     }
 
     if (filtered.length > 0) {
-      return filtered;
+      return filtered.slice(0, 8).map((game, idx) => ({
+        ...game,
+        rank: idx + 1,
+      }));
     }
   } catch (error) {
     console.error(
@@ -366,8 +436,9 @@ export async function resolveTrendingGames(): Promise<SteamTrendingEntry[]> {
     );
   }
 
-  return buildTrendingGamesList();
+  return buildTrendingGamesList().slice(0, 8);
 }
+
 
 export type WishlistTelemetryResult =
   | { success: true; data: PublicWishlistResponse }
@@ -384,6 +455,8 @@ export type WishlistTelemetryResult =
 export async function resolveWishlistTelemetry(
   target: string,
   preferredCurrency: string = 'USD',
+  ddbDocClient: DynamoDBDocumentClient = docClient,
+  tableName: string = process.env.TABLE_NAME || '',
 ): Promise<WishlistTelemetryResult> {
   const cleanTarget = target.trim();
   if (!cleanTarget) {
@@ -491,6 +564,26 @@ export async function resolveWishlistTelemetry(
     // Graceful fallback to batch cache if ITAD enrichment encounters issues
   }
 
+  // Collect authentic headers from store price overview and deal intelligence
+  const fetchedHeaders = new Map<string, string>();
+  for (const [id, info] of priceMap.entries()) {
+    if (info.headerImage) {
+      fetchedHeaders.set(String(id), info.headerImage);
+    }
+  }
+  for (const [id, deal] of dealMap.entries()) {
+    if (deal.imageUrl) {
+      fetchedHeaders.set(String(id), deal.imageUrl);
+    }
+  }
+
+  // Resolve authentic artwork URLs with DynamoDB cache (30-day TTL) and canonical fallback
+  const artworkMap = await batchResolveAuthenticArtwork(targetAppIds, {
+    ddbDocClient,
+    tableName,
+    fetchedHeaders,
+  });
+
   const items: PublicWishlistItem[] = targetItems.map((item) => {
     const appId = item.appId;
     const priceInfo = priceMap.get(Number(appId));
@@ -543,10 +636,12 @@ export async function resolveWishlistTelemetry(
       }
     }
 
+    const authenticImageUrl = artworkMap.get(appId) || getCanonicalHeaderImageUrl(appId);
+
     return {
       appId,
       title: resolvedTitle,
-      imageUrl: `https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/${appId}/header.jpg`,
+      imageUrl: authenticImageUrl,
       url: `https://store.steampowered.com/app/${appId}`,
       store: 'Steam',
       priority: item.priority,
@@ -605,6 +700,8 @@ export type BacklogTelemetryApiResult =
 export async function resolveBacklogTelemetry(
   target: string,
   preferredCurrency: string = 'USD',
+  ddbDocClient: DynamoDBDocumentClient = docClient,
+  tableName: string = process.env.TABLE_NAME || '',
 ): Promise<BacklogTelemetryApiResult> {
   const cleanTarget = (target || '').trim();
   if (!cleanTarget) {
@@ -710,6 +807,21 @@ export async function resolveBacklogTelemetry(
     // Graceful fallback on price fetch failure
   }
 
+  // Collect authentic headers from store price overview
+  const fetchedHeaders = new Map<string, string>();
+  for (const [id, info] of priceMap.entries()) {
+    if (info.headerImage) {
+      fetchedHeaders.set(String(id), info.headerImage);
+    }
+  }
+
+  // Resolve authentic artwork URLs with DynamoDB cache (30-day TTL) and canonical fallback
+  const artworkMap = await batchResolveAuthenticArtwork(targetAppIds, {
+    ddbDocClient,
+    tableName,
+    fetchedHeaders,
+  });
+
   // Query HLTB stats concurrently for top 8 unplayed titles
   const hltbCandidates = targetGames.slice(0, 8);
   const hltbMap = new Map<number, number>();
@@ -771,13 +883,16 @@ export async function resolveBacklogTelemetry(
       ? `http://media.steampowered.com/steamcommunity/public/images/apps/${appId}/${g.img_icon_url}.jpg`
       : null;
 
+    const authenticImageUrl =
+      artworkMap.get(String(appId)) || getCanonicalHeaderImageUrl(appId);
+
     return {
       appId,
       name: resolvedName,
       title: resolvedName,
       playtimeMinutes: g.playtime_forever ?? 0,
       playtimeForever: g.playtime_forever ?? 0,
-      imageUrl: `https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/${appId}/header.jpg`,
+      imageUrl: authenticImageUrl,
       iconUrl,
       url: `https://store.steampowered.com/app/${appId}`,
       price,

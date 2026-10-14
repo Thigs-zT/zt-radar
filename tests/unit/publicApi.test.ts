@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mockClient } from 'aws-sdk-client-mock';
-import { DynamoDBDocumentClient, QueryCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, QueryCommand, BatchGetCommand, BatchWriteCommand } from '@aws-sdk/lib-dynamodb';
 import type { HttpApiEvent } from '../../src/handlers/publicApi.js';
 import type { GameDealInfo, SteamTrendingEntry } from '../../src/types/index.js';
 
@@ -565,7 +565,7 @@ describe('Public Web API Handler', () => {
       expect(data.primaryDeal).toBeDefined();
       expect(data.primaryDeal.shopName).toBe('Steam');
       expect(data.imageUrl).toBe(
-        'https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/1086940/header.jpg',
+        'https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/1086940/header.jpg',
       );
       consoleSpy.mockRestore();
     });
@@ -724,7 +724,8 @@ describe('Public Web API Handler', () => {
 
       const data = JSON.parse(response.body);
       expect(Array.isArray(data)).toBe(true);
-      expect(data.length).toBe(3); // CS2 and Dota 2 excluded from 5 items
+      expect(data.length).toBeGreaterThanOrEqual(6);
+      expect(data.length).toBeLessThanOrEqual(8);
 
       // Confirm F2P titles were filtered out
       const appIds = data.map((g: SteamTrendingEntry) => g.appId);
@@ -732,6 +733,9 @@ describe('Public Web API Handler', () => {
       expect(appIds).not.toContain(570); // Dota 2
 
       // Verify sequential ranks starting at 1
+      data.forEach((entry: SteamTrendingEntry, idx: number) => {
+        expect(entry.rank).toBe(idx + 1);
+      });
       expect(data[0].rank).toBe(1);
       expect(data[0].appId).toBe(1091500); // Cyberpunk 2077
       expect(data[0].name).toBe('Cyberpunk 2077');
@@ -822,7 +826,8 @@ describe('Public Web API Handler', () => {
       expect(response.statusCode).toBe(200);
       const data = JSON.parse(response.body);
       expect(Array.isArray(data)).toBe(true);
-      expect(data.length).toBe(3);
+      expect(data.length).toBeGreaterThanOrEqual(6);
+      expect(data.length).toBeLessThanOrEqual(8);
 
       const appIds = data.map((g: SteamTrendingEntry) => g.appId);
       expect(appIds).not.toContain(1675200);
@@ -830,6 +835,9 @@ describe('Public Web API Handler', () => {
       expect(appIds).not.toContain(353370);
       expect(appIds).not.toContain(9999999);
 
+      data.forEach((entry: SteamTrendingEntry, idx: number) => {
+        expect(entry.rank).toBe(idx + 1);
+      });
       expect(data[0].rank).toBe(1);
       expect(data[0].name).toBe('Cyberpunk 2077');
       expect(data[1].rank).toBe(2);
@@ -908,8 +916,12 @@ describe('Public Web API Handler', () => {
       expect(response.statusCode).toBe(200);
       const data = JSON.parse(response.body);
       expect(Array.isArray(data)).toBe(true);
-      expect(data.length).toBe(3);
+      expect(data.length).toBeGreaterThanOrEqual(6);
+      expect(data.length).toBeLessThanOrEqual(8);
 
+      data.forEach((entry: SteamTrendingEntry, idx: number) => {
+        expect(entry.rank).toBe(idx + 1);
+      });
       expect(data[0].rank).toBe(1);
       expect(data[0].appId).toBe(1091500);
       expect(data[1].rank).toBe(2);
@@ -1503,6 +1515,81 @@ describe('Public Web API Handler', () => {
       expect(data.totalSteamWishlist).toBe(150);
       expect(data.items).toHaveLength(100);
     });
+
+    it('should return authentic imageUrl from DynamoDB cache for wishlist items when available', async () => {
+      const cachedHeader =
+        'https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/1086940/authentic_sha1_hash/header.jpg';
+      ddbMock.on(BatchGetCommand).resolves({
+        Responses: {
+          [MOCK_TABLE]: [
+            {
+              PK: 'ASSET#1086940',
+              SK: 'METADATA',
+              appId: '1086940',
+              headerImage: cachedHeader,
+              ttl: Math.floor(Date.now() / 1000) + 10000,
+            },
+          ],
+        },
+      });
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/wishlist/{target}',
+        rawPath: '/public/wishlist/76561198327022168',
+        pathParameters: {
+          target: '76561198327022168',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/wishlist/76561198327022168',
+          },
+        },
+      };
+
+      const response = await handler(event);
+      expect(response.statusCode).toBe(200);
+      const data = JSON.parse(response.body);
+      const bg3 = data.items.find((i: { appId: string }) => i.appId === '1086940');
+      expect(bg3?.imageUrl).toBe(cachedHeader);
+    });
+
+    it('should fall back to canonical Akamai header.jpg when store query has no header and cache is empty', async () => {
+      ddbMock.on(BatchGetCommand).resolves({
+        Responses: {},
+      });
+      // Mock batch prices without header image
+      vi.mocked(batchFetchSteamAppPrices).mockResolvedValueOnce(
+        new Map([
+          [1086940, { initial: 59.99, final: 47.99, isFree: false }],
+        ]),
+      );
+      vi.mocked(getGameDealInfo).mockResolvedValue(null);
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('Store throttled'));
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/wishlist/{target}',
+        rawPath: '/public/wishlist/76561198327022168',
+        pathParameters: {
+          target: '76561198327022168',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/wishlist/76561198327022168',
+          },
+        },
+      };
+
+      const response = await handler(event);
+      expect(response.statusCode).toBe(200);
+      const data = JSON.parse(response.body);
+      const bg3 = data.items.find((i: { appId: string }) => i.appId === '1086940');
+      expect(bg3?.imageUrl).toBe(
+        'https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/1086940/header.jpg',
+      );
+      fetchSpy.mockRestore();
+    });
   });
 
   describe('Route: GET /public/backlog/{target}', () => {
@@ -1856,6 +1943,81 @@ describe('Public Web API Handler', () => {
       const data = JSON.parse(response.body);
       expect(data.unplayedCount).toBe(150);
       expect(data.unplayedItems).toHaveLength(100);
+    });
+
+    it('should return authentic imageUrl from DynamoDB cache for backlog items when available', async () => {
+      const cachedHeader =
+        'https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/1086940/authentic_sha1_hash/header.jpg';
+      ddbMock.on(BatchGetCommand).resolves({
+        Responses: {
+          [MOCK_TABLE]: [
+            {
+              PK: 'ASSET#1086940',
+              SK: 'METADATA',
+              appId: '1086940',
+              headerImage: cachedHeader,
+              ttl: Math.floor(Date.now() / 1000) + 10000,
+            },
+          ],
+        },
+      });
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/backlog/{target}',
+        rawPath: '/public/backlog/76561198327022168',
+        pathParameters: {
+          target: '76561198327022168',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/backlog/76561198327022168',
+          },
+        },
+      };
+
+      const response = await handler(event);
+      expect(response.statusCode).toBe(200);
+      const data = JSON.parse(response.body);
+      const bg3 = data.unplayedItems.find((i: { appId: number }) => i.appId === 1086940);
+      expect(bg3?.imageUrl).toBe(cachedHeader);
+    });
+
+    it('should fall back to canonical Akamai header.jpg when backlog store query has no header and cache is empty', async () => {
+      ddbMock.on(BatchGetCommand).resolves({
+        Responses: {},
+      });
+      // Mock batch prices without header image
+      vi.mocked(batchFetchSteamAppPrices).mockResolvedValueOnce(
+        new Map([
+          [1086940, { initial: 59.99, final: 47.99, isFree: false }],
+          [1091500, { initial: 59.99, final: 29.99, isFree: false }],
+        ]),
+      );
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('Store throttled'));
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/backlog/{target}',
+        rawPath: '/public/backlog/76561198327022168',
+        pathParameters: {
+          target: '76561198327022168',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/backlog/76561198327022168',
+          },
+        },
+      };
+
+      const response = await handler(event);
+      expect(response.statusCode).toBe(200);
+      const data = JSON.parse(response.body);
+      const bg3 = data.unplayedItems.find((i: { appId: number }) => i.appId === 1086940);
+      expect(bg3?.imageUrl).toBe(
+        'https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/1086940/header.jpg',
+      );
+      fetchSpy.mockRestore();
     });
 
     it('should format currency correctly via formatCurrency helper', () => {

@@ -175,7 +175,7 @@ Resources:
           ITAD_API_KEY: !Ref ItadApiKey
           STEAM_API_KEY: !Ref SteamApiKey
       Policies:
-        - DynamoDBReadPolicy:
+        - DynamoDBCrudPolicy:
             TableName: !Ref DealsTable
       Events:
         GetPublicMarketList:
