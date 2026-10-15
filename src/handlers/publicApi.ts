@@ -588,8 +588,18 @@ export async function resolveWishlistTelemetry(
     resolveSteamAppTitles(targetAppIds, 1200),
   ]);
 
-  // Enrich top items (up to 10) on the current page with multi-store deal intelligence
-  const enrichmentCandidates = targetItems.slice(0, 10);
+  // Enrich candidates: top items on current page (up to 12) + any unpriced items from batch store query
+  const topCandidates = targetItems.slice(0, 12);
+  const unpricedCandidates = targetItems.filter((candidate) => {
+    const p = priceMap.get(Number(candidate.appId));
+    return !p || p.salePrice === null || p.isUnreleased;
+  }).slice(0, 15);
+
+  const candidateMap = new Map<string, (typeof targetItems)[0]>();
+  for (const item of [...topCandidates, ...unpricedCandidates]) {
+    candidateMap.set(item.appId, item);
+  }
+  const enrichmentCandidates = Array.from(candidateMap.values());
   const dealMap = new Map<string, GameDealInfo>();
   try {
     const dealSettled = await Promise.allSettled(
@@ -649,68 +659,79 @@ export async function resolveWishlistTelemetry(
     let cheaperAlternative: StoreDeal | null = null;
     let storeBreakdown: Record<string, StoreDeal> | undefined = undefined;
 
-    if (priceInfo?.isUnreleased) {
-      isFree = false;
-      isUnreleased = true;
-      regularPrice = null;
-      salePrice = null;
-      discountPercent = 0;
-    } else if (priceInfo?.isFree) {
-      isFree = true;
-      isUnreleased = false;
-      regularPrice = 0;
-      salePrice = 0;
-      discountPercent = 0;
-    } else if (dealInfo && dealInfo.primaryDeal && dealInfo.primaryDeal.regularPrice > 0) {
-      isFree = dealInfo.primaryDeal.salePrice === 0 || dealInfo.primaryDeal.cutPercent === 100;
-      salePrice = dealInfo.primaryDeal.salePrice;
-      regularPrice = dealInfo.primaryDeal.regularPrice;
-      discountPercent = dealInfo.primaryDeal.cutPercent;
-      primaryDeal = dealInfo.primaryDeal;
-      cheaperAlternative = dealInfo.cheaperAlternative || null;
-      storeBreakdown = dealInfo.storeBreakdown;
-    } else if (priceInfo) {
-      if (
-        priceInfo.salePrice === null ||
-        (priceInfo.final === undefined && priceInfo.salePrice === undefined)
-      ) {
-        isFree = false;
-        isUnreleased = true;
-        regularPrice = null;
-        salePrice = null;
-        discountPercent = 0;
-      } else {
-        isFree = false;
-        isUnreleased = false;
-        regularPrice = priceInfo.regularPrice ?? (priceInfo.initial !== undefined ? priceInfo.initial : null);
-        salePrice = priceInfo.salePrice ?? (priceInfo.final !== undefined ? priceInfo.final : null);
-        if (priceInfo.discountPercent !== undefined) {
-          discountPercent = priceInfo.discountPercent;
-        } else if (regularPrice && salePrice !== null && regularPrice > 0 && salePrice < regularPrice) {
-          discountPercent = Math.round(((regularPrice - salePrice) / regularPrice) * 100);
-        }
-      }
+    const hasValidDeal = Boolean(
+      dealInfo?.primaryDeal &&
+      (dealInfo.primaryDeal.salePrice > 0 || dealInfo.primaryDeal.regularPrice > 0)
+    );
+    const hasValidSteamPrice = Boolean(
+      priceInfo &&
+      !priceInfo.isUnreleased &&
+      typeof priceInfo.salePrice === 'number' &&
+      priceInfo.salePrice !== null &&
+      priceInfo.salePrice > 0
+    );
+    const isTrulyFreeDeal = Boolean(
+      dealInfo &&
+      (dealInfo.dealType === 'FREE_TO_KEEP' || dealInfo.primaryDeal?.salePrice === 0)
+    );
+    const isTrulyFreeSteam = Boolean(priceInfo?.isFree);
 
-      if (!isUnreleased && regularPrice !== null && salePrice !== null) {
-        const steamDeal: StoreDeal = {
-          shopName: 'Steam',
-          salePrice,
-          regularPrice,
-          cutPercent: discountPercent,
-          url: `https://store.steampowered.com/app/${appId}`,
-          expiry: null,
-          currency,
-          currencySymbol,
-        };
-        primaryDeal = steamDeal;
-        storeBreakdown = { Steam: steamDeal };
-      }
+    if (hasValidDeal) {
+      // 1. Deal intelligence with authentic store pricing takes absolute precedence
+      isFree = dealInfo!.primaryDeal.salePrice === 0 || dealInfo!.primaryDeal.cutPercent === 100;
+      salePrice = dealInfo!.primaryDeal.salePrice;
+      regularPrice = dealInfo!.primaryDeal.regularPrice;
+      discountPercent = dealInfo!.primaryDeal.cutPercent;
+      primaryDeal = dealInfo!.primaryDeal;
+      cheaperAlternative = dealInfo!.cheaperAlternative || null;
+      storeBreakdown = dealInfo!.storeBreakdown;
+      isUnreleased = false;
+    } else if (hasValidSteamPrice) {
+      // 2. Confirmed Steam store pricing
+      isFree = false;
+      salePrice = priceInfo!.salePrice!;
+      regularPrice = priceInfo!.regularPrice ?? priceInfo!.initial ?? salePrice;
+      discountPercent = priceInfo!.discountPercent ?? 0;
+      isUnreleased = false;
+      const steamDeal: StoreDeal = {
+        shopName: 'Steam',
+        salePrice,
+        regularPrice,
+        cutPercent: discountPercent,
+        url: `https://store.steampowered.com/app/${appId}`,
+        expiry: null,
+        currency,
+        currencySymbol,
+      };
+      primaryDeal = steamDeal;
+      storeBreakdown = { Steam: steamDeal };
+    } else if (isTrulyFreeDeal) {
+      // 3. Free to keep promotion or 100% free deal
+      isFree = true;
+      salePrice = 0;
+      regularPrice = 0;
+      discountPercent = 0;
+      isUnreleased = false;
+      primaryDeal = dealInfo!.primaryDeal || null;
+      cheaperAlternative = dealInfo!.cheaperAlternative || null;
+      storeBreakdown = dealInfo!.storeBreakdown;
+    } else if (isTrulyFreeSteam) {
+      // 4. Free-to-play title confirmed by Steam store
+      isFree = true;
+      salePrice = 0;
+      regularPrice = 0;
+      discountPercent = 0;
+      isUnreleased = false;
     } else {
+      // 5. Unannounced / unreleased / unpriced title (both dealInfo and priceInfo confirm no store pricing exists)
       isFree = false;
       isUnreleased = true;
-      regularPrice = null;
       salePrice = null;
+      regularPrice = null;
       discountPercent = 0;
+      primaryDeal = null;
+      cheaperAlternative = null;
+      storeBreakdown = undefined;
     }
 
     const authenticImageUrl = artworkMap.get(appId) || getCanonicalHeaderImageUrl(appId);

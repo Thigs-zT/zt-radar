@@ -1592,6 +1592,7 @@ describe('Public Web API Handler', () => {
     });
 
     it('should sanitize unreleased or unpriced wishlist games to return salePrice: null and isFree: false, never zero or 100% free', async () => {
+      vi.mocked(getGameDealInfo).mockResolvedValueOnce(null);
       vi.mocked(fetchSteamWishlist).mockResolvedValueOnce({
         success: true,
         items: [
@@ -1645,7 +1646,64 @@ describe('Public Web API Handler', () => {
       expect(unreleasedGame.priority).toBe(5);
     });
 
+    it('should enforce deal intelligence precedence over unreleased fallback when dealInfo provides valid pricing', async () => {
+      vi.mocked(fetchSteamWishlist).mockResolvedValueOnce({
+        success: true,
+        items: [
+          { appId: '1086940', priority: 1, dateAdded: 1710000000 },
+        ],
+      });
+
+      vi.mocked(batchFetchSteamAppPrices).mockResolvedValueOnce(
+        new Map([
+          [
+            1086940,
+            {
+              salePrice: null,
+              regularPrice: null,
+              discountPercent: 0,
+              isFree: false,
+              isUnreleased: true,
+              headerImage: 'https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/1086940/header.jpg',
+            },
+          ],
+        ]),
+      );
+
+      vi.mocked(getGameDealInfo).mockResolvedValueOnce(mockDealBaldursGate);
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/wishlist/{target}',
+        rawPath: '/public/wishlist/76561198327022168',
+        pathParameters: {
+          target: '76561198327022168',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/wishlist/76561198327022168',
+          },
+        },
+      };
+
+      const response = await handler(event);
+      expect(response.statusCode).toBe(200);
+
+      const data = JSON.parse(response.body);
+      expect(data.items).toHaveLength(1);
+      const bg3 = data.items[0];
+      expect(bg3.appId).toBe('1086940');
+      expect(bg3.isUnreleased).toBe(false);
+      expect(bg3.isFree).toBe(false);
+      expect(bg3.salePrice).toBe(47.99);
+      expect(bg3.regularPrice).toBe(59.99);
+      expect(bg3.discountPercent).toBe(20);
+      expect(bg3.primaryDeal).toBeDefined();
+      expect(bg3.primaryDeal.shopName).toBe('Steam');
+    });
+
     it('should correctly identify truly free games with isFree: true and salePrice: 0', async () => {
+      vi.mocked(getGameDealInfo).mockResolvedValueOnce(null);
       vi.mocked(fetchSteamWishlist).mockResolvedValueOnce({
         success: true,
         items: [

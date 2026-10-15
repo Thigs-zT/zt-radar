@@ -1287,14 +1287,14 @@ export async function batchFetchSteamAppPrices(
   const normalized = (countryCode || 'us').toLowerCase();
   const resolvedCountryCode = normalized === 'brl' || normalized === 'br' ? 'br' : 'us';
 
-  const CHUNK_SIZE = 25;
+  const CHUNK_SIZE = 10;
   const chunks: number[][] = [];
   for (let i = 0; i < targetIds.length; i += CHUNK_SIZE) {
     chunks.push(targetIds.slice(i, i + CHUNK_SIZE));
   }
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 1800);
+  const timer = setTimeout(() => controller.abort(), 2400);
 
   type AppDetailsResponse = Record<string, {
     success: boolean;
@@ -1309,14 +1309,14 @@ export async function batchFetchSteamAppPrices(
         initial_formatted?: string;
         final_formatted?: string;
       };
-    };
+    } | unknown[];
   }>;
 
   try {
     await Promise.all(
       chunks.map(async (chunk) => {
         try {
-          const url = `https://store.steampowered.com/api/appdetails?appids=${chunk.join(',')}&cc=${resolvedCountryCode}&filters=price_overview,basic`;
+          const url = `https://store.steampowered.com/api/appdetails?appids=${chunk.join(',')}&cc=${resolvedCountryCode}&filters=price_overview`;
           const res = await fetch(url, {
             headers: { 'User-Agent': USER_AGENT },
             signal: controller.signal,
@@ -1338,9 +1338,12 @@ export async function batchFetchSteamAppPrices(
               });
               continue;
             }
-            const headerImage = appObj.data?.header_image;
-            const isFree = Boolean(appObj.data?.is_free);
-            const overview = appObj.data?.price_overview;
+
+            const isArrayEmpty = Array.isArray(appObj.data) && appObj.data.length === 0;
+            const appDataObj = !Array.isArray(appObj.data) ? appObj.data : undefined;
+            const headerImage = appDataObj?.header_image;
+            const isFree = Boolean(appDataObj?.is_free) || isArrayEmpty;
+            const overview = appDataObj?.price_overview;
 
             if (isFree) {
               priceMap.set(appId, {
