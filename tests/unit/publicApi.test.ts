@@ -1590,6 +1590,159 @@ describe('Public Web API Handler', () => {
       );
       fetchSpy.mockRestore();
     });
+
+    it('should sanitize unreleased or unpriced wishlist games to return salePrice: null and isFree: false, never zero or 100% free', async () => {
+      vi.mocked(fetchSteamWishlist).mockResolvedValueOnce({
+        success: true,
+        items: [
+          { appId: '2807960', priority: 5, dateAdded: 1710000000 },
+        ],
+      });
+
+      vi.mocked(batchFetchSteamAppPrices).mockResolvedValueOnce(
+        new Map([
+          [
+            2807960,
+            {
+              salePrice: null,
+              regularPrice: null,
+              discountPercent: 0,
+              isFree: false,
+              isUnreleased: true,
+              headerImage: 'https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/2807960/header.jpg',
+            },
+          ],
+        ]),
+      );
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/wishlist/{target}',
+        rawPath: '/public/wishlist/76561198327022168',
+        pathParameters: {
+          target: '76561198327022168',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/wishlist/76561198327022168',
+          },
+        },
+      };
+
+      const response = await handler(event);
+      expect(response.statusCode).toBe(200);
+
+      const data = JSON.parse(response.body);
+      expect(data.items).toHaveLength(1);
+      const unreleasedGame = data.items[0];
+      expect(unreleasedGame.appId).toBe('2807960');
+      expect(unreleasedGame.salePrice).toBeNull();
+      expect(unreleasedGame.regularPrice).toBeNull();
+      expect(unreleasedGame.discountPercent).toBe(0);
+      expect(unreleasedGame.isFree).toBe(false);
+      expect(unreleasedGame.isUnreleased).toBe(true);
+      expect(unreleasedGame.primaryDeal).toBeNull();
+      expect(unreleasedGame.priority).toBe(5);
+    });
+
+    it('should correctly identify truly free games with isFree: true and salePrice: 0', async () => {
+      vi.mocked(fetchSteamWishlist).mockResolvedValueOnce({
+        success: true,
+        items: [
+          { appId: '570', priority: 0, dateAdded: 1710000000 },
+        ],
+      });
+
+      vi.mocked(batchFetchSteamAppPrices).mockResolvedValueOnce(
+        new Map([
+          [
+            570,
+            {
+              initial: 0,
+              final: 0,
+              salePrice: 0,
+              regularPrice: 0,
+              discountPercent: 0,
+              isFree: true,
+              isUnreleased: false,
+            },
+          ],
+        ]),
+      );
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/wishlist/{target}',
+        rawPath: '/public/wishlist/76561198327022168',
+        pathParameters: {
+          target: '76561198327022168',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/wishlist/76561198327022168',
+          },
+        },
+      };
+
+      const response = await handler(event);
+      expect(response.statusCode).toBe(200);
+
+      const data = JSON.parse(response.body);
+      const freeGame = data.items[0];
+      expect(freeGame.appId).toBe('570');
+      expect(freeGame.isFree).toBe(true);
+      expect(freeGame.isUnreleased).toBe(false);
+      expect(freeGame.salePrice).toBe(0);
+      expect(freeGame.regularPrice).toBe(0);
+      expect(freeGame.priority).toBe(0);
+    });
+
+    it('should support pagination parameters ?page=2&limit=2 while maintaining authentic totalSteamWishlist count', async () => {
+      const wishlistItems = [
+        { appId: '101', priority: 1, dateAdded: 500 },
+        { appId: '102', priority: 2, dateAdded: 400 },
+        { appId: '103', priority: 3, dateAdded: 300 },
+        { appId: '104', priority: 4, dateAdded: 200 },
+        { appId: '105', priority: 5, dateAdded: 100 },
+      ];
+
+      vi.mocked(fetchSteamWishlist).mockResolvedValueOnce({
+        success: true,
+        items: wishlistItems,
+      });
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/wishlist/{target}',
+        rawPath: '/public/wishlist/76561198327022168',
+        pathParameters: {
+          target: '76561198327022168',
+        },
+        queryStringParameters: {
+          page: '2',
+          limit: '2',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/wishlist/76561198327022168',
+          },
+        },
+      };
+
+      const response = await handler(event);
+      expect(response.statusCode).toBe(200);
+
+      const data = JSON.parse(response.body);
+      expect(data.totalSteamWishlist).toBe(5);
+      expect(data.page).toBe(2);
+      expect(data.limit).toBe(2);
+      expect(data.totalPages).toBe(3);
+      expect(data.items).toHaveLength(2);
+      expect(data.items[0].appId).toBe('103');
+      expect(data.items[0].priority).toBe(3);
+      expect(data.items[1].appId).toBe('104');
+      expect(data.items[1].priority).toBe(4);
+    });
   });
 
   describe('Route: GET /public/backlog/{target}', () => {

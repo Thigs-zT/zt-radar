@@ -415,8 +415,8 @@ export async function getPlayerBadgeCount(steamId64: string, apiKey: string): Pr
 type RawWishlistItem = {
   appid?: number | string;
   appId?: number | string;
-  priority?: number;
-  date_added?: number;
+  priority?: number | string;
+  date_added?: number | string;
 };
 
 /**
@@ -480,11 +480,20 @@ export async function fetchSteamWishlist(
 
     // Sort wishlist items by date_added descending (most recently added games first)
     const sortedItems = rawItems
-      .map((item) => ({
-        appId: String(item.appid ?? item.appId),
-        priority: Number(item.priority ?? 0),
-        dateAdded: Number(item.date_added ?? 0),
-      }))
+      .map((item) => {
+        const rawPriority = item.priority;
+        let priority = 0;
+        if (typeof rawPriority === 'number' && Number.isFinite(rawPriority)) {
+          priority = Math.floor(rawPriority);
+        } else if (typeof rawPriority === 'string' && /^-?\d+$/.test(rawPriority.trim())) {
+          priority = parseInt(rawPriority.trim(), 10);
+        }
+        return {
+          appId: String(item.appid ?? item.appId),
+          priority,
+          dateAdded: Number(item.date_added ?? 0),
+        };
+      })
       .sort((a, b) => b.dateAdded - a.dateAdded);
 
     return { success: true, items: sortedItems };
@@ -1275,6 +1284,9 @@ export async function batchFetchSteamAppPrices(
   const targetIds = appIds.slice(0, maxBatch).map(Number).filter(Boolean);
   if (targetIds.length === 0) return priceMap;
 
+  const normalized = (countryCode || 'us').toLowerCase();
+  const resolvedCountryCode = normalized === 'brl' || normalized === 'br' ? 'br' : 'us';
+
   const CHUNK_SIZE = 25;
   const chunks: number[][] = [];
   for (let i = 0; i < targetIds.length; i += CHUNK_SIZE) {
@@ -1293,6 +1305,7 @@ export async function batchFetchSteamAppPrices(
       price_overview?: {
         initial?: number;
         final?: number;
+        discount_percent?: number;
         initial_formatted?: string;
         final_formatted?: string;
       };
@@ -1303,7 +1316,7 @@ export async function batchFetchSteamAppPrices(
     await Promise.all(
       chunks.map(async (chunk) => {
         try {
-          const url = `https://store.steampowered.com/api/appdetails?appids=${chunk.join(',')}&cc=${countryCode}&filters=price_overview,basic`;
+          const url = `https://store.steampowered.com/api/appdetails?appids=${chunk.join(',')}&cc=${resolvedCountryCode}&filters=price_overview,basic`;
           const res = await fetch(url, {
             headers: { 'User-Agent': USER_AGENT },
             signal: controller.signal,
@@ -1315,28 +1328,70 @@ export async function batchFetchSteamAppPrices(
           for (const [idStr, appObj] of Object.entries(data)) {
             const appId = Number(idStr);
             if (!appObj?.success) {
-              priceMap.set(appId, { isDelisted: true });
+              priceMap.set(appId, {
+                isDelisted: true,
+                salePrice: null,
+                regularPrice: null,
+                discountPercent: 0,
+                isFree: false,
+                isUnreleased: true,
+              });
               continue;
             }
             const headerImage = appObj.data?.header_image;
-            if (appObj.data?.is_free) {
-              priceMap.set(appId, { isFree: true, headerImage });
+            const isFree = Boolean(appObj.data?.is_free);
+            const overview = appObj.data?.price_overview;
+
+            if (isFree) {
+              priceMap.set(appId, {
+                isFree: true,
+                isUnreleased: false,
+                salePrice: 0,
+                regularPrice: 0,
+                initial: 0,
+                final: 0,
+                price: 0,
+                discountPercent: 0,
+                initialFormatted: overview?.initial_formatted ?? 'Free',
+                finalFormatted: overview?.final_formatted ?? 'Free',
+                headerImage,
+              });
               continue;
             }
-            const overview = appObj.data?.price_overview;
-            if (overview) {
+
+            if (overview && (overview.final !== undefined || overview.initial !== undefined)) {
               const initialCents = Number(overview.initial ?? overview.final ?? 0);
               const finalCents = Number(overview.final ?? 0);
+              const regularPrice = initialCents / 100;
+              const salePrice = finalCents / 100;
+
+              let discountPercent = Number(overview.discount_percent ?? 0);
+              if (!discountPercent && initialCents > 0 && finalCents < initialCents) {
+                discountPercent = Math.round(((initialCents - finalCents) / initialCents) * 100);
+              }
+
               priceMap.set(appId, {
-                initial: initialCents / 100,
-                final: finalCents / 100,
+                initial: regularPrice,
+                final: salePrice,
+                price: salePrice,
+                salePrice,
+                regularPrice,
+                discountPercent,
                 initialFormatted: overview.initial_formatted ?? '',
                 finalFormatted: overview.final_formatted ?? '',
                 isFree: false,
+                isUnreleased: false,
                 headerImage,
               });
-            } else if (headerImage) {
-              priceMap.set(appId, { headerImage });
+            } else {
+              priceMap.set(appId, {
+                salePrice: null,
+                regularPrice: null,
+                discountPercent: 0,
+                isFree: false,
+                isUnreleased: true,
+                headerImage,
+              });
             }
           }
         } catch {
@@ -1346,6 +1401,19 @@ export async function batchFetchSteamAppPrices(
     );
   } finally {
     clearTimeout(timer);
+  }
+
+  for (const id of targetIds) {
+    if (!priceMap.has(id)) {
+      priceMap.set(id, {
+        salePrice: null,
+        regularPrice: null,
+        discountPercent: 0,
+        isFree: false,
+        isUnreleased: true,
+        headerImage: getCanonicalHeaderImageUrl(id),
+      });
+    }
   }
 
   return priceMap;

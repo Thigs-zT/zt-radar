@@ -323,6 +323,10 @@ export interface SteamAppPriceInfo {
   price?: number;
   currency?: string;
   headerImage?: string;
+  salePrice?: number | null;
+  regularPrice?: number | null;
+  discountPercent?: number;
+  isUnreleased?: boolean;
 }
 
 /** Cached Steam store asset record stored in DynamoDB under PK: ASSET#<appId>, SK: METADATA. */
@@ -704,6 +708,7 @@ export interface PublicWishlistItem {
   regularPrice: number | null;
   discountPercent: number;
   isFree: boolean;
+  isUnreleased?: boolean;
   currency: string;
   currencySymbol: string;
   primaryDeal?: StoreDeal | null;
@@ -715,6 +720,9 @@ export interface PublicWishlistItem {
 export interface PublicWishlistResponse {
   steamId: string;
   totalSteamWishlist: number;
+  page?: number;
+  limit?: number;
+  totalPages?: number;
   currency: string;
   items: PublicWishlistItem[];
 }

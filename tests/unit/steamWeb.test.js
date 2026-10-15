@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   calculateBacklogMsrp,
   compareLibraryData,
@@ -6,6 +6,7 @@ import {
   buildDuelEmbedPayload,
   buildAchievementsEmbedPayload,
   getAchievementTrackerLinks,
+  batchFetchSteamAppPrices,
 } from '../../src/utils/steamWeb.js';
 import { BRAND_COLORS } from '../../src/utils/theme.js';
 
@@ -438,5 +439,101 @@ describe('getAchievementTrackerLinks', () => {
     const links = getAchievementTrackerLinks(1086940, "Baldur's Gate 3");
     expect(links.steamHunters).toBe('https://steamhunters.com/apps/1086940');
     expect(links.steamHuntersUrl).toBe('https://steamhunters.com/apps/1086940');
+  });
+});
+
+describe('batchFetchSteamAppPrices', () => {
+  it('should correctly differentiate between free games, priced games, and unreleased/unpriced games', async () => {
+    const mockStoreResponse = {
+      '570': {
+        success: true,
+        data: {
+          name: 'Dota 2',
+          is_free: true,
+          header_image: 'https://cdn.steam.com/570/header.jpg',
+        },
+      },
+      '1086940': {
+        success: true,
+        data: {
+          name: "Baldur's Gate 3",
+          is_free: false,
+          header_image: 'https://cdn.steam.com/1086940/header.jpg',
+          price_overview: {
+            initial: 5999,
+            final: 4799,
+            discount_percent: 20,
+            initial_formatted: '$ 59.99',
+            final_formatted: '$ 47.99',
+          },
+        },
+      },
+      '2807960': {
+        success: true,
+        data: {
+          name: 'Battlefield 6',
+          is_free: false,
+          header_image: 'https://cdn.steam.com/2807960/sha1_hash/header.jpg',
+          // price_overview is intentionally undefined for unreleased title
+        },
+      },
+      '999999': {
+        success: false,
+      },
+    };
+
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
+      ok: true,
+      json: async () => mockStoreResponse,
+    });
+
+    const priceMap = await batchFetchSteamAppPrices([570, 1086940, 2807960, 999999, 888888], 'us');
+
+    expect(fetchSpy).toHaveBeenCalled();
+
+    // 1. Truly free game
+    const dota = priceMap.get(570);
+    expect(dota).toBeDefined();
+    expect(dota?.isFree).toBe(true);
+    expect(dota?.isUnreleased).toBe(false);
+    expect(dota?.salePrice).toBe(0);
+    expect(dota?.regularPrice).toBe(0);
+    expect(dota?.discountPercent).toBe(0);
+
+    // 2. Paid game with discount
+    const bg3 = priceMap.get(1086940);
+    expect(bg3).toBeDefined();
+    expect(bg3?.isFree).toBe(false);
+    expect(bg3?.isUnreleased).toBe(false);
+    expect(bg3?.salePrice).toBe(47.99);
+    expect(bg3?.regularPrice).toBe(59.99);
+    expect(bg3?.discountPercent).toBe(20);
+
+    // 3. Unreleased game (missing price_overview and is_free: false)
+    const bf6 = priceMap.get(2807960);
+    expect(bf6).toBeDefined();
+    expect(bf6?.isFree).toBe(false);
+    expect(bf6?.isUnreleased).toBe(true);
+    expect(bf6?.salePrice).toBeNull();
+    expect(bf6?.regularPrice).toBeNull();
+    expect(bf6?.discountPercent).toBe(0);
+
+    // 4. Delisted / unsuccessful game
+    const delisted = priceMap.get(999999);
+    expect(delisted).toBeDefined();
+    expect(delisted?.isDelisted).toBe(true);
+    expect(delisted?.salePrice).toBeNull();
+    expect(delisted?.isFree).toBe(false);
+    expect(delisted?.isUnreleased).toBe(true);
+
+    // 5. Omitted / unreturned game
+    const omitted = priceMap.get(888888);
+    expect(omitted).toBeDefined();
+    expect(omitted?.salePrice).toBeNull();
+    expect(omitted?.isFree).toBe(false);
+    expect(omitted?.isUnreleased).toBe(true);
+    expect(omitted?.headerImage).toContain('888888');
+
+    fetchSpy.mockRestore();
   });
 });

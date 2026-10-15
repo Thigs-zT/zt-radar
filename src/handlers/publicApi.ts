@@ -444,6 +444,13 @@ export type WishlistTelemetryResult =
   | { success: true; data: PublicWishlistResponse }
   | { success: false; statusCode: number; error: string; message: string };
 
+export interface WishlistPaginationOptions {
+  page?: number;
+  limit?: number;
+  ddbDocClient?: DynamoDBDocumentClient;
+  tableName?: string;
+}
+
 /**
  * Resolves public Steam wishlist telemetry for a user:
  * - Accepts SteamID64, vanity username, or full profile URL.
@@ -455,8 +462,9 @@ export type WishlistTelemetryResult =
 export async function resolveWishlistTelemetry(
   target: string,
   preferredCurrency: string = 'USD',
-  ddbDocClient: DynamoDBDocumentClient = docClient,
-  tableName: string = process.env.TABLE_NAME || '',
+  paginationOrDocClient?: WishlistPaginationOptions | DynamoDBDocumentClient,
+  docClientOrTableName?: DynamoDBDocumentClient | string,
+  maybeTableName?: string,
 ): Promise<WishlistTelemetryResult> {
   const cleanTarget = target.trim();
   if (!cleanTarget) {
@@ -466,6 +474,33 @@ export async function resolveWishlistTelemetry(
       error: 'BadRequest',
       message: 'Missing or invalid target parameter.',
     };
+  }
+
+  let page = 1;
+  let limit = 100;
+  let ddbDocClient: DynamoDBDocumentClient = docClient;
+  let tableName: string = process.env.TABLE_NAME || '';
+
+  if (paginationOrDocClient) {
+    if (typeof paginationOrDocClient === 'object' && 'send' in paginationOrDocClient) {
+      ddbDocClient = paginationOrDocClient as DynamoDBDocumentClient;
+      if (typeof docClientOrTableName === 'string') {
+        tableName = docClientOrTableName;
+      }
+    } else {
+      const opts = paginationOrDocClient as WishlistPaginationOptions;
+      if (opts.page !== undefined) page = Math.max(1, Math.floor(opts.page));
+      if (opts.limit !== undefined) limit = Math.max(1, Math.min(100, Math.floor(opts.limit)));
+      if (opts.ddbDocClient) ddbDocClient = opts.ddbDocClient;
+      if (opts.tableName) tableName = opts.tableName;
+
+      if (typeof docClientOrTableName === 'object' && docClientOrTableName && 'send' in docClientOrTableName) {
+        ddbDocClient = docClientOrTableName as DynamoDBDocumentClient;
+      }
+      if (typeof maybeTableName === 'string') {
+        tableName = maybeTableName;
+      }
+    }
   }
 
   const steamApiKey = process.env.STEAM_API_KEY || '';
@@ -521,31 +556,39 @@ export async function resolveWishlistTelemetry(
   const currencySymbol = isBrl ? 'R$' : '$';
   const countryCode = isBrl ? 'br' : 'us';
 
+  const totalPages = Math.max(1, Math.ceil(totalSteamWishlist / limit));
+
   if (totalSteamWishlist === 0) {
     return {
       success: true,
       data: {
         steamId,
         totalSteamWishlist: 0,
+        page,
+        limit,
+        totalPages: 1,
         currency,
         items: [],
       },
     };
   }
 
+  // Preserve the exact priority integer from Valve's IWishlistService without distortion
   // Sort items by dateAdded descending
   const sortedItems = [...rawItems].sort((a, b) => b.dateAdded - a.dateAdded);
-  // Cap at top 100 items to prevent Lambda timeout
-  const targetItems = sortedItems.slice(0, 100);
+  
+  // Support full-collection pagination parameters (page, limit)
+  const startIndex = (page - 1) * limit;
+  const targetItems = sortedItems.slice(startIndex, startIndex + limit);
   const targetAppIds = targetItems.map((item) => item.appId);
 
   // Fetch prices in batch and resolve known titles concurrently
   const [priceMap, titleMap] = await Promise.all([
-    batchFetchSteamAppPrices(targetAppIds, countryCode, 100),
+    batchFetchSteamAppPrices(targetAppIds, countryCode, limit),
     resolveSteamAppTitles(targetAppIds, 1200),
   ]);
 
-  // Enrich top items (up to 10) with multi-store deal intelligence
+  // Enrich top items (up to 10) on the current page with multi-store deal intelligence
   const enrichmentCandidates = targetItems.slice(0, 10);
   const dealMap = new Map<string, GameDealInfo>();
   try {
@@ -598,6 +641,7 @@ export async function resolveWishlistTelemetry(
       `Steam App #${appId}`;
 
     let isFree = false;
+    let isUnreleased = false;
     let regularPrice: number | null = null;
     let salePrice: number | null = null;
     let discountPercent = 0;
@@ -605,7 +649,19 @@ export async function resolveWishlistTelemetry(
     let cheaperAlternative: StoreDeal | null = null;
     let storeBreakdown: Record<string, StoreDeal> | undefined = undefined;
 
-    if (dealInfo && dealInfo.primaryDeal) {
+    if (priceInfo?.isUnreleased) {
+      isFree = false;
+      isUnreleased = true;
+      regularPrice = null;
+      salePrice = null;
+      discountPercent = 0;
+    } else if (priceInfo?.isFree) {
+      isFree = true;
+      isUnreleased = false;
+      regularPrice = 0;
+      salePrice = 0;
+      discountPercent = 0;
+    } else if (dealInfo && dealInfo.primaryDeal && dealInfo.primaryDeal.regularPrice > 0) {
       isFree = dealInfo.primaryDeal.salePrice === 0 || dealInfo.primaryDeal.cutPercent === 100;
       salePrice = dealInfo.primaryDeal.salePrice;
       regularPrice = dealInfo.primaryDeal.regularPrice;
@@ -614,13 +670,28 @@ export async function resolveWishlistTelemetry(
       cheaperAlternative = dealInfo.cheaperAlternative || null;
       storeBreakdown = dealInfo.storeBreakdown;
     } else if (priceInfo) {
-      isFree = Boolean(priceInfo.isFree);
-      regularPrice = isFree ? 0 : (priceInfo.initial ?? null);
-      salePrice = isFree ? 0 : (priceInfo.final ?? null);
-      if (!isFree && regularPrice && salePrice !== null && regularPrice > 0 && salePrice < regularPrice) {
-        discountPercent = Math.round(((regularPrice - salePrice) / regularPrice) * 100);
+      if (
+        priceInfo.salePrice === null ||
+        (priceInfo.final === undefined && priceInfo.salePrice === undefined)
+      ) {
+        isFree = false;
+        isUnreleased = true;
+        regularPrice = null;
+        salePrice = null;
+        discountPercent = 0;
+      } else {
+        isFree = false;
+        isUnreleased = false;
+        regularPrice = priceInfo.regularPrice ?? (priceInfo.initial !== undefined ? priceInfo.initial : null);
+        salePrice = priceInfo.salePrice ?? (priceInfo.final !== undefined ? priceInfo.final : null);
+        if (priceInfo.discountPercent !== undefined) {
+          discountPercent = priceInfo.discountPercent;
+        } else if (regularPrice && salePrice !== null && regularPrice > 0 && salePrice < regularPrice) {
+          discountPercent = Math.round(((regularPrice - salePrice) / regularPrice) * 100);
+        }
       }
-      if (regularPrice !== null && salePrice !== null) {
+
+      if (!isUnreleased && regularPrice !== null && salePrice !== null) {
         const steamDeal: StoreDeal = {
           shopName: 'Steam',
           salePrice,
@@ -634,9 +705,19 @@ export async function resolveWishlistTelemetry(
         primaryDeal = steamDeal;
         storeBreakdown = { Steam: steamDeal };
       }
+    } else {
+      isFree = false;
+      isUnreleased = true;
+      regularPrice = null;
+      salePrice = null;
+      discountPercent = 0;
     }
 
     const authenticImageUrl = artworkMap.get(appId) || getCanonicalHeaderImageUrl(appId);
+    const authenticPriority =
+      typeof item.priority === 'number'
+        ? Math.floor(item.priority)
+        : Number(item.priority ?? 0);
 
     return {
       appId,
@@ -644,12 +725,13 @@ export async function resolveWishlistTelemetry(
       imageUrl: authenticImageUrl,
       url: `https://store.steampowered.com/app/${appId}`,
       store: 'Steam',
-      priority: item.priority,
+      priority: authenticPriority,
       dateAdded: item.dateAdded,
       salePrice,
       regularPrice,
       discountPercent,
       isFree,
+      isUnreleased,
       currency,
       currencySymbol,
       primaryDeal,
@@ -663,6 +745,9 @@ export async function resolveWishlistTelemetry(
     data: {
       steamId,
       totalSteamWishlist,
+      page,
+      limit,
+      totalPages,
       currency,
       items,
     },
@@ -1109,7 +1194,12 @@ export const handler = async (event: HttpApiEvent): Promise<PublicApiResponse> =
 
       const currencyParam = event.queryStringParameters?.currency;
       const preferredCurrency = (currencyParam || 'USD').toUpperCase() === 'BRL' ? 'BRL' : 'USD';
-      const result = await resolveWishlistTelemetry(cleanTarget, preferredCurrency);
+      const pageParam = event.queryStringParameters?.page;
+      const limitParam = event.queryStringParameters?.limit;
+      const page = pageParam ? Math.max(1, parseInt(pageParam, 10) || 1) : 1;
+      const limit = limitParam ? Math.max(1, Math.min(100, parseInt(limitParam, 10) || 100)) : 100;
+
+      const result = await resolveWishlistTelemetry(cleanTarget, preferredCurrency, { page, limit });
       if (!result.success) {
         return createJsonResponse(result.statusCode, {
           error: result.error,
