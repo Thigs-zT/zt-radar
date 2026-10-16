@@ -172,12 +172,16 @@ export async function getSteamMostPlayedGames(): Promise<SteamMostPlayedEntry[]>
 /**
  * Fetches trending titles on Steam (aggregating Top Sellers and Specials up to 50 candidates).
  */
-export async function getSteamTrendingGames(limit: number = 50): Promise<SteamTrendingEntry[]> {
+export async function getSteamTrendingGames(
+  limit: number = 50,
+  preferredCurrency: string = 'USD',
+): Promise<SteamTrendingEntry[]> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 4000);
 
   type TopSellerItem = {
     id?: number;
+    type?: number;
     name?: string;
     final_price?: number;
     discounted?: boolean;
@@ -186,7 +190,10 @@ export async function getSteamTrendingGames(limit: number = 50): Promise<SteamTr
   };
 
   try {
-    const featuredUrl = 'https://store.steampowered.com/api/featuredcategories/';
+    const isBrl = (preferredCurrency || '').toUpperCase().trim() === 'BRL';
+    const ccParam = isBrl ? 'br' : 'us';
+    const langParam = isBrl ? 'portuguese' : 'english';
+    const featuredUrl = `https://store.steampowered.com/api/featuredcategories/?cc=${ccParam}&l=${langParam}`;
     const res = await fetch(featuredUrl, {
       headers: { 'User-Agent': USER_AGENT },
       signal: controller.signal,
@@ -208,10 +215,35 @@ export async function getSteamTrendingGames(limit: number = 50): Promise<SteamTr
       ...(data?.specials?.items ?? []),
     ];
 
+    const HARDWARE_NAME_REGEX = /\b(steam deck|steam frame|steam machine|valve index|steam controller|steam link|controller|headset|docking station|base station|vr kit)\b/i;
+    const KNOWN_HARDWARE_IDS = new Set<number>([1675200, 2133010, 1059530, 1059550, 1059570, 1059540, 353370, 353380]);
+
     const seenIds = new Set<number>();
     const uniqueItems: TopSellerItem[] = [];
     for (const item of rawItems) {
-      if (item.id && !seenIds.has(item.id)) {
+      // Discard packages lacking valid standalone appIds
+      if (!item.id || typeof item.id !== 'number' || item.id <= 0) {
+        continue;
+      }
+      // Discard non-standalone app packages/bundles if type is present and not 0 (app)
+      if (typeof item.type === 'number' && item.type !== 0) {
+        continue;
+      }
+      // Discard known hardware IDs
+      if (KNOWN_HARDWARE_IDS.has(item.id)) {
+        continue;
+      }
+      // Discard hardware by name pattern
+      if (item.name && HARDWARE_NAME_REGEX.test(item.name)) {
+        continue;
+      }
+      // Discard high-priced hardware bundles (amounts in cents: > $250.00 USD or > R$ 1,200.00 BRL)
+      const finalPrice = item.final_price ?? 0;
+      if (isBrl ? finalPrice > 120000 : finalPrice > 25000) {
+        continue;
+      }
+
+      if (!seenIds.has(item.id)) {
         seenIds.add(item.id);
         uniqueItems.push(item);
       }
@@ -237,11 +269,15 @@ export async function getSteamTrendingGames(limit: number = 50): Promise<SteamTr
           // Ignored if single query fails
         }
 
+        // Valve returns amounts in cents (e.g. 5999 = $59.99). Sanitize and format properly.
         const finalPrice = item.final_price ?? 0;
+        const currencySym = isBrl ? 'R$' : '$';
+        const formattedAmount = (finalPrice / 100).toFixed(2);
+        const discountStr = item.discounted && item.discount_percent ? ` (-${item.discount_percent}%)` : '';
         const priceStr =
           finalPrice === 0
             ? 'Free to Play'
-            : `$ ${(finalPrice / 100).toFixed(2)}${item.discounted ? ` (-${item.discount_percent}%)` : ''}`;
+            : `${currencySym} ${formattedAmount}${discountStr}`;
 
         return {
           rank: idx + 1,

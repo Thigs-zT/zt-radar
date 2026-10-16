@@ -4,9 +4,20 @@ import {
   formatExpiryAvailability,
   getMarketOverviewDeals,
   getGameDealInfo,
+  sanitizeTitleForItadLookup,
 } from '../../src/utils/itadApi.js';
 
 describe('ITAD API Utilities', () => {
+  describe('sanitizeTitleForItadLookup', () => {
+    it('should strip edition suffixes and trademark symbols', () => {
+      expect(sanitizeTitleForItadLookup('The Witcher 3: Wild Hunt — Remastered')).toBe('The Witcher 3: Wild Hunt');
+      expect(sanitizeTitleForItadLookup('The Witcher 3: Wild Hunt - Complete Edition')).toBe('The Witcher 3: Wild Hunt');
+      expect(sanitizeTitleForItadLookup('Lords of the Fallen™ (2014) Game of the Year Edition')).toBe('Lords of the Fallen (2014)');
+      expect(sanitizeTitleForItadLookup('Lords Of The Fallen™ 2014')).toBe('Lords Of The Fallen 2014');
+      expect(sanitizeTitleForItadLookup('ARC Raiders - Deluxe Edition')).toBe('ARC Raiders');
+      expect(sanitizeTitleForItadLookup('Cyberpunk 2077®')).toBe('Cyberpunk 2077');
+    });
+  });
   describe('formatPriceComparisonDiff', () => {
     const steamDeal = {
       shopName: 'Steam',
@@ -333,6 +344,116 @@ describe('ITAD API Utilities', () => {
 
       const pricesCall = queriedUrls.find((u) => u.includes('/games/prices/v3'));
       expect(pricesCall).toContain('country=US');
+    });
+
+    it('should perform secondary ITAD lookup using sanitized title and merge storefronts when primary returns only Steam', async () => {
+      globalThis.fetch = vi.fn(async (url, init) => {
+        const urlStr = String(url);
+        // Steam app details returns Witcher 3 with Remastered suffix
+        if (urlStr.includes('store.steampowered.com/api/appdetails')) {
+          return {
+            ok: true,
+            json: async () => ({
+              '292030': {
+                success: true,
+                data: {
+                  name: 'The Witcher 3: Wild Hunt — Remastered',
+                  header_image: 'https://example.com/witcher3.jpg',
+                  price_overview: { initial: 4999, final: 4999, discount_percent: 0 },
+                },
+              },
+            }),
+          };
+        }
+        // Primary lookup by appid=292030 returns base game ID
+        if (urlStr.includes('/games/lookup/v1') && urlStr.includes('appid=292030')) {
+          return {
+            ok: true,
+            json: async () => ({
+              found: true,
+              game: { id: 'uuid-witcher3-base' },
+            }),
+          };
+        }
+        // Secondary search by sanitized title returns Complete Edition ID
+        if (urlStr.includes('/games/search/v1') && urlStr.includes('title=')) {
+          return {
+            ok: true,
+            json: async () => [
+              { id: 'uuid-witcher3-complete', title: 'The Witcher 3: Wild Hunt - Complete Edition', type: 'game' },
+            ],
+          };
+        }
+        // Secondary lookup by sanitized title
+        if (urlStr.includes('/games/lookup/v1') && urlStr.includes('title=')) {
+          return {
+            ok: true,
+            json: async () => ({
+              found: true,
+              game: { id: 'uuid-witcher3-base' },
+            }),
+          };
+        }
+        // Prices query
+        if (urlStr.includes('/games/prices/v3')) {
+          const body = JSON.parse(init?.body || '[]');
+          if (body.includes('uuid-witcher3-base')) {
+            // Base game on ITAD only returns Steam
+            return {
+              ok: true,
+              json: async () => [
+                {
+                  id: 'uuid-witcher3-base',
+                  deals: [
+                    { shop: { name: 'Steam' }, price: { amount: 49.99 }, regular: { amount: 49.99 }, cut: 0, url: 'https://steam.com/witcher' },
+                  ],
+                },
+              ],
+            };
+          }
+          if (body.includes('uuid-witcher3-complete')) {
+            // Secondary edition returns GOG and Epic Games Store
+            return {
+              ok: true,
+              json: async () => [
+                {
+                  id: 'uuid-witcher3-complete',
+                  deals: [
+                    { shop: { name: 'GOG' }, price: { amount: 12.49 }, regular: { amount: 49.99 }, cut: 75, url: 'https://gog.com/witcher' },
+                    { shop: { name: 'Epic Games Store' }, price: { amount: 14.99 }, regular: { amount: 49.99 }, cut: 70, url: 'https://epic.com/witcher' },
+                  ],
+                },
+              ],
+            };
+          }
+        }
+        if (urlStr.includes('/games/historylow/v1')) {
+          return {
+            ok: true,
+            json: async () => [{ id: 'uuid-witcher3-base', low: { price: { amount: 9.99 } } }],
+          };
+        }
+        return { ok: false, status: 404 };
+      });
+
+      const deal = await getGameDealInfo('292030', 'USD');
+
+      expect(deal).toBeDefined();
+      expect(deal?.alternativeCheckStatus).toBe('confirmed');
+      expect(deal?.alternativeCheckDegraded).toBe(false);
+
+      // Verify storefront merging
+      expect(deal?.storeBreakdown['Steam']).toBeDefined();
+      expect(deal?.storeBreakdown['GOG']).toBeDefined();
+      expect(deal?.storeBreakdown['Epic Games Store']).toBeDefined();
+
+      expect(deal?.storeBreakdown['GOG'].salePrice).toBe(12.49);
+      expect(deal?.storeBreakdown['Epic Games Store'].salePrice).toBe(14.99);
+
+      // Verify cheaper alternative is selected
+      expect(deal?.cheaperAlternative).toBeDefined();
+      expect(deal?.cheaperAlternative?.shopName).toBe('GOG');
+      expect(deal?.cheaperAlternative?.salePrice).toBe(12.49);
     });
   });
 });

@@ -373,14 +373,15 @@ export async function resolveCuratedMarketList(
 /**
  * Builds structured fallback trending games telemetry excluding Free-to-Play titles.
  */
-export function buildTrendingGamesList(): SteamTrendingEntry[] {
+export function buildTrendingGamesList(preferredCurrency: string = 'USD'): SteamTrendingEntry[] {
+  const isBrl = (preferredCurrency || '').toUpperCase().trim() === 'BRL';
   return [
     {
       rank: 1,
       appId: 1091500,
       name: 'Cyberpunk 2077',
       currentPlayers: 54000,
-      priceText: '$ 29.99 (-50%)',
+      priceText: isBrl ? 'R$ 99.95 (-50%)' : '$ 29.99 (-50%)',
       headerImage: 'https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/1091500/header.jpg',
     },
     {
@@ -388,7 +389,7 @@ export function buildTrendingGamesList(): SteamTrendingEntry[] {
       appId: 1086940,
       name: "Baldur's Gate 3",
       currentPlayers: 82000,
-      priceText: '$ 47.99 (-20%)',
+      priceText: isBrl ? 'R$ 159.99 (-20%)' : '$ 47.99 (-20%)',
       headerImage: 'https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/1086940/header.jpg',
     },
     {
@@ -396,7 +397,7 @@ export function buildTrendingGamesList(): SteamTrendingEntry[] {
       appId: 1245620,
       name: 'ELDEN RING',
       currentPlayers: 67000,
-      priceText: '$ 35.99 (-40%)',
+      priceText: isBrl ? 'R$ 149.94 (-40%)' : '$ 35.99 (-40%)',
       headerImage: 'https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/1245620/header.jpg',
     },
     {
@@ -404,7 +405,7 @@ export function buildTrendingGamesList(): SteamTrendingEntry[] {
       appId: 292030,
       name: 'The Witcher 3: Wild Hunt',
       currentPlayers: 31000,
-      priceText: '$ 9.99 (-75%)',
+      priceText: isBrl ? 'R$ 32.49 (-75%)' : '$ 9.99 (-75%)',
       headerImage: 'https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/292030/header.jpg',
     },
     {
@@ -412,7 +413,7 @@ export function buildTrendingGamesList(): SteamTrendingEntry[] {
       appId: 582010,
       name: 'MONSTER HUNTER: WORLD',
       currentPlayers: 28000,
-      priceText: '$ 14.99 (-50%)',
+      priceText: isBrl ? 'R$ 49.95 (-50%)' : '$ 14.99 (-50%)',
       headerImage: 'https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/582010/header.jpg',
     },
     {
@@ -420,7 +421,7 @@ export function buildTrendingGamesList(): SteamTrendingEntry[] {
       appId: 1174180,
       name: 'Red Dead Redemption 2',
       currentPlayers: 39000,
-      priceText: '$ 19.79 (-67%)',
+      priceText: isBrl ? 'R$ 98.96 (-67%)' : '$ 19.79 (-67%)',
       headerImage: 'https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/1174180/header.jpg',
     },
     {
@@ -428,7 +429,7 @@ export function buildTrendingGamesList(): SteamTrendingEntry[] {
       appId: 990080,
       name: 'Hogwarts Legacy',
       currentPlayers: 21000,
-      priceText: '$ 29.99 (-50%)',
+      priceText: isBrl ? 'R$ 124.99 (-50%)' : '$ 29.99 (-50%)',
       headerImage: 'https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/990080/header.jpg',
     },
     {
@@ -436,7 +437,7 @@ export function buildTrendingGamesList(): SteamTrendingEntry[] {
       appId: 2358720,
       name: 'Black Myth: Wukong',
       currentPlayers: 65000,
-      priceText: '$ 59.99',
+      priceText: isBrl ? 'R$ 229.99' : '$ 59.99',
       headerImage: 'https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/2358720/header.jpg',
     },
   ];
@@ -444,18 +445,61 @@ export function buildTrendingGamesList(): SteamTrendingEntry[] {
 
 /**
  * Resolves trending games on Steam:
- * - Collects raw candidates from top sellers & specials (up to 50 items).
+ * - Checks DynamoDB cache under PK: MARKET#TRENDING#<currency>, SK: TELEMETRY (15-min TTL).
+ * - If cached and fresh, serves immediately from DynamoDB to prevent list shifting.
+ * - Collects raw candidates from top sellers & specials (up to 50 items) with localized currency.
  * - Filters out Free-to-Play titles and non-discounted promotional labels.
  * - Filters out Valve hardware and physical peripherals (Steam Deck, Valve Index, Controller, etc.).
  * - Deduplicates items by appId so identical games never appear more than once.
  * - Backfills from curated commercial games if needed to guarantee between 6 and 8 entries.
  * - Re-indexes sequential ranks (1, 2, 3...) after filtering.
- * - Gracefully falls back to curated trending games on timeout or upstream failure.
+ * - Caches result in DynamoDB and returns trending games.
  */
-export async function resolveTrendingGames(): Promise<SteamTrendingEntry[]> {
+export async function resolveTrendingGames(
+  preferredCurrency: string = 'USD',
+  ddbDocClient: DynamoDBDocumentClient = docClient,
+  tableName: string = process.env.TABLE_NAME || '',
+): Promise<SteamTrendingEntry[]> {
+  const isBrl = (preferredCurrency || '').toUpperCase().trim() === 'BRL';
+  const currency = isBrl ? 'BRL' : 'USD';
+  const nowSec = Math.floor(Date.now() / 1000);
+
+  // 1. Check DynamoDB Cache
+  if (tableName && ddbDocClient) {
+    try {
+      const cacheResult = await ddbDocClient.send(
+        new QueryCommand({
+          TableName: tableName,
+          KeyConditionExpression: 'PK = :pk AND SK = :sk',
+          ExpressionAttributeValues: {
+            ':pk': `MARKET#TRENDING#${currency}`,
+            ':sk': 'TELEMETRY',
+          },
+          Limit: 1,
+        }),
+      );
+
+      if (cacheResult?.Items && Array.isArray(cacheResult.Items) && cacheResult.Items.length > 0) {
+        const cached = cacheResult.Items[0] as {
+          items?: SteamTrendingEntry[];
+          ttl?: number;
+        };
+        const isFresh = !cached.ttl || cached.ttl > nowSec;
+        if (isFresh && Array.isArray(cached.items) && cached.items.length >= 6) {
+          return cached.items;
+        }
+      }
+    } catch (cacheErr) {
+      console.warn(
+        `[TrendingCache] Cache lookup failed for ${currency}:`,
+        cacheErr instanceof Error ? cacheErr.message : String(cacheErr),
+      );
+    }
+  }
+
   try {
     const rawTrending = await Promise.race([
-      getSteamTrendingGames(50),
+      getSteamTrendingGames(50, currency),
       new Promise<SteamTrendingEntry[]>((resolve) => setTimeout(() => resolve([]), 4000)),
     ]);
 
@@ -503,7 +547,7 @@ export async function resolveTrendingGames(): Promise<SteamTrendingEntry[]> {
 
     // Backfill from curated commercial games if filtered count is less than 6
     if (filtered.length < 6) {
-      const fallbackGames = buildTrendingGamesList();
+      const fallbackGames = buildTrendingGamesList(currency);
       for (const fallback of fallbackGames) {
         if (!seenAppIds.has(fallback.appId)) {
           seenAppIds.add(fallback.appId);
@@ -518,11 +562,36 @@ export async function resolveTrendingGames(): Promise<SteamTrendingEntry[]> {
       }
     }
 
-    if (filtered.length > 0) {
-      return filtered.slice(0, 8).map((game, idx) => ({
-        ...game,
-        rank: idx + 1,
-      }));
+    const finalTrending = filtered.slice(0, 8).map((game, idx) => ({
+      ...game,
+      rank: idx + 1,
+    }));
+
+    // 2. Persist to DynamoDB cache with 15-minute TTL
+    if (tableName && ddbDocClient && finalTrending.length > 0) {
+      try {
+        await ddbDocClient.send(
+          new PutCommand({
+            TableName: tableName,
+            Item: {
+              PK: `MARKET#TRENDING#${currency}`,
+              SK: 'TELEMETRY',
+              items: finalTrending,
+              ttl: nowSec + 900, // 15-minute TTL
+              updatedAt: new Date().toISOString(),
+            },
+          }),
+        );
+      } catch (putErr) {
+        console.warn(
+          `[TrendingCache] Cache save failed for ${currency}:`,
+          putErr instanceof Error ? putErr.message : String(putErr),
+        );
+      }
+    }
+
+    if (finalTrending.length > 0) {
+      return finalTrending;
     }
   } catch (error) {
     console.error(
@@ -531,7 +600,7 @@ export async function resolveTrendingGames(): Promise<SteamTrendingEntry[]> {
     );
   }
 
-  return buildTrendingGamesList().slice(0, 8);
+  return buildTrendingGamesList(currency).slice(0, 8);
 }
 
 
@@ -1159,7 +1228,9 @@ export const handler = async (event: HttpApiEvent): Promise<PublicApiResponse> =
       rawPath.endsWith('/public/market/trending/');
 
     if (isTrendingRoute) {
-      const trending = await resolveTrendingGames();
+      const currencyParam = event.queryStringParameters?.currency;
+      const preferredCurrency = (currencyParam || 'USD').toUpperCase() === 'BRL' ? 'BRL' : 'USD';
+      const trending = await resolveTrendingGames(preferredCurrency, docClient, tableName);
       return createJsonResponse(200, trending);
     }
 
@@ -1201,8 +1272,53 @@ export const handler = async (event: HttpApiEvent): Promise<PublicApiResponse> =
     if (isMarketListRoute) {
       const currencyParam = event.queryStringParameters?.currency;
       const preferredCurrency = (currencyParam || 'USD').toUpperCase() === 'BRL' ? 'BRL' : 'USD';
-      const queryAppId = event.queryStringParameters?.appId;
+      const searchQuery = event.queryStringParameters?.q;
 
+      // Live search via Steam Storefront API
+      if (searchQuery && searchQuery.trim()) {
+        const country = preferredCurrency === 'BRL' ? 'br' : 'us';
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 3000);
+
+        try {
+          const searchUrl = `https://store.steampowered.com/api/storesearch/?term=${encodeURIComponent(searchQuery.trim())}&l=english&cc=${country}`;
+          const searchRes = await fetch(searchUrl, {
+            headers: { 'User-Agent': 'zT-Radar-Bot/1.0 (https://github.com/zt-radar)' },
+            signal: controller.signal,
+          });
+
+          clearTimeout(timeoutId);
+
+          if (searchRes.ok) {
+            const searchData = (await searchRes.json()) as {
+              total?: number;
+              items?: Array<{ id?: number | string; name?: string; type?: string }>;
+            };
+            const items = searchData?.items || [];
+            const topMatch = items.find((i) => i.id) || items[0];
+
+            if (topMatch?.id) {
+              const item = await resolveMarketTelemetry(
+                String(topMatch.id),
+                preferredCurrency,
+                docClient,
+                tableName,
+              );
+              return createJsonResponse(200, [item]);
+            }
+          }
+          return createJsonResponse(200, []);
+        } catch (searchErr) {
+          clearTimeout(timeoutId);
+          console.error(
+            'Error performing live market search on Steam storefront:',
+            searchErr instanceof Error ? searchErr.message : String(searchErr),
+          );
+          return createJsonResponse(200, []);
+        }
+      }
+
+      const queryAppId = event.queryStringParameters?.appId;
       if (queryAppId && queryAppId.trim()) {
         const item = await resolveMarketTelemetry(queryAppId.trim(), preferredCurrency, docClient, tableName);
         return createJsonResponse(200, [item]);

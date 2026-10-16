@@ -893,6 +893,147 @@ describe('Public Web API Handler', () => {
       expect(data[0].primaryDeal.currencySymbol).toBe('$');
       expect(getGameDealInfo).toHaveBeenCalledWith(expect.any(String), 'USD');
     });
+
+    it('should search Steam Storefront API and return matched game telemetry when q parameter is provided', async () => {
+      const originalFetch = globalThis.fetch;
+      const capturedUrls: string[] = [];
+      globalThis.fetch = vi.fn(async (url) => {
+        const urlStr = String(url);
+        capturedUrls.push(urlStr);
+        if (urlStr.includes('store.steampowered.com/api/storesearch')) {
+          return {
+            ok: true,
+            json: async () => ({
+              total: 1,
+              items: [{ id: 292030, name: 'The Witcher 3: Wild Hunt — Remastered', type: 'app' }],
+            }),
+          } as Response;
+        }
+        return originalFetch(url);
+      });
+
+      try {
+        const event: HttpApiEvent = {
+          routeKey: 'GET /public/market',
+          rawPath: '/public/market',
+          queryStringParameters: {
+            q: 'witcher 3',
+          },
+          requestContext: {
+            http: {
+              method: 'GET',
+              path: '/public/market',
+            },
+          },
+        };
+
+        const response = await handler(event);
+
+        expect(response.statusCode).toBe(200);
+        const data = JSON.parse(response.body);
+        expect(Array.isArray(data)).toBe(true);
+        expect(data.length).toBe(1);
+        expect(data[0].appId).toBe('292030');
+
+        const searchCall = capturedUrls.find((u) => u.includes('api/storesearch'));
+        expect(searchCall).toBeDefined();
+        expect(searchCall).toContain('term=witcher%203');
+        expect(searchCall).toContain('cc=us');
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+
+    it('should route country=br to Steam Storefront API when q and currency=BRL are provided', async () => {
+      const originalFetch = globalThis.fetch;
+      const capturedUrls: string[] = [];
+      globalThis.fetch = vi.fn(async (url) => {
+        const urlStr = String(url);
+        capturedUrls.push(urlStr);
+        if (urlStr.includes('store.steampowered.com/api/storesearch')) {
+          return {
+            ok: true,
+            json: async () => ({
+              total: 1,
+              items: [{ id: 1091500, name: 'Cyberpunk 2077', type: 'app' }],
+            }),
+          } as Response;
+        }
+        return originalFetch(url);
+      });
+
+      try {
+        const event: HttpApiEvent = {
+          routeKey: 'GET /public/market',
+          rawPath: '/public/market',
+          queryStringParameters: {
+            q: 'cyberpunk',
+            currency: 'BRL',
+          },
+          requestContext: {
+            http: {
+              method: 'GET',
+              path: '/public/market',
+            },
+          },
+        };
+
+        const response = await handler(event);
+
+        expect(response.statusCode).toBe(200);
+        const data = JSON.parse(response.body);
+        expect(Array.isArray(data)).toBe(true);
+        expect(data[0].appId).toBe('1091500');
+
+        const searchCall = capturedUrls.find((u) => u.includes('api/storesearch'));
+        expect(searchCall).toBeDefined();
+        expect(searchCall).toContain('cc=br');
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+
+    it('should return empty array when live search q yields no matching items', async () => {
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = vi.fn(async (url) => {
+        const urlStr = String(url);
+        if (urlStr.includes('store.steampowered.com/api/storesearch')) {
+          return {
+            ok: true,
+            json: async () => ({
+              total: 0,
+              items: [],
+            }),
+          } as Response;
+        }
+        return originalFetch(url);
+      });
+
+      try {
+        const event: HttpApiEvent = {
+          routeKey: 'GET /public/market',
+          rawPath: '/public/market',
+          queryStringParameters: {
+            q: 'nonexistentgamexyz',
+          },
+          requestContext: {
+            http: {
+              method: 'GET',
+              path: '/public/market',
+            },
+          },
+        };
+
+        const response = await handler(event);
+
+        expect(response.statusCode).toBe(200);
+        const data = JSON.parse(response.body);
+        expect(Array.isArray(data)).toBe(true);
+        expect(data.length).toBe(0);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
   });
 
   describe('Route: GET /public/market/trending', () => {
@@ -1148,6 +1289,96 @@ describe('Public Web API Handler', () => {
       const appIds = data.map((g: SteamTrendingEntry) => g.appId);
       expect(appIds).not.toContain(730);
       consoleSpy.mockRestore();
+    });
+
+    it('should route currency=BRL to getSteamTrendingGames when currency=BRL is provided', async () => {
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/market/trending',
+        rawPath: '/public/market/trending',
+        queryStringParameters: {
+          currency: 'BRL',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/market/trending',
+          },
+        },
+      };
+
+      const response = await handler(event);
+
+      expect(response.statusCode).toBe(200);
+      expect(getSteamTrendingGames).toHaveBeenCalledWith(50, 'BRL');
+    });
+
+    it('should serve trending telemetry immediately from DynamoDB cache when fresh cache exists', async () => {
+      const nowSec = Math.floor(Date.now() / 1000);
+      const cachedTrending: SteamTrendingEntry[] = [
+        { rank: 1, appId: 1091500, name: 'Cyberpunk 2077', currentPlayers: 54000, priceText: '$ 29.99 (-50%)', headerImage: 'https://example.com/cp.jpg' },
+        { rank: 2, appId: 1086940, name: "Baldur's Gate 3", currentPlayers: 82000, priceText: '$ 47.99 (-20%)', headerImage: 'https://example.com/bg.jpg' },
+        { rank: 3, appId: 1245620, name: 'ELDEN RING', currentPlayers: 67000, priceText: '$ 35.99 (-40%)', headerImage: 'https://example.com/er.jpg' },
+        { rank: 4, appId: 292030, name: 'The Witcher 3: Wild Hunt', currentPlayers: 31000, priceText: '$ 9.99 (-75%)', headerImage: 'https://example.com/w3.jpg' },
+        { rank: 5, appId: 582010, name: 'MONSTER HUNTER: WORLD', currentPlayers: 28000, priceText: '$ 14.99 (-50%)', headerImage: 'https://example.com/mhw.jpg' },
+        { rank: 6, appId: 1174180, name: 'Red Dead Redemption 2', currentPlayers: 39000, priceText: '$ 19.79 (-67%)', headerImage: 'https://example.com/rdr2.jpg' },
+      ];
+
+      ddbMock.on(QueryCommand).resolves({
+        Items: [
+          {
+            PK: 'MARKET#TRENDING#USD',
+            SK: 'TELEMETRY',
+            items: cachedTrending,
+            ttl: nowSec + 900,
+          },
+        ],
+      });
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/market/trending',
+        rawPath: '/public/market/trending',
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/market/trending',
+          },
+        },
+      };
+
+      const response = await handler(event);
+
+      expect(response.statusCode).toBe(200);
+      const data = JSON.parse(response.body);
+      expect(Array.isArray(data)).toBe(true);
+      expect(data.length).toBe(6);
+      expect(data[0].name).toBe('Cyberpunk 2077');
+      expect(data[0].headerImage).toBe('https://example.com/cp.jpg');
+
+      // Verify getSteamTrendingGames was NOT called due to instant cache hit
+      expect(getSteamTrendingGames).not.toHaveBeenCalled();
+    });
+
+    it('should persist fresh trending games to DynamoDB with 15-minute TTL on cache miss', async () => {
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/market/trending',
+        rawPath: '/public/market/trending',
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/market/trending',
+          },
+        },
+      };
+
+      const response = await handler(event);
+
+      expect(response.statusCode).toBe(200);
+      const putCalls = ddbMock.commandCalls(PutCommand);
+      const trendingPut = putCalls.find((call) => call.args[0].input.Item?.PK === 'MARKET#TRENDING#USD');
+      expect(trendingPut).toBeDefined();
+      expect(trendingPut?.args[0].input.Item?.SK).toBe('TELEMETRY');
+      expect(Array.isArray(trendingPut?.args[0].input.Item?.items)).toBe(true);
+      expect(trendingPut?.args[0].input.Item?.ttl).toBeGreaterThan(Math.floor(Date.now() / 1000));
     });
   });
 
