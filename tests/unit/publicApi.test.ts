@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mockClient } from 'aws-sdk-client-mock';
-import { DynamoDBDocumentClient, QueryCommand, BatchGetCommand, BatchWriteCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, QueryCommand, PutCommand, BatchGetCommand, BatchWriteCommand } from '@aws-sdk/lib-dynamodb';
 import type { HttpApiEvent } from '../../src/handlers/publicApi.js';
 import type { GameDealInfo, SteamTrendingEntry } from '../../src/types/index.js';
 
@@ -568,6 +568,198 @@ describe('Public Web API Handler', () => {
         'https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/1086940/header.jpg',
       );
       consoleSpy.mockRestore();
+    });
+
+    it('should return cached multi-store telemetry immediately from DynamoDB when fresh cache exists', async () => {
+      const nowSec = Math.floor(Date.now() / 1000);
+      const cachedTelemetry = {
+        PK: 'MARKET#1086940#USD',
+        SK: 'TELEMETRY',
+        appId: '1086940',
+        gameId: 'steam_1086940',
+        title: "Baldur's Gate 3",
+        imageUrl: 'https://example.com/cached-bg3.jpg',
+        reviewScore: 96,
+        steamAppId: '1086940',
+        dealType: 'CURATED_DEAL',
+        isAllTimeLow: false,
+        allTimeLowPrice: 47.99,
+        expiry: null,
+        primaryDeal: {
+          shopName: 'Steam',
+          salePrice: 47.99,
+          regularPrice: 59.99,
+          cutPercent: 20,
+          url: 'https://store.steampowered.com/app/1086940/',
+          expiry: null,
+          currency: 'USD',
+          currencySymbol: '$',
+        },
+        cheaperAlternative: {
+          shopName: 'GOG',
+          salePrice: 44.99,
+          regularPrice: 59.99,
+          cutPercent: 25,
+          url: 'https://www.gog.com/game/baldurs_gate_iii',
+          expiry: null,
+          currency: 'USD',
+          currencySymbol: '$',
+        },
+        storeBreakdown: {
+          Steam: {
+            shopName: 'Steam',
+            salePrice: 47.99,
+            regularPrice: 59.99,
+            cutPercent: 20,
+            url: 'https://store.steampowered.com/app/1086940/',
+            expiry: null,
+            currency: 'USD',
+            currencySymbol: '$',
+          },
+          GOG: {
+            shopName: 'GOG',
+            salePrice: 44.99,
+            regularPrice: 59.99,
+            cutPercent: 25,
+            url: 'https://www.gog.com/game/baldurs_gate_iii',
+            expiry: null,
+            currency: 'USD',
+            currencySymbol: '$',
+          },
+        },
+        alternativeCheckStatus: 'confirmed',
+        alternativeCheckDegraded: false,
+        ttl: nowSec + 1800,
+        updatedAt: new Date().toISOString(),
+      };
+
+      ddbMock.on(QueryCommand).resolves({
+        Items: [cachedTelemetry],
+      });
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/market/{appId}',
+        rawPath: '/public/market/1086940',
+        pathParameters: {
+          appId: '1086940',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/market/1086940',
+          },
+        },
+      };
+
+      const response = await handler(event);
+
+      expect(response.statusCode).toBe(200);
+      const data = JSON.parse(response.body);
+      expect(data.title).toBe("Baldur's Gate 3");
+      expect(data.imageUrl).toBe('https://example.com/cached-bg3.jpg');
+      expect(data.storeBreakdown.Steam).toBeDefined();
+      expect(data.storeBreakdown.GOG).toBeDefined();
+      expect(data.alternativeCheckDegraded).toBe(false);
+
+      // Verify getGameDealInfo was NOT invoked due to instant cache hit
+      expect(getGameDealInfo).not.toHaveBeenCalled();
+    });
+
+    it('should bypass cache and fetch live data when cached record is degraded', async () => {
+      const nowSec = Math.floor(Date.now() / 1000);
+      const degradedCached = {
+        PK: 'MARKET#1086940#USD',
+        SK: 'TELEMETRY',
+        appId: '1086940',
+        title: "Baldur's Gate 3 (Degraded)",
+        storeBreakdown: {
+          Steam: { shopName: 'Steam', salePrice: 59.99, regularPrice: 59.99, cutPercent: 0, url: '', expiry: null, currency: 'USD', currencySymbol: '$' },
+        },
+        alternativeCheckStatus: 'degraded',
+        alternativeCheckDegraded: true,
+        ttl: nowSec + 1800,
+      };
+
+      ddbMock.on(QueryCommand).resolves({
+        Items: [degradedCached],
+      });
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/market/{appId}',
+        rawPath: '/public/market/1086940',
+        pathParameters: {
+          appId: '1086940',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/market/1086940',
+          },
+        },
+      };
+
+      const response = await handler(event);
+
+      expect(response.statusCode).toBe(200);
+      // Verify getGameDealInfo WAS called to heal degraded cache
+      expect(getGameDealInfo).toHaveBeenCalledWith('1086940', 'USD');
+    });
+
+    it('should persist live telemetry to DynamoDB cache when alternativeCheckDegraded is false', async () => {
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/market/{appId}',
+        rawPath: '/public/market/1086940',
+        pathParameters: {
+          appId: '1086940',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/market/1086940',
+          },
+        },
+      };
+
+      const response = await handler(event);
+
+      expect(response.statusCode).toBe(200);
+      const putCalls = ddbMock.commandCalls(PutCommand);
+      expect(putCalls.length).toBeGreaterThanOrEqual(1);
+
+      const marketPut = putCalls.find((call) => call.args[0].input.Item?.PK === 'MARKET#1086940#USD');
+      expect(marketPut).toBeDefined();
+      expect(marketPut?.args[0].input.Item?.SK).toBe('TELEMETRY');
+      expect(marketPut?.args[0].input.Item?.alternativeCheckDegraded).toBe(false);
+      expect(marketPut?.args[0].input.Item?.ttl).toBeGreaterThan(Math.floor(Date.now() / 1000));
+    });
+
+    it('should NOT cache degraded live telemetry in DynamoDB when alternativeCheckDegraded is true', async () => {
+      vi.mocked(getGameDealInfo).mockResolvedValueOnce({
+        ...mockDealBaldursGate,
+        alternativeCheckStatus: 'degraded',
+        alternativeCheckDegraded: true,
+      });
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/market/{appId}',
+        rawPath: '/public/market/1086940',
+        pathParameters: {
+          appId: '1086940',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/market/1086940',
+          },
+        },
+      };
+
+      const response = await handler(event);
+
+      expect(response.statusCode).toBe(200);
+      const putCalls = ddbMock.commandCalls(PutCommand);
+      const marketPut = putCalls.find((call) => call.args[0].input.Item?.PK === 'MARKET#1086940#USD');
+      expect(marketPut).toBeUndefined();
     });
   });
 
