@@ -169,6 +169,7 @@ Resources:
     Properties:
       CodeUri: .
       Handler: src/handlers/publicApi.handler
+      Timeout: 30
       Environment:
         Variables:
           TABLE_NAME: !Ref DealsTable

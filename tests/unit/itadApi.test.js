@@ -3,6 +3,7 @@ import {
   formatPriceComparisonDiff,
   formatExpiryAvailability,
   getMarketOverviewDeals,
+  getGameDealInfo,
 } from '../../src/utils/itadApi.js';
 
 describe('ITAD API Utilities', () => {
@@ -171,6 +172,167 @@ describe('ITAD API Utilities', () => {
       expect(itadCall).toBeDefined();
       expect(itadCall).toContain('country=BR');
       expect(itadCall).not.toContain('country=US');
+    });
+  });
+
+  describe('getGameDealInfo Multi-Store Breakdown & Alternative Check', () => {
+    const originalFetch = globalThis.fetch;
+    const originalEnvKey = process.env.ITAD_API_KEY;
+
+    beforeEach(() => {
+      process.env.ITAD_API_KEY = 'test_mock_itad_key';
+    });
+
+    afterEach(() => {
+      globalThis.fetch = originalFetch;
+      process.env.ITAD_API_KEY = originalEnvKey;
+      vi.restoreAllMocks();
+    });
+
+    it('should retrieve 4-store breakdown with status confirmed and alternativeCheckDegraded false', async () => {
+      globalThis.fetch = vi.fn(async (url, init) => {
+        const urlStr = String(url);
+        if (urlStr.includes('store.steampowered.com/api/appdetails')) {
+          return {
+            ok: true,
+            json: async () => ({
+              '1091500': {
+                success: true,
+                data: {
+                  name: 'Cyberpunk 2077',
+                  header_image: 'https://example.com/cyberpunk.jpg',
+                  metacritic: { score: 86 },
+                  price_overview: {
+                    initial: 19990,
+                    final: 5997,
+                    discount_percent: 70,
+                  },
+                },
+              },
+            }),
+          };
+        }
+        if (urlStr.includes('/games/lookup/v1')) {
+          return {
+            ok: true,
+            json: async () => ({
+              found: true,
+              game: { id: 'uuid-cyberpunk-1091500' },
+            }),
+          };
+        }
+        if (urlStr.includes('/games/prices/v3')) {
+          return {
+            ok: true,
+            json: async () => [
+              {
+                id: 'uuid-cyberpunk-1091500',
+                deals: [
+                  { shop: { name: 'GOG' }, price: { amount: 59.95 }, regular: { amount: 199.90 }, cut: 70, url: 'https://gog.com/deal' },
+                  { shop: { name: 'Epic Games Store' }, price: { amount: 199.90 }, regular: { amount: 199.90 }, cut: 0, url: 'https://epic.com/deal' },
+                  { shop: { name: 'Nuuvem' }, price: { amount: 249.00 }, regular: { amount: 249.00 }, cut: 0, url: 'https://nuuvem.com/deal' },
+                ],
+              },
+            ],
+          };
+        }
+        if (urlStr.includes('/games/historylow/v1')) {
+          return {
+            ok: true,
+            json: async () => [
+              {
+                id: 'uuid-cyberpunk-1091500',
+                low: { price: { amount: 59.95 } },
+              },
+            ],
+          };
+        }
+        return { ok: false, status: 404 };
+      });
+
+      const deal = await getGameDealInfo('1091500', 'Cyberpunk 2077', 'BRL');
+
+      expect(deal).toBeDefined();
+      expect(deal?.alternativeCheckStatus).toBe('confirmed');
+      expect(deal?.alternativeCheckDegraded).toBe(false);
+      expect(deal?.storeBreakdown).toBeDefined();
+
+      const storeNames = Object.keys(deal?.storeBreakdown || {});
+      expect(storeNames).toContain('Steam');
+      expect(storeNames).toContain('GOG');
+      expect(storeNames).toContain('Epic Games Store');
+      expect(storeNames).toContain('Nuuvem');
+
+      expect(deal?.storeBreakdown['Steam'].salePrice).toBe(59.97);
+      expect(deal?.storeBreakdown['GOG'].salePrice).toBe(59.95);
+      expect(deal?.storeBreakdown['Epic Games Store'].salePrice).toBe(199.90);
+      expect(deal?.storeBreakdown['Nuuvem'].salePrice).toBe(249.00);
+    });
+
+    it('should degrade gracefully when ITAD lookup fails, retaining Steam deal', async () => {
+      globalThis.fetch = vi.fn(async (url) => {
+        const urlStr = String(url);
+        if (urlStr.includes('store.steampowered.com/api/appdetails')) {
+          return {
+            ok: true,
+            json: async () => ({
+              '1091500': {
+                success: true,
+                data: {
+                  name: 'Cyberpunk 2077',
+                  price_overview: { initial: 19990, final: 5997, discount_percent: 70 },
+                },
+              },
+            }),
+          };
+        }
+        if (urlStr.includes('isthereanydeal.com')) {
+          return { ok: false, status: 500 };
+        }
+        return { ok: false };
+      });
+
+      const deal = await getGameDealInfo('1091500', 'BRL');
+
+      expect(deal).toBeDefined();
+      expect(deal?.alternativeCheckStatus).toBe('degraded');
+      expect(deal?.alternativeCheckDegraded).toBe(true);
+      expect(deal?.storeBreakdown['Steam']).toBeDefined();
+      expect(deal?.storeBreakdown['GOG']).toBeUndefined();
+    });
+
+    it('should route uppercase country codes to ITAD prices and historylow', async () => {
+      const queriedUrls = [];
+      globalThis.fetch = vi.fn(async (url) => {
+        const urlStr = String(url);
+        queriedUrls.push(urlStr);
+        if (urlStr.includes('store.steampowered.com')) {
+          return {
+            ok: true,
+            json: async () => ({
+              '1091500': {
+                success: true,
+                data: { name: 'Cyberpunk 2077', price_overview: { initial: 5999, final: 1799, discount_percent: 70 } },
+              },
+            }),
+          };
+        }
+        if (urlStr.includes('/games/lookup/v1')) {
+          return {
+            ok: true,
+            json: async () => ({ found: true, game: { id: 'uuid-123' } }),
+          };
+        }
+        return {
+          ok: true,
+          json: async () => [],
+        };
+      });
+
+      await getGameDealInfo('1091500', 'USD');
+
+      const pricesCall = queriedUrls.find((u) => u.includes('/games/prices/v3'));
+      expect(pricesCall).toContain('country=US');
     });
   });
 });

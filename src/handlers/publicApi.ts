@@ -149,7 +149,7 @@ export function buildMarketTelemetryPlaceholder(
   const bannerUrl = getCanonicalHeaderImageUrl(cleanAppId);
   const title = KNOWN_GAME_TITLES[cleanAppId] || `Steam Application ${cleanAppId}`;
 
-  const isBrl = preferredCurrency.toUpperCase() === 'BRL';
+  const isBrl = (preferredCurrency || '').toUpperCase().trim() === 'BRL';
   const currency = isBrl ? 'BRL' : 'USD';
   const currencySymbol = isBrl ? 'R$' : '$';
   const regularPrice = isBrl ? 149.99 : 29.99;
@@ -200,7 +200,7 @@ export async function resolveMarketTelemetry(
   tableName: string = process.env.TABLE_NAME || '',
 ): Promise<PublicMarketTelemetry> {
   const cleanAppId = appId.trim();
-  const isBrl = preferredCurrency.toUpperCase() === 'BRL';
+  const isBrl = (preferredCurrency || '').toUpperCase().trim() === 'BRL';
   const currency = isBrl ? 'BRL' : 'USD';
 
   try {

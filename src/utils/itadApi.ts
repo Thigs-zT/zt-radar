@@ -328,12 +328,29 @@ interface RawItadHistoryLowItem {
  */
 export async function getGameDealInfo(
   rawGameIdentifier: string,
-  preferredCurrency: string = 'USD',
-  titleFallback: string | null = null,
+  preferredCurrencyOrTitle: string = 'USD',
+  titleFallbackOrCurrency: string | null = null,
   externalSignal?: AbortSignal,
 ): Promise<GameDealInfo | null> {
+  let preferredCurrency = 'USD';
+  let titleFallback: string | null = null;
+
+  const normalizedSecond = (preferredCurrencyOrTitle || '').trim();
+  const normalizedThird = (titleFallbackOrCurrency || '').trim();
+
+  if (normalizedSecond.toUpperCase() === 'BRL' || normalizedSecond.toUpperCase() === 'USD') {
+    preferredCurrency = normalizedSecond.toUpperCase();
+    titleFallback = titleFallbackOrCurrency;
+  } else {
+    // Second argument is title fallback (e.g. getGameDealInfo('1091500', 'Cyberpunk 2077', 'USD'))
+    titleFallback = preferredCurrencyOrTitle;
+    if (normalizedThird.toUpperCase() === 'BRL' || normalizedThird.toUpperCase() === 'USD') {
+      preferredCurrency = normalizedThird.toUpperCase();
+    }
+  }
+
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 2500);
+  const timeoutId = setTimeout(() => controller.abort(), 4500);
 
   if (externalSignal) {
     if (externalSignal.aborted) {
@@ -343,9 +360,11 @@ export async function getGameDealInfo(
     }
   }
 
-  const country = preferredCurrency === 'BRL' ? 'br' : 'us';
-  const currencySymbol = preferredCurrency === 'BRL' ? 'R$' : '$';
-  const currency = preferredCurrency === 'BRL' ? 'BRL' : 'USD';
+  const isBrl = preferredCurrency === 'BRL';
+  const country = isBrl ? 'br' : 'us';
+  const itadCountry = isBrl ? 'BR' : 'US';
+  const currencySymbol = isBrl ? 'R$' : '$';
+  const currency = isBrl ? 'BRL' : 'USD';
 
   let steamAppId: string | null = null;
   let itadGameId: string | null = null;
@@ -445,15 +464,34 @@ export async function getGameDealInfo(
           if (lookupRes.ok) {
             const lookupData = (await lookupRes.json()) as RawItadLookupResponse;
             itadGameId = lookupData?.game?.id || null;
-          } else {
+          }
+
+          // Fallback to title lookup if appid lookup didn't yield an ITAD ID
+          if (!itadGameId && steamAppId && title && title !== 'Monitored Title') {
+            try {
+              const titleLookupUrl = `${ITAD_BASE_URL}/games/lookup/v1?key=${itadKey}&title=${encodeURIComponent(title)}`;
+              const titleRes = await fetch(titleLookupUrl, {
+                headers: { 'User-Agent': USER_AGENT },
+                signal: controller.signal,
+              });
+              if (titleRes.ok) {
+                const titleData = (await titleRes.json()) as RawItadLookupResponse;
+                itadGameId = titleData?.game?.id || null;
+              }
+            } catch {
+              // Non-critical fallback
+            }
+          }
+
+          if (!itadGameId) {
             alternativeCheckDegraded = true;
             alternativeCheckStatus = 'degraded';
           }
         }
 
         if (itadGameId) {
-          const priceUrl = `${ITAD_BASE_URL}/games/prices/v3?key=${itadKey}&country=${country.toUpperCase()}`;
-          const historyUrl = `${ITAD_BASE_URL}/games/historylow/v1?key=${itadKey}&country=${country.toUpperCase()}`;
+          const priceUrl = `${ITAD_BASE_URL}/games/prices/v3?key=${itadKey}&country=${itadCountry}`;
+          const historyUrl = `${ITAD_BASE_URL}/games/historylow/v1?key=${itadKey}&country=${itadCountry}`;
 
           const [priceRes, historyRes] = await Promise.all([
             fetch(priceUrl, {
@@ -478,12 +516,16 @@ export async function getGameDealInfo(
               const shopName = resolveStoreName(d.shop?.name);
               if (!shopName) continue; // STRICTLY IGNORE any store outside our 4 approved stores!
 
-              if (!storeBreakdown[shopName] || d.price.amount < storeBreakdown[shopName].salePrice) {
+              const dealSale = Number(d.price?.amount ?? 0);
+              const dealRegular = Number(d.regular?.amount ?? dealSale);
+              const dealCut = Number(d.cut ?? 0);
+
+              if (!storeBreakdown[shopName] || dealSale < storeBreakdown[shopName].salePrice) {
                 storeBreakdown[shopName] = {
                   shopName,
-                  salePrice: d.price.amount,
-                  regularPrice: d.regular.amount,
-                  cutPercent: d.cut,
+                  salePrice: dealSale,
+                  regularPrice: dealRegular,
+                  cutPercent: dealCut,
                   url: d.url,
                   expiry: d.expiry || null,
                   currency,
@@ -491,6 +533,8 @@ export async function getGameDealInfo(
                 };
               }
             }
+            alternativeCheckDegraded = false;
+            alternativeCheckStatus = 'confirmed';
           } else {
             alternativeCheckDegraded = true;
             alternativeCheckStatus = 'degraded';
@@ -500,9 +544,6 @@ export async function getGameDealInfo(
             const historyData = (await historyRes.json()) as RawItadHistoryLowItem[];
             historyLow = historyData?.[0]?.low?.price?.amount ?? null;
           }
-        } else {
-          alternativeCheckDegraded = true;
-          alternativeCheckStatus = 'degraded';
         }
       } catch (itadErr: unknown) {
         alternativeCheckDegraded = true;
