@@ -397,35 +397,30 @@ describe('ITAD API Utilities', () => {
         // Prices query
         if (urlStr.includes('/games/prices/v3')) {
           const body = JSON.parse(init?.body || '[]');
+          const results = [];
           if (body.includes('uuid-witcher3-base')) {
             // Base game on ITAD only returns Steam
-            return {
-              ok: true,
-              json: async () => [
-                {
-                  id: 'uuid-witcher3-base',
-                  deals: [
-                    { shop: { name: 'Steam' }, price: { amount: 49.99 }, regular: { amount: 49.99 }, cut: 0, url: 'https://steam.com/witcher' },
-                  ],
-                },
+            results.push({
+              id: 'uuid-witcher3-base',
+              deals: [
+                { shop: { name: 'Steam' }, price: { amount: 49.99 }, regular: { amount: 49.99 }, cut: 0, url: 'https://steam.com/witcher' },
               ],
-            };
+            });
           }
           if (body.includes('uuid-witcher3-complete')) {
             // Secondary edition returns GOG and Epic Games Store
-            return {
-              ok: true,
-              json: async () => [
-                {
-                  id: 'uuid-witcher3-complete',
-                  deals: [
-                    { shop: { name: 'GOG' }, price: { amount: 12.49 }, regular: { amount: 49.99 }, cut: 75, url: 'https://gog.com/witcher' },
-                    { shop: { name: 'Epic Games Store' }, price: { amount: 14.99 }, regular: { amount: 49.99 }, cut: 70, url: 'https://epic.com/witcher' },
-                  ],
-                },
+            results.push({
+              id: 'uuid-witcher3-complete',
+              deals: [
+                { shop: { name: 'GOG' }, price: { amount: 12.49 }, regular: { amount: 49.99 }, cut: 75, url: 'https://gog.com/witcher' },
+                { shop: { name: 'Epic Games Store' }, price: { amount: 14.99 }, regular: { amount: 49.99 }, cut: 70, url: 'https://epic.com/witcher' },
               ],
-            };
+            });
           }
+          return {
+            ok: true,
+            json: async () => results,
+          };
         }
         if (urlStr.includes('/games/historylow/v1')) {
           return {
