@@ -5,6 +5,7 @@ import {
   getMarketOverviewDeals,
   getGameDealInfo,
   sanitizeTitleForItadLookup,
+  isStrictEditionMatch,
 } from '../../src/utils/itadApi.js';
 
 describe('ITAD API Utilities', () => {
@@ -16,6 +17,39 @@ describe('ITAD API Utilities', () => {
       expect(sanitizeTitleForItadLookup('Lords Of The Fallen™ 2014')).toBe('Lords Of The Fallen 2014');
       expect(sanitizeTitleForItadLookup('ARC Raiders - Deluxe Edition')).toBe('ARC Raiders');
       expect(sanitizeTitleForItadLookup('Cyberpunk 2077®')).toBe('Cyberpunk 2077');
+    });
+  });
+
+  describe('isStrictEditionMatch', () => {
+    it('should accept identical titles regardless of case or whitespace', () => {
+      expect(isStrictEditionMatch('Hades', 'hades')).toBe(true);
+      expect(isStrictEditionMatch('REMATCH', 'rematch')).toBe(true);
+      expect(isStrictEditionMatch('The Witcher 3: Wild Hunt', 'the witcher 3: wild hunt')).toBe(true);
+    });
+
+    it('should accept valid edition suffixes after word/punctuation delimiter', () => {
+      expect(isStrictEditionMatch('The Witcher 3: Wild Hunt', 'The Witcher 3: Wild Hunt - Complete Edition')).toBe(true);
+      expect(isStrictEditionMatch('The Witcher 3: Wild Hunt', 'The Witcher 3: Wild Hunt: Complete Edition')).toBe(true);
+      expect(isStrictEditionMatch('The Witcher 3: Wild Hunt', 'The Witcher 3: Wild Hunt Complete Edition')).toBe(true);
+      expect(isStrictEditionMatch('The Witcher 3: Wild Hunt', 'The Witcher 3: Wild Hunt - Game of the Year Edition')).toBe(true);
+      expect(isStrictEditionMatch('The Witcher 3: Wild Hunt', 'The Witcher 3: Wild Hunt: GOTY Edition')).toBe(true);
+      expect(isStrictEditionMatch('Cyberpunk 2077', 'Cyberpunk 2077: Ultimate Edition')).toBe(true);
+      expect(isStrictEditionMatch('Control', 'Control Ultimate Edition')).toBe(true);
+      expect(isStrictEditionMatch('Control', 'Control (Complete Edition)')).toBe(true);
+    });
+
+    it('should strictly reject numbered sequels and prevent cross-contamination', () => {
+      expect(isStrictEditionMatch('Hades', 'Hades II')).toBe(false);
+      expect(isStrictEditionMatch('Hades', 'Hades 2')).toBe(false);
+      expect(isStrictEditionMatch('Hades', "Hades' Star")).toBe(false);
+      expect(isStrictEditionMatch('Hades', 'The Road to Hades')).toBe(false);
+    });
+
+    it('should reject unrelated games or non-authorized edition names', () => {
+      expect(isStrictEditionMatch('REMATCH', 'REMATCH - Elite Edition')).toBe(false);
+      expect(isStrictEditionMatch('REMATCH', 'Shuttlecock-H: Covered Rematch')).toBe(false);
+      expect(isStrictEditionMatch('The Witcher 3: Wild Hunt', 'The Witcher 3: Wild Hunt - Blood and Wine')).toBe(false);
+      expect(isStrictEditionMatch('The Witcher 3: Wild Hunt', 'The Witcher 3: Wild Hunt — Remastered - Nintendo Switch 2')).toBe(false);
     });
   });
   describe('formatPriceComparisonDiff', () => {
@@ -449,6 +483,154 @@ describe('ITAD API Utilities', () => {
       expect(deal?.cheaperAlternative).toBeDefined();
       expect(deal?.cheaperAlternative?.shopName).toBe('GOG');
       expect(deal?.cheaperAlternative?.salePrice).toBe(12.49);
+    });
+
+    it('should protect authentic Steam title and price overview from being overwritten by ITAD search or candidate deals', async () => {
+      globalThis.fetch = vi.fn(async (url) => {
+        const urlStr = String(url);
+        // Valve Steam Store official API returns REMATCH at $15.99 (-60% off $39.99)
+        if (urlStr.includes('store.steampowered.com/api/appdetails')) {
+          return {
+            ok: true,
+            json: async () => ({
+              '2138720': {
+                success: true,
+                data: {
+                  name: 'REMATCH',
+                  price_overview: { initial: 3999, final: 1599, discount_percent: 60 },
+                },
+              },
+            }),
+          };
+        }
+        // ITAD lookup returns primary ID
+        if (urlStr.includes('/games/lookup/v1')) {
+          return {
+            ok: true,
+            json: async () => ({
+              found: true,
+              game: { id: 'uuid-rematch-base', title: 'REMATCH' },
+            }),
+          };
+        }
+        // ITAD search returns REMATCH and an unrelated game that should be filtered
+        if (urlStr.includes('/games/search/v1')) {
+          return {
+            ok: true,
+            json: async () => [
+              { id: 'uuid-rematch-base', title: 'REMATCH', type: 'game' },
+              { id: 'uuid-cheap-fake', title: 'Shuttlecock-H: Covered Rematch', type: 'game' },
+              { id: 'uuid-hades-ii', title: 'Hades II', type: 'game' },
+            ],
+          };
+        }
+        // ITAD prices/v3 returns stale Steam price of $29.99 (0% cut) and an Epic deal
+        if (urlStr.includes('/games/prices/v3')) {
+          return {
+            ok: true,
+            json: async () => [
+              {
+                id: 'uuid-rematch-base',
+                deals: [
+                  { shop: { name: 'Steam' }, price: { amount: 29.99 }, regular: { amount: 29.99 }, cut: 0, url: 'https://steam.com' },
+                  { shop: { name: 'Epic Games Store' }, price: { amount: 29.99 }, regular: { amount: 29.99 }, cut: 0, url: 'https://epic.com' },
+                ],
+              },
+            ],
+          };
+        }
+        if (urlStr.includes('/games/historylow/v1')) {
+          return {
+            ok: true,
+            json: async () => [{ id: 'uuid-rematch-base', low: { price: { amount: 15.99 } } }],
+          };
+        }
+        return { ok: false };
+      });
+
+      const deal = await getGameDealInfo('2138720', 'USD');
+
+      expect(deal).toBeDefined();
+      // Steam Title must strictly remain official name from Valve
+      expect(deal?.title).toBe('REMATCH');
+
+      // Authentic Steam promotional price overview ($15.99, -60%) MUST NOT be overwritten by ITAD's $29.99
+      expect(deal?.storeBreakdown['Steam']).toBeDefined();
+      expect(deal?.storeBreakdown['Steam'].salePrice).toBe(15.99);
+      expect(deal?.storeBreakdown['Steam'].regularPrice).toBe(39.99);
+      expect(deal?.storeBreakdown['Steam'].cutPercent).toBe(60);
+
+      expect(deal?.primaryDeal.shopName).toBe('Steam');
+      expect(deal?.primaryDeal.salePrice).toBe(15.99);
+      expect(deal?.primaryDeal.cutPercent).toBe(60);
+    });
+
+    it('should strictly reject Hades II and retain authentic Hades title for AppID 1145360', async () => {
+      globalThis.fetch = vi.fn(async (url) => {
+        const urlStr = String(url);
+        if (urlStr.includes('store.steampowered.com/api/appdetails')) {
+          return {
+            ok: true,
+            json: async () => ({
+              '1145360': {
+                success: true,
+                data: {
+                  name: 'Hades',
+                  price_overview: { initial: 2499, final: 2499, discount_percent: 0 },
+                },
+              },
+            }),
+          };
+        }
+        if (urlStr.includes('/games/lookup/v1')) {
+          return {
+            ok: true,
+            json: async () => ({
+              found: true,
+              game: { id: 'uuid-hades-1', title: 'Hades' },
+            }),
+          };
+        }
+        if (urlStr.includes('/games/search/v1')) {
+          return {
+            ok: true,
+            json: async () => [
+              { id: 'uuid-hades-1', title: 'Hades', type: 'game' },
+              { id: 'uuid-hades-2', title: 'Hades II', type: 'game' },
+              { id: 'uuid-hades-star', title: "Hades' Star", type: 'game' },
+            ],
+          };
+        }
+        if (urlStr.includes('/games/prices/v3')) {
+          return {
+            ok: true,
+            json: async () => [
+              {
+                id: 'uuid-hades-1',
+                deals: [
+                  { shop: { name: 'Steam' }, price: { amount: 24.99 }, regular: { amount: 24.99 }, cut: 0, url: 'https://steam.com' },
+                  { shop: { name: 'Epic Games Store' }, price: { amount: 24.99 }, regular: { amount: 24.99 }, cut: 0, url: 'https://epic.com' },
+                ],
+              },
+            ],
+          };
+        }
+        if (urlStr.includes('/games/historylow/v1')) {
+          return {
+            ok: true,
+            json: async () => [{ id: 'uuid-hades-1', low: { price: { amount: 12.49 } } }],
+          };
+        }
+        return { ok: false };
+      });
+
+      const deal = await getGameDealInfo('1145360', 'USD');
+
+      expect(deal).toBeDefined();
+      // AppID 1145360 must strictly remain Hades, never overwritten with Hades II
+      expect(deal?.title).toBe('Hades');
+      expect(deal?.storeBreakdown['Steam'].salePrice).toBe(24.99);
+      expect(deal?.storeBreakdown['Epic Games Store'].salePrice).toBe(24.99);
     });
   });
 });

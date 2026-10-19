@@ -108,6 +108,54 @@ export function sanitizeTitleForItadLookup(rawTitle: string): string {
 }
 
 /**
+ * Strictly verifies whether a candidate title from ITAD search is either an exact match
+ * to baseTitle or starts with baseTitle followed strictly by an authorized edition suffix.
+ * Prevents sequel cross-contamination (e.g. "Hades II" when searching "Hades") and unrelated games.
+ */
+export function isStrictEditionMatch(baseTitle: string, candidateTitle: string): boolean {
+  if (!baseTitle || !candidateTitle) return false;
+
+  const normalize = (str: string): string =>
+    str
+      .replace(/[™®©]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+
+  const baseNorm = normalize(baseTitle);
+  const candNorm = normalize(candidateTitle);
+
+  // a) Identical match
+  if (candNorm === baseNorm) {
+    return true;
+  }
+
+  // b) Starts with baseTitle.toLowerCase()
+  if (!candNorm.startsWith(baseNorm)) {
+    return false;
+  }
+
+  const remainder = candNorm.slice(baseNorm.length);
+
+  // Must have a whitespace, punctuation, or parenthesis delimiter separating baseTitle from the suffix
+  if (!/^[\s\-–—:(]/.test(remainder)) {
+    return false;
+  }
+
+  // Strip leading and trailing delimiter characters, parentheses, and whitespace
+  const cleanSuffix = remainder
+    .replace(/^[\s\-–—:(]+/, '')
+    .replace(/[\s)]+$/, '')
+    .trim();
+
+  // Valid edition suffixes: complete, goty, deluxe, ultimate, definitive, enhanced, anniversary, etc.
+  const VALID_EDITION_PATTERN =
+    /^(?:complete(?:\s+edition)?|game\s+of\s+the\s+year(?:\s+edition)?|goty(?:\s+edition)?|deluxe(?:\s+edition)?|ultimate(?:\s+edition)?|definitive(?:\s+edition)?|enhanced(?:\s+edition)?|anniversary(?:\s+edition)?|special\s+edition|gold\s+edition|director'?s\s+cut)$/i;
+
+  return VALID_EDITION_PATTERN.test(cleanSuffix);
+}
+
+/**
  * Formats a deal expiration timestamp into a dynamic Discord timestamp tag or friendly fallback.
  */
 export function formatExpiryAvailability(expiry: string | number | Date | null | undefined): string {
@@ -317,8 +365,10 @@ interface RawSteamAppDetailsMap {
 }
 
 interface RawItadLookupResponse {
+  found?: boolean;
   game?: {
     id?: string;
+    title?: string;
   };
 }
 
@@ -432,7 +482,7 @@ export async function getGameDealInfo(
     })();
 
     const itadLookupPromise = (async () => {
-      if (!itadKey || itadGameId) return itadGameId;
+      if (!itadKey || itadGameId) return { id: itadGameId, title: null };
       try {
         const lookupParam = steamAppId
           ? `appid=${steamAppId}`
@@ -450,7 +500,10 @@ export async function getGameDealInfo(
 
         if (lookupRes.ok) {
           const lookupData = (await lookupRes.json()) as RawItadLookupResponse;
-          return lookupData?.game?.id || null;
+          return {
+            id: lookupData?.game?.id || null,
+            title: lookupData?.game?.title || null,
+          };
         }
       } catch (lookupErr: unknown) {
         const msg = lookupErr instanceof Error ? lookupErr.message : String(lookupErr);
@@ -459,14 +512,24 @@ export async function getGameDealInfo(
       return null;
     })();
 
-    const [appDetails, resolvedLookupId] = await Promise.all([steamPromise, itadLookupPromise]);
+    const [appDetails, resolvedLookup] = await Promise.all([steamPromise, itadLookupPromise]);
+
+    const resolvedLookupId = resolvedLookup?.id || null;
+    const resolvedLookupTitle = resolvedLookup?.title || null;
+
+    let officialSteamTitle: string | null = null;
+    let hasOfficialSteamPrice = false;
 
     if (appDetails) {
-      title = appDetails.name || title;
+      if (appDetails.name) {
+        officialSteamTitle = appDetails.name;
+        title = appDetails.name;
+      }
       bannerImage = appDetails.header_image || null;
       reviewScore = appDetails.metacritic?.score ?? null;
 
       if (appDetails.is_free) {
+        hasOfficialSteamPrice = true;
         steamDeal = {
           shopName: 'Steam',
           salePrice: 0,
@@ -478,6 +541,7 @@ export async function getGameDealInfo(
           currencySymbol,
         };
       } else if (appDetails.price_overview) {
+        hasOfficialSteamPrice = true;
         steamDeal = {
           shopName: 'Steam',
           salePrice: appDetails.price_overview.final / 100,
@@ -494,6 +558,9 @@ export async function getGameDealInfo(
     if (resolvedLookupId) {
       itadGameId = resolvedLookupId;
     }
+    if (!title && resolvedLookupTitle) {
+      title = resolvedLookupTitle;
+    }
 
     // 2. Query ITAD for multi-store comparison (Nuuvem, GOG, Epic) and Historical Low
     let historyLow: number | null = null;
@@ -507,62 +574,76 @@ export async function getGameDealInfo(
     let alternativeCheckDegraded = false;
     let secondarySearchExecuted = false;
 
+    const rawSearchTitle = officialSteamTitle || resolvedLookupTitle || titleFallback || title;
+    const baseTitle = sanitizeTitleForItadLookup(rawSearchTitle);
+
     if (itadKey) {
+      const primaryItadId = itadGameId || resolvedLookupId || null;
       const candidateItadIds: string[] = [];
-      if (itadGameId) {
-        candidateItadIds.push(itadGameId);
+      const secondaryEditionIds = new Set<string>();
+
+      if (primaryItadId) {
+        candidateItadIds.push(primaryItadId);
       }
 
       // Step 2. Secondary Edition / Package Search via sanitized title:
-      // Once the game title is known, ALWAYS run /games/search/v1?title=<sanitizedTitle>&results=5
-      // so we gather BOTH the base game UUID and any edition/package UUIDs in candidateItadIds
-      if (title && title !== 'Monitored Title') {
-        const cleanTitle = sanitizeTitleForItadLookup(title);
-        if (cleanTitle && cleanTitle.length > 1) {
-          try {
-            const secSearchUrl = `${ITAD_BASE_URL}/games/search/v1?key=${itadKey}&title=${encodeURIComponent(cleanTitle)}&results=5`;
-            const secSearchRes = await fetch(secSearchUrl, {
-              headers: { 'User-Agent': USER_AGENT },
-              signal: controller.signal,
-            });
+      // Once authentic game title is known, query /games/search/v1?title=<sanitizedTitle>&results=5
+      // and strictly accept only exact matches or valid edition suffixes to prevent cross-contamination.
+      if (baseTitle && baseTitle !== 'Monitored Title' && baseTitle.length > 1) {
+        try {
+          const secSearchUrl = `${ITAD_BASE_URL}/games/search/v1?key=${itadKey}&title=${encodeURIComponent(baseTitle)}&results=5`;
+          const secSearchRes = await fetch(secSearchUrl, {
+            headers: { 'User-Agent': USER_AGENT },
+            signal: controller.signal,
+          });
 
-            if (secSearchRes.ok) {
-              secondarySearchExecuted = true;
-              const searchItems = (await secSearchRes.json()) as RawItadSearchItem[];
-              if (Array.isArray(searchItems)) {
-                for (const sItem of searchItems) {
-                  if (!sItem.id || candidateItadIds.includes(sItem.id)) {
-                    continue;
+          if (secSearchRes.ok) {
+            secondarySearchExecuted = true;
+            const searchItems = (await secSearchRes.json()) as RawItadSearchItem[];
+            if (Array.isArray(searchItems)) {
+              for (const sItem of searchItems) {
+                if (!sItem.id || !sItem.title) {
+                  continue;
+                }
+                if (sItem.type === 'dlc') {
+                  continue;
+                }
+                if (candidateItadIds.includes(sItem.id)) {
+                  continue;
+                }
+
+                let isNonGame = false;
+                for (const pattern of NON_GAME_PATTERNS) {
+                  if (pattern.test(sItem.title)) {
+                    isNonGame = true;
+                    break;
                   }
-                  if (sItem.type && sItem.type !== 'game') {
-                    continue;
+                }
+                if (isNonGame) continue;
+
+                // Strict edition-only matching: identical or baseTitle + valid edition suffix
+                if (isStrictEditionMatch(baseTitle, sItem.title)) {
+                  candidateItadIds.push(sItem.id);
+                  if (sItem.id !== primaryItadId) {
+                    secondaryEditionIds.add(sItem.id);
                   }
-                  let isNonGame = false;
-                  for (const pattern of NON_GAME_PATTERNS) {
-                    if (pattern.test(sItem.title || '')) {
-                      isNonGame = true;
-                      break;
-                    }
-                  }
-                  if (!isNonGame) {
-                    candidateItadIds.push(sItem.id);
-                    if (candidateItadIds.length >= 4) break;
-                  }
+                  if (candidateItadIds.length >= 4) break;
                 }
               }
             }
-          } catch (secSearchErr: unknown) {
-            console.warn(
-              'ITAD secondary search error:',
-              secSearchErr instanceof Error ? secSearchErr.message : String(secSearchErr),
-            );
           }
+        } catch (secSearchErr: unknown) {
+          console.warn(
+            'ITAD secondary search error:',
+            secSearchErr instanceof Error ? secSearchErr.message : String(secSearchErr),
+          );
         }
       }
 
       // If appid lookup failed but title search returned IDs, use the first as primary ITAD ID
       if (!itadGameId && candidateItadIds.length > 0) {
         itadGameId = candidateItadIds[0];
+        secondaryEditionIds.delete(candidateItadIds[0]);
       }
 
       // Step 3. Query all candidate UUIDs in a SINGLE /games/prices/v3 batch call
@@ -590,9 +671,30 @@ export async function getGameDealInfo(
           if (priceRes.ok) {
             const priceData = (await priceRes.json()) as RawItadPriceOverviewItem[];
             for (const item of priceData || []) {
+              const isSecondaryEdition = item.id ? secondaryEditionIds.has(item.id) : false;
+
               for (const d of item.deals || []) {
                 const shopName = resolveStoreName(d.shop?.name);
                 if (!shopName) continue; // STRICTLY IGNORE outside our 4 approved stores
+
+                // Protect Steam Store pricing and enforce secondary edition merge policy
+                if (isSecondaryEdition) {
+                  // Secondary edition UUIDs: ONLY merge non-Steam storefronts (GOG, Epic Games Store, Nuuvem)
+                  // that are not already present from the primary itadLookup UUID!
+                  if (shopName === 'Steam') {
+                    continue;
+                  }
+                  if (storeBreakdown[shopName]) {
+                    continue;
+                  }
+                } else {
+                  // Primary ITAD deal:
+                  // NEVER allow ITAD deals for "Steam" to overwrite a valid promotional price_overview
+                  // returned directly by Valve's Steam Store API!
+                  if (shopName === 'Steam' && hasOfficialSteamPrice) {
+                    continue;
+                  }
+                }
 
                 const dealSale = Number(d.price?.amount ?? 0);
                 const dealRegular = Number(d.regular?.amount ?? dealSale);
@@ -703,7 +805,7 @@ export async function getGameDealInfo(
 
     return {
       gameId: steamAppId ? `steam_${steamAppId}` : (itadGameId || rawGameIdentifier),
-      title: title || 'Monitored Title',
+      title: officialSteamTitle || title || 'Monitored Title',
       imageUrl: bannerImage,
       reviewScore,
       steamAppId,
