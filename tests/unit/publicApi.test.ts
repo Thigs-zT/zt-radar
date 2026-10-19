@@ -573,7 +573,7 @@ describe('Public Web API Handler', () => {
     it('should return cached multi-store telemetry immediately from DynamoDB when fresh cache exists', async () => {
       const nowSec = Math.floor(Date.now() / 1000);
       const cachedTelemetry = {
-        PK: 'MARKET#1086940#USD',
+        PK: 'MARKET#v2#1086940#USD',
         SK: 'TELEMETRY',
         appId: '1086940',
         gameId: 'steam_1086940',
@@ -668,7 +668,7 @@ describe('Public Web API Handler', () => {
     it('should bypass cache and fetch live data when cached record is degraded', async () => {
       const nowSec = Math.floor(Date.now() / 1000);
       const degradedCached = {
-        PK: 'MARKET#1086940#USD',
+        PK: 'MARKET#v2#1086940#USD',
         SK: 'TELEMETRY',
         appId: '1086940',
         title: "Baldur's Gate 3 (Degraded)",
@@ -705,6 +705,47 @@ describe('Public Web API Handler', () => {
       expect(getGameDealInfo).toHaveBeenCalledWith('1086940', 'USD');
     });
 
+    it('should bypass cache and fetch live data when cached record has only 1 store and is not platform exclusive', async () => {
+      const nowSec = Math.floor(Date.now() / 1000);
+      const singleStoreCached = {
+        PK: 'MARKET#v2#1086940#USD',
+        SK: 'TELEMETRY',
+        appId: '1086940',
+        title: "Baldur's Gate 3 (Single Store Poisoned)",
+        storeBreakdown: {
+          Steam: { shopName: 'Steam', salePrice: 59.99, regularPrice: 59.99, cutPercent: 0, url: '', expiry: null, currency: 'USD', currencySymbol: '$' },
+        },
+        alternativeCheckStatus: 'confirmed',
+        alternativeCheckDegraded: false, // Poisoned: marked false despite only 1 store
+        isPlatformExclusive: false,
+        ttl: nowSec + 1800,
+      };
+
+      ddbMock.on(QueryCommand).resolves({
+        Items: [singleStoreCached],
+      });
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/market/{appId}',
+        rawPath: '/public/market/1086940',
+        pathParameters: {
+          appId: '1086940',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/market/1086940',
+          },
+        },
+      };
+
+      const response = await handler(event);
+
+      expect(response.statusCode).toBe(200);
+      // Verify getGameDealInfo WAS called because single-store non-exclusive was rejected
+      expect(getGameDealInfo).toHaveBeenCalledWith('1086940', 'USD');
+    });
+
     it('should persist live telemetry to DynamoDB cache when alternativeCheckDegraded is false', async () => {
       const event: HttpApiEvent = {
         routeKey: 'GET /public/market/{appId}',
@@ -726,7 +767,7 @@ describe('Public Web API Handler', () => {
       const putCalls = ddbMock.commandCalls(PutCommand);
       expect(putCalls.length).toBeGreaterThanOrEqual(1);
 
-      const marketPut = putCalls.find((call) => call.args[0].input.Item?.PK === 'MARKET#1086940#USD');
+      const marketPut = putCalls.find((call) => call.args[0].input.Item?.PK === 'MARKET#v2#1086940#USD');
       expect(marketPut).toBeDefined();
       expect(marketPut?.args[0].input.Item?.SK).toBe('TELEMETRY');
       expect(marketPut?.args[0].input.Item?.alternativeCheckDegraded).toBe(false);
@@ -758,7 +799,7 @@ describe('Public Web API Handler', () => {
 
       expect(response.statusCode).toBe(200);
       const putCalls = ddbMock.commandCalls(PutCommand);
-      const marketPut = putCalls.find((call) => call.args[0].input.Item?.PK === 'MARKET#1086940#USD');
+      const marketPut = putCalls.find((call) => call.args[0].input.Item?.PK === 'MARKET#v2#1086940#USD');
       expect(marketPut).toBeUndefined();
     });
   });
@@ -1030,6 +1071,52 @@ describe('Public Web API Handler', () => {
         const data = JSON.parse(response.body);
         expect(Array.isArray(data)).toBe(true);
         expect(data.length).toBe(0);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+
+    it('should prioritize exact case-insensitive title match over fuzzy top matches when q parameter is provided', async () => {
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = vi.fn(async (url) => {
+        const urlStr = String(url);
+        if (urlStr.includes('store.steampowered.com/api/storesearch')) {
+          return {
+            ok: true,
+            json: async () => ({
+              total: 2,
+              items: [
+                { id: 1145350, name: 'Hades II', type: 'app' },
+                { id: 1145360, name: 'Hades', type: 'app' },
+              ],
+            }),
+          } as Response;
+        }
+        return originalFetch(url);
+      });
+
+      try {
+        const event: HttpApiEvent = {
+          routeKey: 'GET /public/market',
+          rawPath: '/public/market',
+          queryStringParameters: {
+            q: 'hades',
+          },
+          requestContext: {
+            http: {
+              method: 'GET',
+              path: '/public/market',
+            },
+          },
+        };
+
+        const response = await handler(event);
+
+        expect(response.statusCode).toBe(200);
+        const data = JSON.parse(response.body);
+        expect(Array.isArray(data)).toBe(true);
+        expect(data.length).toBe(1);
+        expect(data[0].appId).toBe('1145360');
       } finally {
         globalThis.fetch = originalFetch;
       }
@@ -2705,6 +2792,28 @@ describe('Public Web API Handler', () => {
       expect(data.error).toBe('InternalServerError');
 
       consoleSpy.mockRestore();
+    });
+  });
+
+  describe('buildMarketTelemetryPlaceholder', () => {
+    it('should return unreleased placeholder with null prices and zero synthetic numbers in USD and BRL', () => {
+      const placeholderUsd = buildMarketTelemetryPlaceholder('1857810', 'USD');
+      expect(placeholderUsd.appId).toBe('1857810');
+      expect(placeholderUsd.isUnreleased).toBe(true);
+      expect(placeholderUsd.salePrice).toBeNull();
+      expect(placeholderUsd.regularPrice).toBeNull();
+      expect(placeholderUsd.allTimeLowPrice).toBeNull();
+      expect(placeholderUsd.primaryDeal?.salePrice).toBeNull();
+      expect(placeholderUsd.primaryDeal?.regularPrice).toBeNull();
+      expect(placeholderUsd.primaryDeal?.currency).toBe('USD');
+
+      const placeholderBrl = buildMarketTelemetryPlaceholder('1857810', 'BRL');
+      expect(placeholderBrl.appId).toBe('1857810');
+      expect(placeholderBrl.isUnreleased).toBe(true);
+      expect(placeholderBrl.salePrice).toBeNull();
+      expect(placeholderBrl.regularPrice).toBeNull();
+      expect(placeholderBrl.primaryDeal?.currency).toBe('BRL');
+      expect(placeholderBrl.primaryDeal?.currencySymbol).toBe('R$');
     });
   });
 });

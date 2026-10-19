@@ -477,6 +477,10 @@ describe('batchFetchSteamAppPrices', () => {
           // price_overview is intentionally undefined for unreleased title
         },
       },
+      '1857810': {
+        success: true,
+        data: [],
+      },
       '999999': {
         success: false,
       },
@@ -487,7 +491,7 @@ describe('batchFetchSteamAppPrices', () => {
       json: async () => mockStoreResponse,
     });
 
-    const priceMap = await batchFetchSteamAppPrices([570, 1086940, 2807960, 999999, 888888], 'us');
+    const priceMap = await batchFetchSteamAppPrices([570, 1086940, 2807960, 1857810, 999999, 888888], 'us');
 
     expect(fetchSpy).toHaveBeenCalled();
 
@@ -533,6 +537,15 @@ describe('batchFetchSteamAppPrices', () => {
     expect(omitted?.isFree).toBe(false);
     expect(omitted?.isUnreleased).toBe(true);
     expect(omitted?.headerImage).toContain('888888');
+
+    // 6. Unannounced/unpriced title returning data: [] (must never be treated as free)
+    const dbx = priceMap.get(1857810);
+    expect(dbx).toBeDefined();
+    expect(dbx?.isFree).toBe(false);
+    expect(dbx?.isUnreleased).toBe(true);
+    expect(dbx?.salePrice).toBeNull();
+    expect(dbx?.regularPrice).toBeNull();
+    expect(dbx?.discountPercent).toBe(0);
 
     fetchSpy.mockRestore();
   });

@@ -152,15 +152,12 @@ export function buildMarketTelemetryPlaceholder(
   const isBrl = (preferredCurrency || '').toUpperCase().trim() === 'BRL';
   const currency = isBrl ? 'BRL' : 'USD';
   const currencySymbol = isBrl ? 'R$' : '$';
-  const regularPrice = isBrl ? 149.99 : 29.99;
-  const salePrice = isBrl ? 74.99 : 19.99;
-  const cutPercent = isBrl ? 50 : 33;
 
   const defaultDeal: StoreDeal = {
     shopName: 'Steam',
-    salePrice,
-    regularPrice,
-    cutPercent,
+    salePrice: null as unknown as number,
+    regularPrice: null as unknown as number,
+    cutPercent: 0,
     url: storeUrl,
     expiry: null,
     currency,
@@ -172,12 +169,15 @@ export function buildMarketTelemetryPlaceholder(
     gameId: `steam_${cleanAppId}`,
     title,
     imageUrl: bannerUrl,
-    reviewScore: 80,
+    reviewScore: null,
     steamAppId: cleanAppId,
     dealType: 'CURATED_DEAL',
     isAllTimeLow: false,
-    allTimeLowPrice: salePrice,
+    allTimeLowPrice: null,
     expiry: null,
+    isUnreleased: true,
+    salePrice: null,
+    regularPrice: null,
     primaryDeal: defaultDeal,
     cheaperAlternative: null,
     storeBreakdown: {
@@ -191,7 +191,7 @@ export function buildMarketTelemetryPlaceholder(
 
 /**
  * Resolves live market telemetry and multi-store deal intelligence for a specific Steam title.
- * Checks DynamoDB DealsTable (PK: MARKET#${appId}#${currency}, SK: TELEMETRY) for cached un-degraded multi-store telemetry.
+ * Checks DynamoDB DealsTable (PK: MARKET#v2#${appId}#${currency}, SK: TELEMETRY) for cached un-degraded multi-store telemetry.
  * If cache miss or degraded, queries live intelligence and persists to cache for 30 minutes when healthy.
  * Gracefully falls back to clean default telemetry on timeout or API unavailability.
  */
@@ -214,7 +214,7 @@ export async function resolveMarketTelemetry(
           TableName: tableName,
           KeyConditionExpression: 'PK = :pk AND SK = :sk',
           ExpressionAttributeValues: {
-            ':pk': `MARKET#${cleanAppId}#${currency}`,
+            ':pk': `MARKET#v2#${cleanAppId}#${currency}`,
             ':sk': 'TELEMETRY',
           },
           Limit: 1,
@@ -225,7 +225,9 @@ export async function resolveMarketTelemetry(
         const cached = cacheResult.Items[0] as PublicMarketTelemetry & { ttl?: number };
         const isFresh = !cached.ttl || cached.ttl > nowSec;
         const storeCount = Object.keys(cached.storeBreakdown || {}).length;
-        const isHealthy = cached.alternativeCheckDegraded === false || storeCount > 1;
+        const isHealthy =
+          cached.alternativeCheckDegraded === false &&
+          (storeCount > 1 || cached.isPlatformExclusive === true);
 
         if (isFresh && isHealthy) {
           return {
@@ -244,6 +246,10 @@ export async function resolveMarketTelemetry(
             storeBreakdown: cached.storeBreakdown,
             alternativeCheckStatus: cached.alternativeCheckStatus || 'confirmed',
             alternativeCheckDegraded: false,
+            isPlatformExclusive: cached.isPlatformExclusive,
+            isUnreleased: cached.isUnreleased,
+            salePrice: cached.salePrice ?? cached.primaryDeal?.salePrice ?? null,
+            regularPrice: cached.regularPrice ?? cached.primaryDeal?.regularPrice ?? null,
             updatedAt: cached.updatedAt || new Date().toISOString(),
           };
         }
@@ -289,17 +295,26 @@ export async function resolveMarketTelemetry(
         storeBreakdown,
         alternativeCheckStatus: dealInfo.alternativeCheckStatus || 'confirmed',
         alternativeCheckDegraded: dealInfo.alternativeCheckDegraded ?? false,
+        isPlatformExclusive: dealInfo.isPlatformExclusive,
+        isUnreleased: dealInfo.isUnreleased,
+        salePrice: primaryDeal.salePrice,
+        regularPrice: primaryDeal.regularPrice,
         updatedAt: new Date().toISOString(),
       };
 
-      // 3. Cache only if alternativeCheckDegraded is false (un-degraded multi-store data)
-      if (tableName && ddbDocClient && telemetry.alternativeCheckDegraded === false) {
+      // 3. Cache only if healthy multi-store data or confirmed platform exclusive
+      const storeCount = Object.keys(storeBreakdown).length;
+      const isHealthy =
+        telemetry.alternativeCheckDegraded === false &&
+        (storeCount > 1 || telemetry.isPlatformExclusive === true);
+
+      if (tableName && ddbDocClient && isHealthy) {
         try {
           await ddbDocClient.send(
             new PutCommand({
               TableName: tableName,
               Item: {
-                PK: `MARKET#${cleanAppId}#${currency}`,
+                PK: `MARKET#v2#${cleanAppId}#${currency}`,
                 SK: 'TELEMETRY',
                 ...telemetry,
                 ttl: nowSec + 1800, // 30 minutes TTL
@@ -1295,7 +1310,11 @@ export const handler = async (event: HttpApiEvent): Promise<PublicApiResponse> =
               items?: Array<{ id?: number | string; name?: string; type?: string }>;
             };
             const items = searchData?.items || [];
-            const topMatch = items.find((i) => i.id) || items[0];
+            const normalizedQuery = searchQuery.trim().toLowerCase();
+            const exactMatch = items.find(
+              (i) => i.id && i.name && i.name.trim().toLowerCase() === normalizedQuery,
+            );
+            const topMatch = exactMatch || items.find((i) => i.id) || items[0];
 
             if (topMatch?.id) {
               const item = await resolveMarketTelemetry(

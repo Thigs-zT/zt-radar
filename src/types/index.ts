@@ -151,6 +151,10 @@ export interface GameDealInfo {
   alternativeCheckStatus?: 'confirmed' | 'degraded' | 'skipped';
   /** Flag indicating whether the alternative store pricing query was skipped or degraded. */
   alternativeCheckDegraded?: boolean;
+  /** Flag indicating whether the title is exclusive to a single platform/storefront. */
+  isPlatformExclusive?: boolean;
+  /** Flag indicating whether the title is unreleased or unpriced. */
+  isUnreleased?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -683,9 +687,14 @@ export interface SteamSaleStatus {
 // ---------------------------------------------------------------------------
 
 /** Public Market telemetry response for Web / PWA companion. */
-export interface PublicMarketTelemetry extends GameDealInfo {
+export interface PublicMarketTelemetry extends Omit<GameDealInfo, 'primaryDeal'> {
   appId: string;
   updatedAt: string;
+  isPlatformExclusive?: boolean;
+  isUnreleased?: boolean;
+  salePrice?: number | null;
+  regularPrice?: number | null;
+  primaryDeal?: StoreDeal | null;
 }
 
 /** Public Duel payload response retrieved from DynamoDB. */

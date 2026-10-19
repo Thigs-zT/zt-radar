@@ -1340,9 +1340,21 @@ export async function batchFetchSteamAppPrices(
             }
 
             const isArrayEmpty = Array.isArray(appObj.data) && appObj.data.length === 0;
+            if (isArrayEmpty) {
+              priceMap.set(appId, {
+                salePrice: null,
+                regularPrice: null,
+                discountPercent: 0,
+                isFree: false,
+                isUnreleased: true,
+                headerImage: getCanonicalHeaderImageUrl(appId),
+              });
+              continue;
+            }
+
             const appDataObj = !Array.isArray(appObj.data) ? appObj.data : undefined;
-            const headerImage = appDataObj?.header_image;
-            const isFree = Boolean(appDataObj?.is_free) || isArrayEmpty;
+            const headerImage = appDataObj?.header_image || getCanonicalHeaderImageUrl(appId);
+            const isFree = Boolean(appDataObj?.is_free);
             const overview = appDataObj?.price_overview;
 
             if (isFree) {
