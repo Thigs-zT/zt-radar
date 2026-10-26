@@ -191,7 +191,7 @@ export function buildMarketTelemetryPlaceholder(
 
 /**
  * Resolves live market telemetry and multi-store deal intelligence for a specific Steam title.
- * Checks DynamoDB DealsTable (PK: MARKET#v4#${appId}#${currency}, SK: TELEMETRY) for cached un-degraded multi-store telemetry.
+ * Checks DynamoDB DealsTable (PK: MARKET#v5#${appId}#${currency}, SK: TELEMETRY) for cached un-degraded multi-store telemetry.
  * If cache miss or degraded, queries live intelligence and persists to cache for 30 minutes when healthy.
  * Gracefully falls back to clean default telemetry on timeout or API unavailability.
  */
@@ -214,7 +214,7 @@ export async function resolveMarketTelemetry(
           TableName: tableName,
           KeyConditionExpression: 'PK = :pk AND SK = :sk',
           ExpressionAttributeValues: {
-            ':pk': `MARKET#v4#${cleanAppId}#${currency}`,
+            ':pk': `MARKET#v5#${cleanAppId}#${currency}`,
             ':sk': 'TELEMETRY',
           },
           Limit: 1,
@@ -314,7 +314,7 @@ export async function resolveMarketTelemetry(
             new PutCommand({
               TableName: tableName,
               Item: {
-                PK: `MARKET#v4#${cleanAppId}#${currency}`,
+                PK: `MARKET#v5#${cleanAppId}#${currency}`,
                 SK: 'TELEMETRY',
                 ...telemetry,
                 ttl: nowSec + 1800, // 30 minutes TTL

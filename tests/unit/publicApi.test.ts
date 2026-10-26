@@ -573,7 +573,7 @@ describe('Public Web API Handler', () => {
     it('should return cached multi-store telemetry immediately from DynamoDB when fresh cache exists', async () => {
       const nowSec = Math.floor(Date.now() / 1000);
       const cachedTelemetry = {
-        PK: 'MARKET#v4#1086940#USD',
+        PK: 'MARKET#v5#1086940#USD',
         SK: 'TELEMETRY',
         appId: '1086940',
         gameId: 'steam_1086940',
@@ -668,7 +668,7 @@ describe('Public Web API Handler', () => {
     it('should bypass cache and fetch live data when cached record is degraded', async () => {
       const nowSec = Math.floor(Date.now() / 1000);
       const degradedCached = {
-        PK: 'MARKET#v4#1086940#USD',
+        PK: 'MARKET#v5#1086940#USD',
         SK: 'TELEMETRY',
         appId: '1086940',
         title: "Baldur's Gate 3 (Degraded)",
@@ -708,7 +708,7 @@ describe('Public Web API Handler', () => {
     it('should bypass cache and fetch live data when cached record has only 1 store and is not platform exclusive', async () => {
       const nowSec = Math.floor(Date.now() / 1000);
       const singleStoreCached = {
-        PK: 'MARKET#v4#1086940#USD',
+        PK: 'MARKET#v5#1086940#USD',
         SK: 'TELEMETRY',
         appId: '1086940',
         title: "Baldur's Gate 3 (Single Store Poisoned)",
@@ -767,7 +767,7 @@ describe('Public Web API Handler', () => {
       const putCalls = ddbMock.commandCalls(PutCommand);
       expect(putCalls.length).toBeGreaterThanOrEqual(1);
 
-      const marketPut = putCalls.find((call) => call.args[0].input.Item?.PK === 'MARKET#v4#1086940#USD');
+      const marketPut = putCalls.find((call) => call.args[0].input.Item?.PK === 'MARKET#v5#1086940#USD');
       expect(marketPut).toBeDefined();
       expect(marketPut?.args[0].input.Item?.SK).toBe('TELEMETRY');
       expect(marketPut?.args[0].input.Item?.alternativeCheckDegraded).toBe(false);
@@ -799,7 +799,7 @@ describe('Public Web API Handler', () => {
 
       expect(response.statusCode).toBe(200);
       const putCalls = ddbMock.commandCalls(PutCommand);
-      const marketPut = putCalls.find((call) => call.args[0].input.Item?.PK === 'MARKET#v4#1086940#USD');
+      const marketPut = putCalls.find((call) => call.args[0].input.Item?.PK === 'MARKET#v5#1086940#USD');
       expect(marketPut).toBeUndefined();
     });
   });

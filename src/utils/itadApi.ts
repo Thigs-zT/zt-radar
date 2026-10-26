@@ -95,12 +95,13 @@ export function sanitizeTitleForItadLookup(rawTitle: string): string {
   if (!rawTitle) return '';
   return rawTitle
     .replace(/[™®©]/g, '')
+    .replace(/\s*:\s*/g, ': ')
     .replace(
-      /\s*([—–-]\s*)?(game of the year(\s+edition)?|goty(\s+edition)?|complete edition|enhanced edition|remastered|definitive edition|anniversary edition|director's cut|collector's edition|deluxe(\s+edition)?|standard edition|premium edition)\b.*$/i,
+      /\s*([—–\-:]\s*)?(?:(?:the\s+)?telltale\s+)?(game of the year(\s+edition)?|goty(\s+edition)?|complete edition|enhanced edition|remastered|definitive (?:edition|series)|anniversary edition|director's cut|collector's edition|deluxe(\s+edition)?|standard edition|premium edition)\b.*$/i,
       '',
     )
     .replace(
-      /\s*\(\s*(game of the year(\s+edition)?|goty(\s+edition)?|complete edition|enhanced edition|remastered|definitive edition|deluxe(\s+edition)?)\s*\)/i,
+      /\s*\(\s*(game of the year(\s+edition)?|goty(\s+edition)?|complete edition|enhanced edition|remastered|definitive (?:edition|series)|deluxe(\s+edition)?)\s*\)/i,
       '',
     )
     .replace(/\s+/g, ' ')
@@ -118,6 +119,7 @@ export function isStrictEditionMatch(baseTitle: string, candidateTitle: string):
   const normalize = (str: string): string =>
     str
       .replace(/[™®©]/g, '')
+      .replace(/\s*([:\-–—])\s*/g, ' $1 ')
       .replace(/\s+/g, ' ')
       .trim()
       .toLowerCase();
@@ -148,9 +150,9 @@ export function isStrictEditionMatch(baseTitle: string, candidateTitle: string):
     .replace(/[\s)]+$/, '')
     .trim();
 
-  // Valid edition suffixes: complete, goty, deluxe, ultimate, definitive, enhanced, anniversary, etc.
+  // Valid edition suffixes: complete, goty, deluxe, ultimate, definitive (edition/series), enhanced, anniversary, etc.
   const VALID_EDITION_PATTERN =
-    /^(?:complete(?:\s+edition)?|game\s+of\s+the\s+year(?:\s+edition)?|goty(?:\s+edition)?|deluxe(?:\s+edition)?|ultimate(?:\s+edition)?|definitive(?:\s+edition)?|enhanced(?:\s+edition)?|anniversary(?:\s+edition)?|special\s+edition|gold\s+edition|director'?s\s+cut)$/i;
+    /^(?:complete(?:\s+edition)?|game\s+of\s+the\s+year(?:\s+edition)?|goty(?:\s+edition)?|deluxe(?:\s+edition)?|ultimate(?:\s+edition)?|definitive(?:\s+(?:edition|series))?|(?:the\s+)?(?:telltale\s+)?definitive\s+(?:edition|series)|enhanced(?:\s+edition)?|anniversary(?:\s+edition)?|special\s+edition|gold\s+edition|director'?s\s+cut)$/i;
 
   return VALID_EDITION_PATTERN.test(cleanSuffix);
 }
@@ -393,8 +395,8 @@ interface RawItadHistoryLowItem {
   };
 }
 
-const ITAD_MAX_ATTEMPTS = 3;
-const ITAD_RETRY_BASE_DELAY_MS = 250;
+const ITAD_MAX_ATTEMPTS = 2;
+const ITAD_RETRY_BASE_DELAY_MS = 200;
 
 /**
  * Performs an ITAD HTTP request with bounded retries for transient failures
@@ -415,7 +417,7 @@ async function fetchItadWithRetry(url: string, init: RequestInit, signal: AbortS
       const retryAfterSec = Number(res.headers?.get?.('retry-after'));
       const delayMs =
         Number.isFinite(retryAfterSec) && retryAfterSec > 0
-          ? Math.min(retryAfterSec * 1000, 1500)
+          ? Math.min(retryAfterSec * 1000, 1000)
           : ITAD_RETRY_BASE_DELAY_MS * attempt;
       await new Promise((resolve) => setTimeout(resolve, delayMs));
     } catch (err: unknown) {
@@ -613,21 +615,109 @@ export async function getGameDealInfo(
     const baseTitle = sanitizeTitleForItadLookup(rawSearchTitle);
 
     if (itadKey) {
-      const primaryItadId = itadGameId || resolvedLookupId || null;
-      const candidateItadIds: string[] = [];
-      const secondaryEditionIds = new Set<string>();
-      // Set when ITAD discovery (lookup or edition search) failed after retries, so partial
-      // results are never reported as a healthy, fully confirmed multi-store check.
-      let discoveryIncomplete = Boolean(steamAppId) && !itadGameId && resolvedLookup === null;
+      let primaryItadId = itadGameId || resolvedLookupId || null;
+      let primaryPricesSucceeded = false;
 
+      const ingestDeals = (items: RawItadPriceOverviewItem[], isSecondary: boolean) => {
+        for (const item of items || []) {
+          for (const d of item.deals || []) {
+            const shopName = resolveStoreName(d.shop?.name);
+            if (!shopName) continue; // STRICTLY IGNORE outside our 4 approved stores
+
+            // Protect Steam Store pricing and enforce secondary edition merge policy
+            if (isSecondary) {
+              // Secondary edition UUIDs: ONLY merge non-Steam storefronts (GOG, Epic Games Store, Nuuvem)
+              // that are not already present from the primary itadLookup UUID!
+              if (shopName === 'Steam') {
+                continue;
+              }
+              if (storeBreakdown[shopName]) {
+                continue;
+              }
+            } else {
+              // Primary ITAD deal:
+              // NEVER allow ITAD deals for "Steam" to overwrite a valid promotional price_overview
+              // returned directly by Valve's Steam Store API!
+              if (shopName === 'Steam' && hasOfficialSteamPrice) {
+                continue;
+              }
+            }
+
+            const dealSale = Number(d.price?.amount ?? 0);
+            const dealRegular = Number(d.regular?.amount ?? dealSale);
+            const dealCut = Number(d.cut ?? 0);
+
+            if (!storeBreakdown[shopName] || dealSale < storeBreakdown[shopName].salePrice) {
+              storeBreakdown[shopName] = {
+                shopName,
+                salePrice: dealSale,
+                regularPrice: dealRegular,
+                cutPercent: dealCut,
+                url: d.url,
+                expiry: d.expiry || null,
+                currency,
+                currencySymbol,
+              };
+            }
+          }
+        }
+      };
+
+      // Step 2. Immediate query for primary ITAD ID
       if (primaryItadId) {
-        candidateItadIds.push(primaryItadId);
+        try {
+          const priceUrl = `${ITAD_BASE_URL}/games/prices/v3?key=${itadKey}&country=${itadCountry}`;
+          const historyUrl = `${ITAD_BASE_URL}/games/historylow/v1?key=${itadKey}&country=${itadCountry}`;
+
+          const [priceRes, historyRes] = await Promise.all([
+            fetchItadWithRetry(
+              priceUrl,
+              {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'User-Agent': USER_AGENT },
+                body: JSON.stringify([primaryItadId]),
+              },
+              controller.signal,
+            ),
+            fetchItadWithRetry(
+              historyUrl,
+              {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'User-Agent': USER_AGENT },
+                body: JSON.stringify([primaryItadId]),
+              },
+              controller.signal,
+            ),
+          ]);
+
+          if (priceRes.ok) {
+            primaryPricesSucceeded = true;
+            const priceData = (await priceRes.json()) as RawItadPriceOverviewItem[];
+            ingestDeals(priceData, false);
+          } else {
+            alternativeCheckDegraded = true;
+            alternativeCheckStatus = 'degraded';
+          }
+
+          if (historyRes.ok) {
+            const historyData = (await historyRes.json()) as RawItadHistoryLowItem[];
+            historyLow = historyData?.[0]?.low?.price?.amount ?? null;
+          }
+        } catch (primaryErr: unknown) {
+          alternativeCheckDegraded = true;
+          alternativeCheckStatus = 'degraded';
+          const msg = primaryErr instanceof Error ? primaryErr.message : String(primaryErr);
+          console.error('ITAD primary prices/history query error:', msg);
+        }
       }
 
-      // Step 2. Secondary Edition / Package Search via sanitized title:
-      // Once authentic game title is known, query /games/search/v1?title=<sanitizedTitle>&results=5
-      // and strictly accept only exact matches or valid edition suffixes to prevent cross-contamination.
-      if (baseTitle && baseTitle !== 'Monitored Title' && baseTitle.length > 1) {
+      // Step 3 (Conditional Secondary Edition Search):
+      // ONLY run /games/search/v1 + a secondary /games/prices/v3 call IF:
+      // 1) The primary storeBreakdown is missing BOTH GOG and Epic Games Store (e.g. The Witcher 3 292030)
+      //    OR primary lookup failed to find any primaryItadId!
+      const isMissingBothAlternatives = !storeBreakdown['GOG'] && !storeBreakdown['Epic Games Store'];
+
+      if (isMissingBothAlternatives && baseTitle && baseTitle !== 'Monitored Title' && baseTitle.length > 1) {
         try {
           const secSearchUrl = `${ITAD_BASE_URL}/games/search/v1?key=${itadKey}&title=${encodeURIComponent(baseTitle)}&results=5`;
           const secSearchRes = await fetchItadWithRetry(
@@ -636,24 +726,16 @@ export async function getGameDealInfo(
             controller.signal,
           );
 
-          if (!secSearchRes.ok) {
-            discoveryIncomplete = true;
-          }
-
           if (secSearchRes.ok) {
             secondarySearchExecuted = true;
             const searchItems = (await secSearchRes.json()) as RawItadSearchItem[];
+            const secondaryEditionIds: string[] = [];
+
             if (Array.isArray(searchItems)) {
               for (const sItem of searchItems) {
-                if (!sItem.id || !sItem.title) {
-                  continue;
-                }
-                if (sItem.type === 'dlc') {
-                  continue;
-                }
-                if (candidateItadIds.includes(sItem.id)) {
-                  continue;
-                }
+                if (!sItem.id || !sItem.title) continue;
+                if (sItem.type === 'dlc') continue;
+                if (sItem.id === primaryItadId) continue;
 
                 let isNonGame = false;
                 for (const pattern of NON_GAME_PATTERNS) {
@@ -664,19 +746,83 @@ export async function getGameDealInfo(
                 }
                 if (isNonGame) continue;
 
-                // Strict edition-only matching: identical or baseTitle + valid edition suffix
                 if (isStrictEditionMatch(baseTitle, sItem.title)) {
-                  candidateItadIds.push(sItem.id);
-                  if (sItem.id !== primaryItadId) {
-                    secondaryEditionIds.add(sItem.id);
-                  }
-                  if (candidateItadIds.length >= 4) break;
+                  secondaryEditionIds.push(sItem.id);
+                  if (secondaryEditionIds.length >= 3) break;
                 }
+              }
+            }
+
+            // If primary lookup didn't find an ID, use the first matching search result as primary
+            if (!primaryItadId && secondaryEditionIds.length > 0) {
+              primaryItadId = secondaryEditionIds.shift()!;
+              itadGameId = primaryItadId;
+
+              try {
+                const priceUrl = `${ITAD_BASE_URL}/games/prices/v3?key=${itadKey}&country=${itadCountry}`;
+                const historyUrl = `${ITAD_BASE_URL}/games/historylow/v1?key=${itadKey}&country=${itadCountry}`;
+                const [pRes, hRes] = await Promise.all([
+                  fetchItadWithRetry(
+                    priceUrl,
+                    {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json', 'User-Agent': USER_AGENT },
+                      body: JSON.stringify([primaryItadId]),
+                    },
+                    controller.signal,
+                  ),
+                  fetchItadWithRetry(
+                    historyUrl,
+                    {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json', 'User-Agent': USER_AGENT },
+                      body: JSON.stringify([primaryItadId]),
+                    },
+                    controller.signal,
+                  ),
+                ]);
+
+                if (pRes.ok) {
+                  primaryPricesSucceeded = true;
+                  const pData = (await pRes.json()) as RawItadPriceOverviewItem[];
+                  ingestDeals(pData, false);
+                }
+                if (hRes.ok) {
+                  const hData = (await hRes.json()) as RawItadHistoryLowItem[];
+                  historyLow = hData?.[0]?.low?.price?.amount ?? null;
+                }
+              } catch {
+                // Ignore fallback
+              }
+            }
+
+            // If secondary edition IDs exist, fetch prices and merge non-Steam stores
+            if (secondaryEditionIds.length > 0) {
+              try {
+                const secPriceUrl = `${ITAD_BASE_URL}/games/prices/v3?key=${itadKey}&country=${itadCountry}`;
+                const secPriceRes = await fetchItadWithRetry(
+                  secPriceUrl,
+                  {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'User-Agent': USER_AGENT },
+                    body: JSON.stringify(secondaryEditionIds),
+                  },
+                  controller.signal,
+                );
+
+                if (secPriceRes.ok) {
+                  const secPriceData = (await secPriceRes.json()) as RawItadPriceOverviewItem[];
+                  ingestDeals(secPriceData, true);
+                }
+              } catch (secPriceErr: unknown) {
+                console.warn(
+                  'ITAD secondary prices query error:',
+                  secPriceErr instanceof Error ? secPriceErr.message : String(secPriceErr),
+                );
               }
             }
           }
         } catch (secSearchErr: unknown) {
-          discoveryIncomplete = true;
           console.warn(
             'ITAD secondary search error:',
             secSearchErr instanceof Error ? secSearchErr.message : String(secSearchErr),
@@ -684,104 +830,11 @@ export async function getGameDealInfo(
         }
       }
 
-      // If appid lookup failed but title search returned IDs, use the first as primary ITAD ID
-      if (!itadGameId && candidateItadIds.length > 0) {
-        itadGameId = candidateItadIds[0];
-        secondaryEditionIds.delete(candidateItadIds[0]);
-      }
-
-      // Step 3. Query all candidate UUIDs in a SINGLE /games/prices/v3 batch call
-      if (candidateItadIds.length > 0) {
-        try {
-          const priceUrl = `${ITAD_BASE_URL}/games/prices/v3?key=${itadKey}&country=${itadCountry}`;
-          const historyUrl = `${ITAD_BASE_URL}/games/historylow/v1?key=${itadKey}&country=${itadCountry}`;
-          const historyTargetId = itadGameId || candidateItadIds[0];
-
-          const [priceRes, historyRes] = await Promise.all([
-            fetchItadWithRetry(
-              priceUrl,
-              {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'User-Agent': USER_AGENT },
-                body: JSON.stringify(candidateItadIds),
-              },
-              controller.signal,
-            ),
-            fetchItadWithRetry(
-              historyUrl,
-              {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'User-Agent': USER_AGENT },
-                body: JSON.stringify([historyTargetId]),
-              },
-              controller.signal,
-            ),
-          ]);
-
-          if (priceRes.ok) {
-            const priceData = (await priceRes.json()) as RawItadPriceOverviewItem[];
-            for (const item of priceData || []) {
-              const isSecondaryEdition = item.id ? secondaryEditionIds.has(item.id) : false;
-
-              for (const d of item.deals || []) {
-                const shopName = resolveStoreName(d.shop?.name);
-                if (!shopName) continue; // STRICTLY IGNORE outside our 4 approved stores
-
-                // Protect Steam Store pricing and enforce secondary edition merge policy
-                if (isSecondaryEdition) {
-                  // Secondary edition UUIDs: ONLY merge non-Steam storefronts (GOG, Epic Games Store, Nuuvem)
-                  // that are not already present from the primary itadLookup UUID!
-                  if (shopName === 'Steam') {
-                    continue;
-                  }
-                  if (storeBreakdown[shopName]) {
-                    continue;
-                  }
-                } else {
-                  // Primary ITAD deal:
-                  // NEVER allow ITAD deals for "Steam" to overwrite a valid promotional price_overview
-                  // returned directly by Valve's Steam Store API!
-                  if (shopName === 'Steam' && hasOfficialSteamPrice) {
-                    continue;
-                  }
-                }
-
-                const dealSale = Number(d.price?.amount ?? 0);
-                const dealRegular = Number(d.regular?.amount ?? dealSale);
-                const dealCut = Number(d.cut ?? 0);
-
-                if (!storeBreakdown[shopName] || dealSale < storeBreakdown[shopName].salePrice) {
-                  storeBreakdown[shopName] = {
-                    shopName,
-                    salePrice: dealSale,
-                    regularPrice: dealRegular,
-                    cutPercent: dealCut,
-                    url: d.url,
-                    expiry: d.expiry || null,
-                    currency,
-                    currencySymbol,
-                  };
-                }
-              }
-            }
-            alternativeCheckDegraded = discoveryIncomplete;
-            alternativeCheckStatus = discoveryIncomplete ? 'degraded' : 'confirmed';
-          } else {
-            alternativeCheckDegraded = true;
-            alternativeCheckStatus = 'degraded';
-          }
-
-          if (historyRes.ok) {
-            const historyData = (await historyRes.json()) as RawItadHistoryLowItem[];
-            historyLow = historyData?.[0]?.low?.price?.amount ?? null;
-          }
-        } catch (queryErr: unknown) {
-          alternativeCheckDegraded = true;
-          alternativeCheckStatus = 'degraded';
-          const msg = queryErr instanceof Error ? queryErr.message : String(queryErr);
-          console.error('ITAD prices/history query error:', msg);
-        }
-      } else {
+      // Final status: If primary prices succeeded, multi-store check is confirmed!
+      if (primaryPricesSucceeded) {
+        alternativeCheckDegraded = false;
+        alternativeCheckStatus = 'confirmed';
+      } else if (!primaryItadId) {
         alternativeCheckDegraded = true;
         alternativeCheckStatus = 'degraded';
       }

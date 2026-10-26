@@ -17,6 +17,8 @@ describe('ITAD API Utilities', () => {
       expect(sanitizeTitleForItadLookup('Lords Of The Fallen™ 2014')).toBe('Lords Of The Fallen 2014');
       expect(sanitizeTitleForItadLookup('ARC Raiders - Deluxe Edition')).toBe('ARC Raiders');
       expect(sanitizeTitleForItadLookup('Cyberpunk 2077®')).toBe('Cyberpunk 2077');
+      expect(sanitizeTitleForItadLookup('The Walking Dead: The Telltale Definitive Series')).toBe('The Walking Dead');
+      expect(sanitizeTitleForItadLookup('The Walking Dead : The Telltale Definitive Series')).toBe('The Walking Dead');
     });
   });
 
@@ -36,6 +38,9 @@ describe('ITAD API Utilities', () => {
       expect(isStrictEditionMatch('Cyberpunk 2077', 'Cyberpunk 2077: Ultimate Edition')).toBe(true);
       expect(isStrictEditionMatch('Control', 'Control Ultimate Edition')).toBe(true);
       expect(isStrictEditionMatch('Control', 'Control (Complete Edition)')).toBe(true);
+      expect(isStrictEditionMatch('The Walking Dead: The Telltale Definitive Series', 'The Walking Dead : The Telltale Definitive Series')).toBe(true);
+      expect(isStrictEditionMatch('The Walking Dead', 'The Walking Dead: The Telltale Definitive Series')).toBe(true);
+      expect(isStrictEditionMatch('The Walking Dead', 'The Walking Dead : The Telltale Definitive Series')).toBe(true);
     });
 
     it('should strictly reject numbered sequels and prevent cross-contamination', () => {
@@ -692,7 +697,7 @@ describe('ITAD API Utilities', () => {
       expect(deal?.storeBreakdown['Epic Games Store']).toBeDefined();
     });
 
-    it('should report degraded when the ITAD edition search fails after retries instead of claiming a confirmed check', async () => {
+    it('should report degraded when primary ITAD prices query fails after retries', async () => {
       globalThis.fetch = vi.fn(async (url) => {
         const urlStr = String(url);
         if (urlStr.includes('store.steampowered.com/api/appdetails')) {
@@ -709,17 +714,8 @@ describe('ITAD API Utilities', () => {
         if (urlStr.includes('/games/lookup/v1')) {
           return { ok: true, json: async () => ({ found: true, game: { id: 'uuid-w3', title: 'The Witcher 3: Wild Hunt' } }) };
         }
-        if (urlStr.includes('/games/search/v1')) {
-          throw new Error('connect ETIMEDOUT');
-        }
         if (urlStr.includes('/games/prices/v3')) {
-          return {
-            ok: true,
-            status: 200,
-            json: async () => [
-              { id: 'uuid-w3', deals: [{ shop: { name: 'GOG' }, price: { amount: 39.99 }, regular: { amount: 39.99 }, cut: 0, url: 'https://gog.com' }] },
-            ],
-          };
+          throw new Error('connect ETIMEDOUT');
         }
         if (urlStr.includes('/games/historylow/v1')) {
           return { ok: true, status: 200, json: async () => [] };
@@ -731,6 +727,59 @@ describe('ITAD API Utilities', () => {
 
       expect(deal?.alternativeCheckDegraded).toBe(true);
       expect(deal?.alternativeCheckStatus).toBe('degraded');
+    });
+
+    it('should skip secondary search when primary lookup already includes alternative storefronts', async () => {
+      let searchCalled = false;
+      globalThis.fetch = vi.fn(async (url) => {
+        const urlStr = String(url);
+        if (urlStr.includes('store.steampowered.com/api/appdetails')) {
+          return {
+            ok: true,
+            json: async () => ({
+              '1145360': {
+                success: true,
+                data: { name: 'Hades', price_overview: { initial: 2499, final: 2499, discount_percent: 0 } },
+              },
+            }),
+          };
+        }
+        if (urlStr.includes('/games/lookup/v1')) {
+          return { ok: true, json: async () => ({ found: true, game: { id: 'uuid-hades-primary', title: 'Hades' } }) };
+        }
+        if (urlStr.includes('/games/search/v1')) {
+          searchCalled = true;
+          return { ok: true, json: async () => [] };
+        }
+        if (urlStr.includes('/games/prices/v3')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => [
+              {
+                id: 'uuid-hades-primary',
+                deals: [
+                  { shop: { name: 'Steam' }, price: { amount: 24.99 }, regular: { amount: 24.99 }, cut: 0, url: 'https://steam.com' },
+                  { shop: { name: 'Epic Games Store' }, price: { amount: 24.99 }, regular: { amount: 24.99 }, cut: 0, url: 'https://epic.com' },
+                ],
+              },
+            ],
+          };
+        }
+        if (urlStr.includes('/games/historylow/v1')) {
+          return { ok: true, status: 200, json: async () => [] };
+        }
+        return { ok: false, status: 404 };
+      });
+
+      const deal = await getGameDealInfo('1145360', 'USD');
+
+      expect(deal).toBeDefined();
+      expect(deal?.alternativeCheckDegraded).toBe(false);
+      expect(deal?.alternativeCheckStatus).toBe('confirmed');
+      expect(searchCalled).toBe(false);
+      expect(deal?.storeBreakdown['Steam']).toBeDefined();
+      expect(deal?.storeBreakdown['Epic Games Store']).toBeDefined();
     });
   });
 });
