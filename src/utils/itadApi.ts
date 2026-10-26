@@ -590,6 +590,16 @@ export async function getGameDealInfo(
           currencySymbol,
         };
       }
+    } else {
+      // Valve appdetails failed (HTTP 429, timeout, or null response during cold burst)
+      if (resolvedLookupTitle) {
+        title = resolvedLookupTitle;
+      } else if (titleFallback) {
+        title = titleFallback;
+      }
+      if (steamAppId) {
+        bannerImage = `https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/${steamAppId}/header.jpg`;
+      }
     }
 
     if (resolvedLookupId) {
@@ -597,6 +607,9 @@ export async function getGameDealInfo(
     }
     if (!title && resolvedLookupTitle) {
       title = resolvedLookupTitle;
+    }
+    if (!title && titleFallback) {
+      title = titleFallback;
     }
 
     // 2. Query ITAD for multi-store comparison (Nuuvem, GOG, Epic) and Historical Low
@@ -638,6 +651,7 @@ export async function getGameDealInfo(
               // Primary ITAD deal:
               // NEVER allow ITAD deals for "Steam" to overwrite a valid promotional price_overview
               // returned directly by Valve's Steam Store API!
+              // However, if Valve's appdetails failed (hasOfficialSteamPrice is false), allow ITAD's Steam deal.
               if (shopName === 'Steam' && hasOfficialSteamPrice) {
                 continue;
               }
@@ -646,6 +660,10 @@ export async function getGameDealInfo(
             const dealSale = Number(d.price?.amount ?? 0);
             const dealRegular = Number(d.regular?.amount ?? dealSale);
             const dealCut = Number(d.cut ?? 0);
+            const dealUrl =
+              shopName === 'Steam' && steamAppId
+                ? `https://store.steampowered.com/app/${steamAppId}/`
+                : d.url || '';
 
             if (!storeBreakdown[shopName] || dealSale < storeBreakdown[shopName].salePrice) {
               storeBreakdown[shopName] = {
@@ -653,7 +671,7 @@ export async function getGameDealInfo(
                 salePrice: dealSale,
                 regularPrice: dealRegular,
                 cutPercent: dealCut,
-                url: d.url,
+                url: dealUrl,
                 expiry: d.expiry || null,
                 currency,
                 currencySymbol,
@@ -712,12 +730,12 @@ export async function getGameDealInfo(
       }
 
       // Step 3 (Conditional Secondary Edition Search):
-      // ONLY run /games/search/v1 + a secondary /games/prices/v3 call IF:
-      // 1) The primary storeBreakdown is missing BOTH GOG and Epic Games Store (e.g. The Witcher 3 292030)
-      //    OR primary lookup failed to find any primaryItadId!
-      const isMissingBothAlternatives = !storeBreakdown['GOG'] && !storeBreakdown['Epic Games Store'];
+      // Trigger secondary search if EITHER GOG OR Epic Games Store is missing from storeBreakdown,
+      // so games that found GOG in Step 2 still check if an edition UUID carries Epic Games Store,
+      // OR if primary lookup failed to find any primaryItadId!
+      const isMissingAnyAlternative = !storeBreakdown['GOG'] || !storeBreakdown['Epic Games Store'];
 
-      if (isMissingBothAlternatives && baseTitle && baseTitle !== 'Monitored Title' && baseTitle.length > 1) {
+      if (isMissingAnyAlternative && baseTitle && baseTitle !== 'Monitored Title' && baseTitle.length > 1) {
         try {
           const secSearchUrl = `${ITAD_BASE_URL}/games/search/v1?key=${itadKey}&title=${encodeURIComponent(baseTitle)}&results=5`;
           const secSearchRes = await fetchItadWithRetry(

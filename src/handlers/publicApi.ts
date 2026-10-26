@@ -91,6 +91,8 @@ export const KNOWN_GAME_TITLES: Record<string, string> = {
   '730': 'Counter-Strike 2',
   '271590': 'Grand Theft Auto V',
   '252490': 'Rust',
+  '1449690': 'The Walking Dead: The Telltale Definitive Series',
+  '3240220': 'Grand Theft Auto V Enhanced',
 };
 
 /** Prominent monitored games for curated market listings. */
@@ -143,11 +145,12 @@ export function createJsonResponse<T>(statusCode: number, data: T): PublicApiRes
 export function buildMarketTelemetryPlaceholder(
   appId: string,
   preferredCurrency: string = 'USD',
+  titleFallback: string | null = null,
 ): PublicMarketTelemetry {
   const cleanAppId = appId.trim();
   const storeUrl = `https://store.steampowered.com/app/${cleanAppId}`;
   const bannerUrl = getCanonicalHeaderImageUrl(cleanAppId);
-  const title = KNOWN_GAME_TITLES[cleanAppId] || `Steam Application ${cleanAppId}`;
+  const title = titleFallback || KNOWN_GAME_TITLES[cleanAppId] || `Steam Application ${cleanAppId}`;
 
   const isBrl = (preferredCurrency || '').toUpperCase().trim() === 'BRL';
   const currency = isBrl ? 'BRL' : 'USD';
@@ -190,9 +193,78 @@ export function buildMarketTelemetryPlaceholder(
 }
 
 /**
+ * Retrieves healthy multi-store market telemetry from DynamoDB cache if fresh and un-degraded.
+ */
+export async function getCachedMarketTelemetry(
+  appId: string,
+  currency: string = 'USD',
+  ddbDocClient: DynamoDBDocumentClient = docClient,
+  tableName: string = process.env.TABLE_NAME || '',
+): Promise<PublicMarketTelemetry | null> {
+  const cleanAppId = appId.trim();
+  const nowSec = Math.floor(Date.now() / 1000);
+
+  if (!tableName || !ddbDocClient) return null;
+
+  try {
+    const cacheResult = await ddbDocClient.send(
+      new QueryCommand({
+        TableName: tableName,
+        KeyConditionExpression: 'PK = :pk AND SK = :sk',
+        ExpressionAttributeValues: {
+          ':pk': `MARKET#v5#${cleanAppId}#${currency}`,
+          ':sk': 'TELEMETRY',
+        },
+        Limit: 1,
+      }),
+    );
+
+    if (cacheResult?.Items && Array.isArray(cacheResult.Items) && cacheResult.Items.length > 0) {
+      const cached = cacheResult.Items[0] as PublicMarketTelemetry & { ttl?: number };
+      const isFresh = !cached.ttl || cached.ttl > nowSec;
+      const storeCount = Object.keys(cached.storeBreakdown || {}).length;
+      const isHealthy =
+        cached.alternativeCheckDegraded === false &&
+        (storeCount > 1 || cached.isPlatformExclusive === true);
+
+      if (isFresh && isHealthy) {
+        return {
+          appId: cached.appId || cleanAppId,
+          gameId: cached.gameId || `steam_${cleanAppId}`,
+          title: cached.title,
+          imageUrl: cached.imageUrl,
+          reviewScore: cached.reviewScore ?? null,
+          steamAppId: cached.steamAppId || cleanAppId,
+          dealType: cached.dealType || 'CURATED_DEAL',
+          isAllTimeLow: Boolean(cached.isAllTimeLow),
+          allTimeLowPrice: cached.allTimeLowPrice ?? null,
+          expiry: cached.expiry ?? null,
+          primaryDeal: cached.primaryDeal,
+          cheaperAlternative: cached.cheaperAlternative ?? null,
+          storeBreakdown: cached.storeBreakdown,
+          alternativeCheckStatus: cached.alternativeCheckStatus || 'confirmed',
+          alternativeCheckDegraded: false,
+          isPlatformExclusive: cached.isPlatformExclusive,
+          isUnreleased: cached.isUnreleased,
+          salePrice: cached.salePrice ?? cached.primaryDeal?.salePrice ?? null,
+          regularPrice: cached.regularPrice ?? cached.primaryDeal?.regularPrice ?? null,
+          updatedAt: cached.updatedAt || new Date().toISOString(),
+        };
+      }
+    }
+  } catch (cacheErr) {
+    console.warn(
+      `[MarketCache] Cache lookup failed for ${cleanAppId}:`,
+      cacheErr instanceof Error ? cacheErr.message : String(cacheErr),
+    );
+  }
+  return null;
+}
+
+/**
  * Resolves live market telemetry and multi-store deal intelligence for a specific Steam title.
  * Checks DynamoDB DealsTable (PK: MARKET#v5#${appId}#${currency}, SK: TELEMETRY) for cached un-degraded multi-store telemetry.
- * If cache miss or degraded, queries live intelligence and persists to cache for 30 minutes when healthy.
+ * If cache miss or degraded, queries live intelligence and persists to cache for 2 hours (7200s) when healthy.
  * Gracefully falls back to clean default telemetry on timeout or API unavailability.
  */
 export async function resolveMarketTelemetry(
@@ -200,76 +272,28 @@ export async function resolveMarketTelemetry(
   preferredCurrency: string = 'USD',
   ddbDocClient: DynamoDBDocumentClient = docClient,
   tableName: string = process.env.TABLE_NAME || '',
+  titleFallback: string | null = null,
 ): Promise<PublicMarketTelemetry> {
   const cleanAppId = appId.trim();
   const isBrl = (preferredCurrency || '').toUpperCase().trim() === 'BRL';
   const currency = isBrl ? 'BRL' : 'USD';
   const nowSec = Math.floor(Date.now() / 1000);
+  const effectiveTitleFallback = titleFallback || KNOWN_GAME_TITLES[cleanAppId] || null;
 
   // 1. Check DynamoDB Multi-Store Telemetry Cache
-  if (tableName && ddbDocClient) {
-    try {
-      const cacheResult = await ddbDocClient.send(
-        new QueryCommand({
-          TableName: tableName,
-          KeyConditionExpression: 'PK = :pk AND SK = :sk',
-          ExpressionAttributeValues: {
-            ':pk': `MARKET#v5#${cleanAppId}#${currency}`,
-            ':sk': 'TELEMETRY',
-          },
-          Limit: 1,
-        }),
-      );
-
-      if (cacheResult?.Items && Array.isArray(cacheResult.Items) && cacheResult.Items.length > 0) {
-        const cached = cacheResult.Items[0] as PublicMarketTelemetry & { ttl?: number };
-        const isFresh = !cached.ttl || cached.ttl > nowSec;
-        const storeCount = Object.keys(cached.storeBreakdown || {}).length;
-        const isHealthy =
-          cached.alternativeCheckDegraded === false &&
-          (storeCount > 1 || cached.isPlatformExclusive === true);
-
-        if (isFresh && isHealthy) {
-          return {
-            appId: cached.appId || cleanAppId,
-            gameId: cached.gameId || `steam_${cleanAppId}`,
-            title: cached.title,
-            imageUrl: cached.imageUrl,
-            reviewScore: cached.reviewScore ?? null,
-            steamAppId: cached.steamAppId || cleanAppId,
-            dealType: cached.dealType || 'CURATED_DEAL',
-            isAllTimeLow: Boolean(cached.isAllTimeLow),
-            allTimeLowPrice: cached.allTimeLowPrice ?? null,
-            expiry: cached.expiry ?? null,
-            primaryDeal: cached.primaryDeal,
-            cheaperAlternative: cached.cheaperAlternative ?? null,
-            storeBreakdown: cached.storeBreakdown,
-            alternativeCheckStatus: cached.alternativeCheckStatus || 'confirmed',
-            alternativeCheckDegraded: false,
-            isPlatformExclusive: cached.isPlatformExclusive,
-            isUnreleased: cached.isUnreleased,
-            salePrice: cached.salePrice ?? cached.primaryDeal?.salePrice ?? null,
-            regularPrice: cached.regularPrice ?? cached.primaryDeal?.regularPrice ?? null,
-            updatedAt: cached.updatedAt || new Date().toISOString(),
-          };
-        }
-      }
-    } catch (cacheErr) {
-      console.warn(
-        `[MarketCache] Cache lookup failed for ${cleanAppId}:`,
-        cacheErr instanceof Error ? cacheErr.message : String(cacheErr),
-      );
-    }
+  const cached = await getCachedMarketTelemetry(cleanAppId, currency, ddbDocClient, tableName);
+  if (cached) {
+    return cached;
   }
 
   // 2. Fetch live data via getGameDealInfo
   try {
-    const dealInfo = await getGameDealInfo(cleanAppId, currency);
+    const dealInfo = await getGameDealInfo(cleanAppId, currency, effectiveTitleFallback);
     if (dealInfo && dealInfo.primaryDeal) {
       const resolvedTitle =
         dealInfo.title && dealInfo.title !== 'Monitored Title'
           ? dealInfo.title
-          : KNOWN_GAME_TITLES[cleanAppId] || `Steam Application ${cleanAppId}`;
+          : effectiveTitleFallback || `Steam Application ${cleanAppId}`;
 
       const primaryDeal = dealInfo.primaryDeal;
       const storeBreakdown =
@@ -317,7 +341,7 @@ export async function resolveMarketTelemetry(
                 PK: `MARKET#v5#${cleanAppId}#${currency}`,
                 SK: 'TELEMETRY',
                 ...telemetry,
-                ttl: nowSec + 1800, // 30 minutes TTL
+                ttl: nowSec + 7200, // 2 hours TTL
               },
             }),
           );
@@ -338,19 +362,21 @@ export async function resolveMarketTelemetry(
     );
   }
 
-  return buildMarketTelemetryPlaceholder(cleanAppId, currency);
+  return buildMarketTelemetryPlaceholder(cleanAppId, currency, effectiveTitleFallback);
 }
 
 /**
  * Builds a curated list of fallback market games matching canonical domain contracts.
  */
 export function buildCuratedMarketList(preferredCurrency: string = 'USD'): PublicMarketTelemetry[] {
-  return CURATED_MARKET_APP_IDS.map((id) => buildMarketTelemetryPlaceholder(id, preferredCurrency));
+  return CURATED_MARKET_APP_IDS.map((id) => buildMarketTelemetryPlaceholder(id, preferredCurrency, KNOWN_GAME_TITLES[id] || null));
 }
 
 /**
- * Resolves live market telemetry for curated prominent games in staggered batches.
- * Staggers execution in batches of 2 titles to prevent connection bursting against upstream APIs.
+ * Resolves live market telemetry for curated prominent games.
+ * Checks DynamoDB cache in parallel for all curated games first.
+ * For any cache misses, resolves sequentially (BATCH_SIZE = 1) with a 150ms pause
+ * so Lambda never bursts Valve's appdetails API with concurrent requests.
  * Defensive design: handles individual failures gracefully.
  */
 export async function resolveCuratedMarketList(
@@ -358,31 +384,56 @@ export async function resolveCuratedMarketList(
   ddbDocClient: DynamoDBDocumentClient = docClient,
   tableName: string = process.env.TABLE_NAME || '',
 ): Promise<PublicMarketTelemetry[]> {
-  const results: PublicMarketTelemetry[] = [];
-  const BATCH_SIZE = 2;
+  const isBrl = (preferredCurrency || '').toUpperCase().trim() === 'BRL';
+  const currency = isBrl ? 'BRL' : 'USD';
 
-  for (let i = 0; i < CURATED_MARKET_APP_IDS.length; i += BATCH_SIZE) {
-    const chunk = CURATED_MARKET_APP_IDS.slice(i, i + BATCH_SIZE);
-    const chunkSettled = await Promise.allSettled(
-      chunk.map((appId) => resolveMarketTelemetry(appId, preferredCurrency, ddbDocClient, tableName)),
-    );
+  // 1. Check DynamoDB cache for all curated IDs in parallel
+  const cacheLookups = await Promise.all(
+    CURATED_MARKET_APP_IDS.map(async (appId) => {
+      const cached = await getCachedMarketTelemetry(appId, currency, ddbDocClient, tableName);
+      return { appId, cached };
+    }),
+  );
 
-    for (let j = 0; j < chunkSettled.length; j++) {
-      const res = chunkSettled[j];
-      if (res.status === 'fulfilled') {
-        results.push(res.value);
-      } else {
-        const fallbackId = chunk[j];
-        results.push(buildMarketTelemetryPlaceholder(fallbackId, preferredCurrency));
-      }
+  const resultMap = new Map<string, PublicMarketTelemetry>();
+  const cacheMisses: string[] = [];
+
+  for (const item of cacheLookups) {
+    if (item.cached) {
+      resultMap.set(item.appId, item.cached);
+    } else {
+      cacheMisses.push(item.appId);
+    }
+  }
+
+  // 2. Resolve cache misses sequentially (BATCH_SIZE = 1) with 150ms pause
+  for (let i = 0; i < cacheMisses.length; i++) {
+    const missId = cacheMisses[i];
+    const titleFallback = KNOWN_GAME_TITLES[missId] || null;
+    try {
+      const liveItem = await resolveMarketTelemetry(
+        missId,
+        preferredCurrency,
+        ddbDocClient,
+        tableName,
+        titleFallback,
+      );
+      resultMap.set(missId, liveItem);
+    } catch {
+      resultMap.set(missId, buildMarketTelemetryPlaceholder(missId, preferredCurrency, titleFallback));
     }
 
-    if (i + BATCH_SIZE < CURATED_MARKET_APP_IDS.length) {
+    if (i < cacheMisses.length - 1) {
       await new Promise((resolve) => setTimeout(resolve, 150));
     }
   }
 
-  return results;
+  // 3. Assemble results preserving canonical order of CURATED_MARKET_APP_IDS
+  return CURATED_MARKET_APP_IDS.map(
+    (appId) =>
+      resultMap.get(appId) ||
+      buildMarketTelemetryPlaceholder(appId, preferredCurrency, KNOWN_GAME_TITLES[appId] || null),
+  );
 }
 
 /**
@@ -1272,7 +1323,16 @@ export const handler = async (event: HttpApiEvent): Promise<PublicApiResponse> =
 
       const currencyParam = event.queryStringParameters?.currency;
       const preferredCurrency = (currencyParam || 'USD').toUpperCase() === 'BRL' ? 'BRL' : 'USD';
-      const telemetry = await resolveMarketTelemetry(appId, preferredCurrency, docClient, tableName);
+      const cleanAppId = appId.trim();
+      const queryTitle = event.queryStringParameters?.title?.trim() || null;
+      const titleFallback = queryTitle || KNOWN_GAME_TITLES[cleanAppId] || null;
+      const telemetry = await resolveMarketTelemetry(
+        cleanAppId,
+        preferredCurrency,
+        docClient,
+        tableName,
+        titleFallback,
+      );
       return createJsonResponse(200, telemetry);
     }
 
@@ -1322,6 +1382,7 @@ export const handler = async (event: HttpApiEvent): Promise<PublicApiResponse> =
                 preferredCurrency,
                 docClient,
                 tableName,
+                topMatch.name?.trim() || null,
               );
               return createJsonResponse(200, [item]);
             }
@@ -1339,7 +1400,16 @@ export const handler = async (event: HttpApiEvent): Promise<PublicApiResponse> =
 
       const queryAppId = event.queryStringParameters?.appId;
       if (queryAppId && queryAppId.trim()) {
-        const item = await resolveMarketTelemetry(queryAppId.trim(), preferredCurrency, docClient, tableName);
+        const cleanAppId = queryAppId.trim();
+        const queryTitle = event.queryStringParameters?.title?.trim() || null;
+        const titleFallback = queryTitle || KNOWN_GAME_TITLES[cleanAppId] || null;
+        const item = await resolveMarketTelemetry(
+          cleanAppId,
+          preferredCurrency,
+          docClient,
+          tableName,
+          titleFallback,
+        );
         return createJsonResponse(200, [item]);
       }
 

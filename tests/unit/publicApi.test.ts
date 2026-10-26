@@ -462,7 +462,7 @@ describe('Public Web API Handler', () => {
       expect(data.storeBreakdown.GOG).toBeDefined();
       expect(data.updatedAt).toBeDefined();
 
-      expect(getGameDealInfo).toHaveBeenCalledWith('1086940', 'USD');
+      expect(getGameDealInfo).toHaveBeenCalledWith('1086940', 'USD', "Baldur's Gate 3");
     });
 
     it('should support regional BRL currency parameter when provided', async () => {
@@ -493,7 +493,7 @@ describe('Public Web API Handler', () => {
       expect(data.cheaperAlternative?.shopName).toBe('Nuuvem');
       expect(data.cheaperAlternative?.salePrice).toBe(149.99);
 
-      expect(getGameDealInfo).toHaveBeenCalledWith('1086940', 'BRL');
+      expect(getGameDealInfo).toHaveBeenCalledWith('1086940', 'BRL', "Baldur's Gate 3");
     });
 
     it('should extract appId from rawPath if pathParameters is missing', async () => {
@@ -702,7 +702,7 @@ describe('Public Web API Handler', () => {
 
       expect(response.statusCode).toBe(200);
       // Verify getGameDealInfo WAS called to heal degraded cache
-      expect(getGameDealInfo).toHaveBeenCalledWith('1086940', 'USD');
+      expect(getGameDealInfo).toHaveBeenCalledWith('1086940', 'USD', "Baldur's Gate 3");
     });
 
     it('should bypass cache and fetch live data when cached record has only 1 store and is not platform exclusive', async () => {
@@ -743,10 +743,10 @@ describe('Public Web API Handler', () => {
 
       expect(response.statusCode).toBe(200);
       // Verify getGameDealInfo WAS called because single-store non-exclusive was rejected
-      expect(getGameDealInfo).toHaveBeenCalledWith('1086940', 'USD');
+      expect(getGameDealInfo).toHaveBeenCalledWith('1086940', 'USD', "Baldur's Gate 3");
     });
 
-    it('should persist live telemetry to DynamoDB cache when alternativeCheckDegraded is false', async () => {
+    it('should persist live telemetry to DynamoDB cache when alternativeCheckDegraded is false with 7200s TTL', async () => {
       const event: HttpApiEvent = {
         routeKey: 'GET /public/market/{appId}',
         rawPath: '/public/market/1086940',
@@ -771,7 +771,36 @@ describe('Public Web API Handler', () => {
       expect(marketPut).toBeDefined();
       expect(marketPut?.args[0].input.Item?.SK).toBe('TELEMETRY');
       expect(marketPut?.args[0].input.Item?.alternativeCheckDegraded).toBe(false);
-      expect(marketPut?.args[0].input.Item?.ttl).toBeGreaterThan(Math.floor(Date.now() / 1000));
+      // Verify increased TTL of 7200 seconds (2 hours)
+      expect(marketPut?.args[0].input.Item?.ttl).toBeGreaterThanOrEqual(Math.floor(Date.now() / 1000) + 7100);
+    });
+
+    it('should accept optional title query parameter and pass it into getGameDealInfo', async () => {
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/market/{appId}',
+        rawPath: '/public/market/1449690',
+        pathParameters: {
+          appId: '1449690',
+        },
+        queryStringParameters: {
+          title: 'The Walking Dead Custom Title',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/market/1449690',
+          },
+        },
+      };
+
+      const response = await handler(event);
+
+      expect(response.statusCode).toBe(200);
+      expect(getGameDealInfo).toHaveBeenCalledWith(
+        '1449690',
+        'USD',
+        'The Walking Dead Custom Title',
+      );
     });
 
     it('should NOT cache degraded live telemetry in DynamoDB when alternativeCheckDegraded is true', async () => {
@@ -907,7 +936,7 @@ describe('Public Web API Handler', () => {
       expect(Array.isArray(data)).toBe(true);
       expect(data[0].primaryDeal.currency).toBe('USD');
       expect(data[0].primaryDeal.currencySymbol).toBe('$');
-      expect(getGameDealInfo).toHaveBeenCalledWith(expect.any(String), 'USD');
+      expect(getGameDealInfo).toHaveBeenCalledWith(expect.any(String), 'USD', expect.anything());
     });
 
     it('should confirm USD default when unsupported currency code is supplied', async () => {
@@ -932,7 +961,7 @@ describe('Public Web API Handler', () => {
       expect(Array.isArray(data)).toBe(true);
       expect(data[0].primaryDeal.currency).toBe('USD');
       expect(data[0].primaryDeal.currencySymbol).toBe('$');
-      expect(getGameDealInfo).toHaveBeenCalledWith(expect.any(String), 'USD');
+      expect(getGameDealInfo).toHaveBeenCalledWith(expect.any(String), 'USD', expect.anything());
     });
 
     it('should search Steam Storefront API and return matched game telemetry when q parameter is provided', async () => {

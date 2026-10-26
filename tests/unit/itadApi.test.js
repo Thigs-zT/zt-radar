@@ -761,6 +761,7 @@ describe('ITAD API Utilities', () => {
                 deals: [
                   { shop: { name: 'Steam' }, price: { amount: 24.99 }, regular: { amount: 24.99 }, cut: 0, url: 'https://steam.com' },
                   { shop: { name: 'Epic Games Store' }, price: { amount: 24.99 }, regular: { amount: 24.99 }, cut: 0, url: 'https://epic.com' },
+                  { shop: { name: 'GOG' }, price: { amount: 24.99 }, regular: { amount: 24.99 }, cut: 0, url: 'https://gog.com' },
                 ],
               },
             ],
@@ -780,6 +781,140 @@ describe('ITAD API Utilities', () => {
       expect(searchCalled).toBe(false);
       expect(deal?.storeBreakdown['Steam']).toBeDefined();
       expect(deal?.storeBreakdown['Epic Games Store']).toBeDefined();
+      expect(deal?.storeBreakdown['GOG']).toBeDefined();
+    });
+
+    it('should trigger secondary search if GOG is present but Epic Games Store is missing', async () => {
+      let searchCalled = false;
+      let pricesCalls = 0;
+      globalThis.fetch = vi.fn(async (url) => {
+        const urlStr = String(url);
+        if (urlStr.includes('store.steampowered.com/api/appdetails')) {
+          return {
+            ok: true,
+            json: async () => ({
+              '292030': {
+                success: true,
+                data: { name: 'The Witcher 3: Wild Hunt', price_overview: { initial: 3999, final: 999, discount_percent: 75 } },
+              },
+            }),
+          };
+        }
+        if (urlStr.includes('/games/lookup/v1')) {
+          return { ok: true, json: async () => ({ found: true, game: { id: 'uuid-w3-base', title: 'The Witcher 3: Wild Hunt' } }) };
+        }
+        if (urlStr.includes('/games/search/v1')) {
+          searchCalled = true;
+          return {
+            ok: true,
+            json: async () => [
+              { id: 'uuid-w3-complete', title: 'The Witcher 3: Wild Hunt - Complete Edition', type: 'game' },
+            ],
+          };
+        }
+        if (urlStr.includes('/games/prices/v3')) {
+          pricesCalls++;
+          if (pricesCalls === 1) {
+            return {
+              ok: true,
+              status: 200,
+              json: async () => [
+                {
+                  id: 'uuid-w3-base',
+                  deals: [
+                    { shop: { name: 'Steam' }, price: { amount: 9.99 }, regular: { amount: 39.99 }, cut: 75, url: 'https://steam.com' },
+                    { shop: { name: 'GOG' }, price: { amount: 9.99 }, regular: { amount: 39.99 }, cut: 75, url: 'https://gog.com' },
+                  ],
+                },
+              ],
+            };
+          }
+          return {
+            ok: true,
+            status: 200,
+            json: async () => [
+              {
+                id: 'uuid-w3-complete',
+                deals: [
+                  { shop: { name: 'Epic Games Store' }, price: { amount: 12.49 }, regular: { amount: 49.99 }, cut: 75, url: 'https://epic.com' },
+                ],
+              },
+            ],
+          };
+        }
+        if (urlStr.includes('/games/historylow/v1')) {
+          return { ok: true, status: 200, json: async () => [] };
+        }
+        return { ok: false, status: 404 };
+      });
+
+      const deal = await getGameDealInfo('292030', 'USD');
+
+      expect(deal).toBeDefined();
+      expect(searchCalled).toBe(true);
+      expect(deal?.storeBreakdown['Steam']).toBeDefined();
+      expect(deal?.storeBreakdown['GOG']).toBeDefined();
+      expect(deal?.storeBreakdown['Epic Games Store']).toBeDefined();
+      expect(deal?.storeBreakdown['Epic Games Store'].salePrice).toBe(12.49);
+    });
+
+    it('should be 100% resilient when Valve appdetails returns 429 and populate Steam from ITAD prices', async () => {
+      globalThis.fetch = vi.fn(async (url) => {
+        const urlStr = String(url);
+        if (urlStr.includes('store.steampowered.com/api/appdetails')) {
+          // Valve returns HTTP 429 rate limit during cold burst
+          return {
+            ok: false,
+            status: 429,
+          };
+        }
+        if (urlStr.includes('/games/lookup/v1')) {
+          return {
+            ok: true,
+            json: async () => ({
+              found: true,
+              game: { id: 'uuid-twd', title: 'The Walking Dead: The Telltale Definitive Series' },
+            }),
+          };
+        }
+        if (urlStr.includes('/games/search/v1')) {
+          return { ok: true, json: async () => [] };
+        }
+        if (urlStr.includes('/games/prices/v3')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => [
+              {
+                id: 'uuid-twd',
+                deals: [
+                  { shop: { name: 'Steam' }, price: { amount: 19.99 }, regular: { amount: 49.99 }, cut: 60, url: 'https://store.steampowered.com/app/1449690/' },
+                  { shop: { name: 'Epic Games Store' }, price: { amount: 12.49 }, regular: { amount: 49.99 }, cut: 75, url: 'https://epic.com' },
+                ],
+              },
+            ],
+          };
+        }
+        if (urlStr.includes('/games/historylow/v1')) {
+          return { ok: true, status: 200, json: async () => [{ id: 'uuid-twd', low: { price: { amount: 9.99 } } }] };
+        }
+        return { ok: false, status: 404 };
+      });
+
+      const deal = await getGameDealInfo('1449690', 'USD', 'The Walking Dead: The Telltale Definitive Series');
+
+      expect(deal).toBeDefined();
+      expect(deal?.title).toBe('The Walking Dead: The Telltale Definitive Series');
+      expect(deal?.storeBreakdown['Steam']).toBeDefined();
+      expect(deal?.storeBreakdown['Steam'].salePrice).toBe(19.99);
+      expect(deal?.storeBreakdown['Epic Games Store']).toBeDefined();
+      expect(deal?.storeBreakdown['Epic Games Store'].salePrice).toBe(12.49);
+      expect(deal?.primaryDeal.shopName).toBe('Steam');
+      expect(deal?.primaryDeal.salePrice).toBe(19.99);
+      expect(deal?.cheaperAlternative?.shopName).toBe('Epic Games Store');
+      expect(deal?.cheaperAlternative?.salePrice).toBe(12.49);
+      expect(deal?.alternativeCheckDegraded).toBe(false);
+      expect(deal?.alternativeCheckStatus).toBe('confirmed');
     });
   });
 });
