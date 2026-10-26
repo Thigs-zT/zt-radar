@@ -266,6 +266,12 @@ describe('ITAD API Utilities', () => {
             }),
           };
         }
+        if (urlStr.includes('/games/search/v1')) {
+          return {
+            ok: true,
+            json: async () => [{ id: 'uuid-cyberpunk-1091500', title: 'Cyberpunk 2077', type: 'game' }],
+          };
+        }
         if (urlStr.includes('/games/prices/v3')) {
           return {
             ok: true,
@@ -631,6 +637,100 @@ describe('ITAD API Utilities', () => {
       expect(deal?.title).toBe('Hades');
       expect(deal?.storeBreakdown['Steam'].salePrice).toBe(24.99);
       expect(deal?.storeBreakdown['Epic Games Store'].salePrice).toBe(24.99);
+    });
+
+    it('should retry transient ITAD HTTP 429 responses so the first cold request returns all stores', async () => {
+      let pricesAttempts = 0;
+      globalThis.fetch = vi.fn(async (url) => {
+        const urlStr = String(url);
+        if (urlStr.includes('store.steampowered.com/api/appdetails')) {
+          return {
+            ok: true,
+            json: async () => ({
+              '2138720': {
+                success: true,
+                data: { name: 'REMATCH', price_overview: { initial: 3999, final: 1599, discount_percent: 60 } },
+              },
+            }),
+          };
+        }
+        if (urlStr.includes('/games/lookup/v1')) {
+          return { ok: true, json: async () => ({ found: true, game: { id: 'uuid-rematch', title: 'REMATCH' } }) };
+        }
+        if (urlStr.includes('/games/search/v1')) {
+          return { ok: true, json: async () => [{ id: 'uuid-rematch', title: 'REMATCH', type: 'game' }] };
+        }
+        if (urlStr.includes('/games/prices/v3')) {
+          pricesAttempts += 1;
+          if (pricesAttempts === 1) {
+            return { ok: false, status: 429, headers: { get: () => null } };
+          }
+          return {
+            ok: true,
+            status: 200,
+            json: async () => [
+              {
+                id: 'uuid-rematch',
+                deals: [
+                  { shop: { name: 'Epic Games Store' }, price: { amount: 29.99 }, regular: { amount: 29.99 }, cut: 0, url: 'https://epic.com' },
+                ],
+              },
+            ],
+          };
+        }
+        if (urlStr.includes('/games/historylow/v1')) {
+          return { ok: true, status: 200, json: async () => [] };
+        }
+        return { ok: false, status: 404 };
+      });
+
+      const deal = await getGameDealInfo('2138720', 'USD');
+
+      expect(pricesAttempts).toBe(2);
+      expect(deal?.alternativeCheckDegraded).toBe(false);
+      expect(deal?.storeBreakdown['Steam']).toBeDefined();
+      expect(deal?.storeBreakdown['Epic Games Store']).toBeDefined();
+    });
+
+    it('should report degraded when the ITAD edition search fails after retries instead of claiming a confirmed check', async () => {
+      globalThis.fetch = vi.fn(async (url) => {
+        const urlStr = String(url);
+        if (urlStr.includes('store.steampowered.com/api/appdetails')) {
+          return {
+            ok: true,
+            json: async () => ({
+              '292030': {
+                success: true,
+                data: { name: 'The Witcher 3: Wild Hunt', price_overview: { initial: 4999, final: 4999, discount_percent: 0 } },
+              },
+            }),
+          };
+        }
+        if (urlStr.includes('/games/lookup/v1')) {
+          return { ok: true, json: async () => ({ found: true, game: { id: 'uuid-w3', title: 'The Witcher 3: Wild Hunt' } }) };
+        }
+        if (urlStr.includes('/games/search/v1')) {
+          throw new Error('connect ETIMEDOUT');
+        }
+        if (urlStr.includes('/games/prices/v3')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => [
+              { id: 'uuid-w3', deals: [{ shop: { name: 'GOG' }, price: { amount: 39.99 }, regular: { amount: 39.99 }, cut: 0, url: 'https://gog.com' }] },
+            ],
+          };
+        }
+        if (urlStr.includes('/games/historylow/v1')) {
+          return { ok: true, status: 200, json: async () => [] };
+        }
+        return { ok: false, status: 404 };
+      });
+
+      const deal = await getGameDealInfo('292030', 'USD');
+
+      expect(deal?.alternativeCheckDegraded).toBe(true);
+      expect(deal?.alternativeCheckStatus).toBe('degraded');
     });
   });
 });

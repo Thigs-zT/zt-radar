@@ -393,6 +393,40 @@ interface RawItadHistoryLowItem {
   };
 }
 
+const ITAD_MAX_ATTEMPTS = 3;
+const ITAD_RETRY_BASE_DELAY_MS = 250;
+
+/**
+ * Performs an ITAD HTTP request with bounded retries for transient failures
+ * (network errors, HTTP 429 and HTTP 5xx). All attempts share the caller's AbortSignal,
+ * so the overall deadline remains the single controller timeout in getGameDealInfo.
+ * Returns the last response received, or throws the last network error.
+ */
+async function fetchItadWithRetry(url: string, init: RequestInit, signal: AbortSignal): Promise<Response> {
+  let lastError: unknown = null;
+  for (let attempt = 1; attempt <= ITAD_MAX_ATTEMPTS; attempt++) {
+    if (signal.aborted) break;
+    try {
+      const res = await fetch(url, { ...init, signal });
+      const transient = res.status === 429 || res.status >= 500;
+      if (!transient || attempt === ITAD_MAX_ATTEMPTS) {
+        return res;
+      }
+      const retryAfterSec = Number(res.headers?.get?.('retry-after'));
+      const delayMs =
+        Number.isFinite(retryAfterSec) && retryAfterSec > 0
+          ? Math.min(retryAfterSec * 1000, 1500)
+          : ITAD_RETRY_BASE_DELAY_MS * attempt;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    } catch (err: unknown) {
+      lastError = err;
+      if (signal.aborted || attempt === ITAD_MAX_ATTEMPTS) break;
+      await new Promise((resolve) => setTimeout(resolve, ITAD_RETRY_BASE_DELAY_MS * attempt));
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error('ITAD request failed or was aborted');
+}
+
 /**
  * Retrieves comprehensive price, store comparison, and historical low data.
  */
@@ -493,10 +527,11 @@ export async function getGameDealInfo(
         if (!lookupParam) return null;
 
         const lookupUrl = `${ITAD_BASE_URL}/games/lookup/v1?key=${itadKey}&${lookupParam}`;
-        const lookupRes = await fetch(lookupUrl, {
-          headers: { 'User-Agent': USER_AGENT },
-          signal: controller.signal,
-        });
+        const lookupRes = await fetchItadWithRetry(
+          lookupUrl,
+          { headers: { 'User-Agent': USER_AGENT } },
+          controller.signal,
+        );
 
         if (lookupRes.ok) {
           const lookupData = (await lookupRes.json()) as RawItadLookupResponse;
@@ -581,6 +616,9 @@ export async function getGameDealInfo(
       const primaryItadId = itadGameId || resolvedLookupId || null;
       const candidateItadIds: string[] = [];
       const secondaryEditionIds = new Set<string>();
+      // Set when ITAD discovery (lookup or edition search) failed after retries, so partial
+      // results are never reported as a healthy, fully confirmed multi-store check.
+      let discoveryIncomplete = Boolean(steamAppId) && !itadGameId && resolvedLookup === null;
 
       if (primaryItadId) {
         candidateItadIds.push(primaryItadId);
@@ -592,10 +630,15 @@ export async function getGameDealInfo(
       if (baseTitle && baseTitle !== 'Monitored Title' && baseTitle.length > 1) {
         try {
           const secSearchUrl = `${ITAD_BASE_URL}/games/search/v1?key=${itadKey}&title=${encodeURIComponent(baseTitle)}&results=5`;
-          const secSearchRes = await fetch(secSearchUrl, {
-            headers: { 'User-Agent': USER_AGENT },
-            signal: controller.signal,
-          });
+          const secSearchRes = await fetchItadWithRetry(
+            secSearchUrl,
+            { headers: { 'User-Agent': USER_AGENT } },
+            controller.signal,
+          );
+
+          if (!secSearchRes.ok) {
+            discoveryIncomplete = true;
+          }
 
           if (secSearchRes.ok) {
             secondarySearchExecuted = true;
@@ -633,6 +676,7 @@ export async function getGameDealInfo(
             }
           }
         } catch (secSearchErr: unknown) {
+          discoveryIncomplete = true;
           console.warn(
             'ITAD secondary search error:',
             secSearchErr instanceof Error ? secSearchErr.message : String(secSearchErr),
@@ -654,18 +698,24 @@ export async function getGameDealInfo(
           const historyTargetId = itadGameId || candidateItadIds[0];
 
           const [priceRes, historyRes] = await Promise.all([
-            fetch(priceUrl, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json', 'User-Agent': USER_AGENT },
-              body: JSON.stringify(candidateItadIds),
-              signal: controller.signal,
-            }),
-            fetch(historyUrl, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json', 'User-Agent': USER_AGENT },
-              body: JSON.stringify([historyTargetId]),
-              signal: controller.signal,
-            }),
+            fetchItadWithRetry(
+              priceUrl,
+              {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'User-Agent': USER_AGENT },
+                body: JSON.stringify(candidateItadIds),
+              },
+              controller.signal,
+            ),
+            fetchItadWithRetry(
+              historyUrl,
+              {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'User-Agent': USER_AGENT },
+                body: JSON.stringify([historyTargetId]),
+              },
+              controller.signal,
+            ),
           ]);
 
           if (priceRes.ok) {
@@ -714,8 +764,8 @@ export async function getGameDealInfo(
                 }
               }
             }
-            alternativeCheckDegraded = false;
-            alternativeCheckStatus = 'confirmed';
+            alternativeCheckDegraded = discoveryIncomplete;
+            alternativeCheckStatus = discoveryIncomplete ? 'degraded' : 'confirmed';
           } else {
             alternativeCheckDegraded = true;
             alternativeCheckStatus = 'degraded';
