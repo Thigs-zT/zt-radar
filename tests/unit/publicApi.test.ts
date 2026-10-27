@@ -2340,6 +2340,107 @@ describe('Public Web API Handler', () => {
       expect(data.items[1].appId).toBe('104');
       expect(data.items[1].priority).toBe(4);
     });
+
+    it('should use cached market telemetry from DynamoDB and avoid live getGameDealInfo calls', async () => {
+      vi.mocked(fetchSteamWishlist).mockResolvedValueOnce({
+        success: true,
+        items: [{ appId: '1086940', priority: 1, dateAdded: 500 }],
+      });
+
+      ddbMock.on(QueryCommand).resolvesOnce({
+        Items: [
+          {
+            PK: 'MARKET#v5#1086940#USD',
+            SK: 'TELEMETRY',
+            appId: '1086940',
+            title: "Baldur's Gate 3",
+            imageUrl: 'https://cdn.example.com/bg3.jpg',
+            dealType: 'CURATED_DEAL',
+            alternativeCheckDegraded: false,
+            primaryDeal: {
+              shopName: 'Steam',
+              salePrice: 47.99,
+              regularPrice: 59.99,
+              cutPercent: 20,
+              url: 'https://store.steampowered.com/app/1086940',
+              currency: 'USD',
+              currencySymbol: '$',
+            },
+            storeBreakdown: {
+              Steam: {
+                shopName: 'Steam',
+                salePrice: 47.99,
+                regularPrice: 59.99,
+                cutPercent: 20,
+                url: 'https://store.steampowered.com/app/1086940',
+                currency: 'USD',
+                currencySymbol: '$',
+              },
+              GOG: {
+                shopName: 'GOG',
+                salePrice: 47.99,
+                regularPrice: 59.99,
+                cutPercent: 20,
+                url: 'https://gog.com/bg3',
+                currency: 'USD',
+                currencySymbol: '$',
+              },
+            },
+            ttl: Math.floor(Date.now() / 1000) + 7200,
+          },
+        ],
+      });
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/wishlist/{target}',
+        rawPath: '/public/wishlist/76561198327022168',
+        pathParameters: { target: '76561198327022168' },
+        requestContext: {
+          http: { method: 'GET', path: '/public/wishlist/76561198327022168' },
+        },
+      };
+
+      const response = await handler(event);
+      expect(response.statusCode).toBe(200);
+
+      const data = JSON.parse(response.body);
+      expect(data.items).toHaveLength(1);
+      expect(data.items[0].appId).toBe('1086940');
+      expect(data.items[0].storeBreakdown['GOG']).toBeDefined();
+      expect(getGameDealInfo).not.toHaveBeenCalled();
+    });
+
+    it('should limit live getGameDealInfo calls to at most the top 3 items when items miss cache', async () => {
+      const wishlistItems = [
+        { appId: '201', priority: 1, dateAdded: 500 },
+        { appId: '202', priority: 2, dateAdded: 400 },
+        { appId: '203', priority: 3, dateAdded: 300 },
+        { appId: '204', priority: 4, dateAdded: 200 },
+        { appId: '205', priority: 5, dateAdded: 100 },
+      ];
+
+      vi.mocked(fetchSteamWishlist).mockResolvedValueOnce({
+        success: true,
+        items: wishlistItems,
+      });
+
+      ddbMock.on(QueryCommand).resolves({ Items: [] });
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/wishlist/{target}',
+        rawPath: '/public/wishlist/76561198327022168',
+        pathParameters: { target: '76561198327022168' },
+        queryStringParameters: { limit: '5' },
+        requestContext: {
+          http: { method: 'GET', path: '/public/wishlist/76561198327022168' },
+        },
+      };
+
+      const response = await handler(event);
+      expect(response.statusCode).toBe(200);
+
+      expect(getGameDealInfo).toHaveBeenCalledTimes(3);
+    });
   });
 
   describe('Route: GET /public/backlog/{target}', () => {

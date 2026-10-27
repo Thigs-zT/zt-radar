@@ -818,33 +818,48 @@ export async function resolveWishlistTelemetry(
     resolveSteamAppTitles(targetAppIds, 1200),
   ]);
 
-  // Enrich candidates: top items on current page (up to 12) + any unpriced items from batch store query
-  const topCandidates = targetItems.slice(0, 12);
-  const unpricedCandidates = targetItems.filter((candidate) => {
-    const p = priceMap.get(Number(candidate.appId));
-    return !p || p.salePrice === null || p.isUnreleased;
-  }).slice(0, 15);
+  const dealMap = new Map<string, GameDealInfo | PublicMarketTelemetry>();
 
-  const candidateMap = new Map<string, (typeof targetItems)[0]>();
-  for (const item of [...topCandidates, ...unpricedCandidates]) {
-    candidateMap.set(item.appId, item);
-  }
-  const enrichmentCandidates = Array.from(candidateMap.values());
-  const dealMap = new Map<string, GameDealInfo>();
-  try {
-    const dealSettled = await Promise.allSettled(
-      enrichmentCandidates.map(async (candidate) => {
-        const deal = await getGameDealInfo(candidate.appId, currency);
-        return { appId: candidate.appId, deal };
-      }),
-    );
-    for (const res of dealSettled) {
-      if (res.status === 'fulfilled' && res.value.deal) {
-        dealMap.set(res.value.appId, res.value.deal);
+  // Query DynamoDB in parallel for cached healthy telemetry across all wishlist target items
+  if (tableName && ddbDocClient) {
+    try {
+      const cachedSettled = await Promise.allSettled(
+        targetAppIds.map(async (appId) => {
+          const cached = await getCachedMarketTelemetry(appId, currency, ddbDocClient, tableName);
+          return { appId, cached };
+        }),
+      );
+      for (const res of cachedSettled) {
+        if (res.status === 'fulfilled' && res.value.cached) {
+          dealMap.set(res.value.appId, res.value.cached);
+        }
       }
+    } catch {
+      // Graceful fallback to live query on DynamoDB error
     }
-  } catch {
-    // Graceful fallback to batch cache if ITAD enrichment encounters issues
+  }
+
+  // To preserve ITAD burst quota when opening the wishlist grid, only execute live lookups
+  // sequentially for at most the top 3 items with cache misses
+  const uncachedCandidates = targetItems
+    .filter((item) => !dealMap.has(item.appId))
+    .slice(0, 3);
+
+  for (const item of uncachedCandidates) {
+    try {
+      const titleFallback =
+        titleMap.get(item.appId) ||
+        titleMap.get(Number(item.appId)) ||
+        APP_DIRECTORY[item.appId] ||
+        KNOWN_GAME_TITLES[item.appId] ||
+        null;
+      const deal = await getGameDealInfo(item.appId, currency, titleFallback);
+      if (deal) {
+        dealMap.set(item.appId, deal);
+      }
+    } catch {
+      // Graceful fallback on live lookup failure
+    }
   }
 
   // Collect authentic headers from store price overview and deal intelligence
@@ -906,15 +921,15 @@ export async function resolveWishlistTelemetry(
     );
     const isTrulyFreeSteam = Boolean(priceInfo?.isFree);
 
-    if (hasValidDeal) {
+    if (hasValidDeal && dealInfo?.primaryDeal) {
       // 1. Deal intelligence with authentic store pricing takes absolute precedence
-      isFree = dealInfo!.primaryDeal.salePrice === 0 || dealInfo!.primaryDeal.cutPercent === 100;
-      salePrice = dealInfo!.primaryDeal.salePrice;
-      regularPrice = dealInfo!.primaryDeal.regularPrice;
-      discountPercent = dealInfo!.primaryDeal.cutPercent;
-      primaryDeal = dealInfo!.primaryDeal;
-      cheaperAlternative = dealInfo!.cheaperAlternative || null;
-      storeBreakdown = dealInfo!.storeBreakdown;
+      isFree = dealInfo.primaryDeal.salePrice === 0 || dealInfo.primaryDeal.cutPercent === 100;
+      salePrice = dealInfo.primaryDeal.salePrice;
+      regularPrice = dealInfo.primaryDeal.regularPrice;
+      discountPercent = dealInfo.primaryDeal.cutPercent;
+      primaryDeal = dealInfo.primaryDeal;
+      cheaperAlternative = dealInfo.cheaperAlternative || null;
+      storeBreakdown = dealInfo.storeBreakdown;
       isUnreleased = false;
     } else if (hasValidSteamPrice) {
       // 2. Confirmed Steam store pricing
@@ -942,9 +957,9 @@ export async function resolveWishlistTelemetry(
       regularPrice = 0;
       discountPercent = 0;
       isUnreleased = false;
-      primaryDeal = dealInfo!.primaryDeal || null;
-      cheaperAlternative = dealInfo!.cheaperAlternative || null;
-      storeBreakdown = dealInfo!.storeBreakdown;
+      primaryDeal = dealInfo?.primaryDeal || null;
+      cheaperAlternative = dealInfo?.cheaperAlternative || null;
+      storeBreakdown = dealInfo?.storeBreakdown;
     } else if (isTrulyFreeSteam) {
       // 4. Free-to-play title confirmed by Steam store
       isFree = true;

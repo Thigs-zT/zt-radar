@@ -395,8 +395,8 @@ interface RawItadHistoryLowItem {
   };
 }
 
-const ITAD_MAX_ATTEMPTS = 2;
-const ITAD_RETRY_BASE_DELAY_MS = 200;
+const ITAD_MAX_ATTEMPTS = 3;
+const ITAD_RETRY_BASE_DELAY_MS = 350;
 
 /**
  * Performs an ITAD HTTP request with bounded retries for transient failures
@@ -730,12 +730,12 @@ export async function getGameDealInfo(
       }
 
       // Step 3 (Conditional Secondary Edition Search):
-      // Trigger secondary search if EITHER GOG OR Epic Games Store is missing from storeBreakdown,
-      // so games that found GOG in Step 2 still check if an edition UUID carries Epic Games Store,
-      // OR if primary lookup failed to find any primaryItadId!
-      const isMissingAnyAlternative = !storeBreakdown['GOG'] || !storeBreakdown['Epic Games Store'];
+      // Secondary edition search MUST ONLY run if Step 2 returned ONLY Steam (or 0 alternative stores).
+      // If Step 2 already found ANY alternative store (Epic Games Store, GOG, Nuuvem), skip Step 3.
 
-      if (isMissingAnyAlternative && baseTitle && baseTitle !== 'Monitored Title' && baseTitle.length > 1) {
+      const needsSecondaryEditionSearch = Object.keys(storeBreakdown).filter((k) => k !== 'Steam').length === 0;
+
+      if (needsSecondaryEditionSearch && baseTitle && baseTitle !== 'Monitored Title' && baseTitle.length > 1) {
         try {
           const secSearchUrl = `${ITAD_BASE_URL}/games/search/v1?key=${itadKey}&title=${encodeURIComponent(baseTitle)}&results=5`;
           const secSearchRes = await fetchItadWithRetry(

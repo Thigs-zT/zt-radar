@@ -784,7 +784,7 @@ describe('ITAD API Utilities', () => {
       expect(deal?.storeBreakdown['GOG']).toBeDefined();
     });
 
-    it('should trigger secondary search if GOG is present but Epic Games Store is missing', async () => {
+    it('should NOT trigger secondary search if an alternative store (e.g. GOG) was already found in primary prices', async () => {
       let searchCalled = false;
       let pricesCalls = 0;
       globalThis.fetch = vi.fn(async (url) => {
@@ -851,11 +851,11 @@ describe('ITAD API Utilities', () => {
       const deal = await getGameDealInfo('292030', 'USD');
 
       expect(deal).toBeDefined();
-      expect(searchCalled).toBe(true);
+      expect(searchCalled).toBe(false);
+      expect(pricesCalls).toBe(1);
       expect(deal?.storeBreakdown['Steam']).toBeDefined();
       expect(deal?.storeBreakdown['GOG']).toBeDefined();
-      expect(deal?.storeBreakdown['Epic Games Store']).toBeDefined();
-      expect(deal?.storeBreakdown['Epic Games Store'].salePrice).toBe(12.49);
+      expect(deal?.storeBreakdown['Epic Games Store']).toBeUndefined();
     });
 
     it('should be 100% resilient when Valve appdetails returns 429 and populate Steam from ITAD prices', async () => {
