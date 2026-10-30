@@ -6,6 +6,7 @@ import {
   getGameDealInfo,
   sanitizeTitleForItadLookup,
   isStrictEditionMatch,
+  fetchSteamStoreAppDetails,
 } from '../../src/utils/itadApi.js';
 
 describe('ITAD API Utilities', () => {
@@ -915,6 +916,70 @@ describe('ITAD API Utilities', () => {
       expect(deal?.cheaperAlternative?.salePrice).toBe(12.49);
       expect(deal?.alternativeCheckDegraded).toBe(false);
       expect(deal?.alternativeCheckStatus).toBe('confirmed');
+    });
+  });
+  describe('fetchSteamStoreAppDetails', () => {
+    let originalFetch;
+
+    beforeEach(() => {
+      originalFetch = globalThis.fetch;
+    });
+
+    afterEach(() => {
+      globalThis.fetch = originalFetch;
+      vi.restoreAllMocks();
+    });
+
+    it('should return app details when Valve API responds within timeout', async () => {
+      globalThis.fetch = vi.fn(async () => ({
+        ok: true,
+        json: async () => ({
+          '2138720': {
+            success: true,
+            data: {
+              name: 'REMATCH',
+              price_overview: { initial: 3999, final: 1599, discount_percent: 60 },
+            },
+          },
+        }),
+      }));
+
+      const details = await fetchSteamStoreAppDetails('2138720', 'us', undefined, 1500);
+
+      expect(details).toBeDefined();
+      expect(details?.name).toBe('REMATCH');
+      expect(details?.price_overview?.final).toBe(1599);
+    });
+
+    it('should abort and return null when Valve API takes longer than timeoutMs', async () => {
+      globalThis.fetch = vi.fn(async (_url, options) => {
+        return new Promise((resolve, reject) => {
+          const timer = setTimeout(() => {
+            resolve({
+              ok: true,
+              json: async () => ({
+                '2138720': { success: true, data: { name: 'REMATCH' } },
+              }),
+            });
+          }, 200);
+
+          if (options?.signal) {
+            options.signal.addEventListener('abort', () => {
+              clearTimeout(timer);
+              reject(new DOMException('The operation was aborted', 'AbortError'));
+            });
+          }
+        });
+      });
+
+      const details = await fetchSteamStoreAppDetails('2138720', 'us', undefined, 50);
+
+      expect(details).toBeNull();
+    });
+
+    it('should return null when appId is empty', async () => {
+      const details = await fetchSteamStoreAppDetails('', 'us');
+      expect(details).toBeNull();
     });
   });
 });

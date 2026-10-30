@@ -351,7 +351,7 @@ interface RawSteamAppDetailsPriceOverview {
   discount_percent: number;
 }
 
-interface RawSteamAppDetails {
+export interface RawSteamAppDetails {
   name?: string;
   header_image?: string;
   is_free?: boolean;
@@ -430,6 +430,48 @@ async function fetchItadWithRetry(url: string, init: RequestInit, signal: AbortS
 }
 
 /**
+ * Fetches official Steam Store details for an AppID bounded by a strict timeout (default: 1500ms).
+ * If Valve's endpoint hangs or is rate-limited, returns null so caller can proceed with fallback data.
+ */
+export async function fetchSteamStoreAppDetails(
+  appId: string,
+  country: string = 'us',
+  signal?: AbortSignal,
+  timeoutMs: number = 1500,
+): Promise<RawSteamAppDetails | null> {
+  if (!appId) return null;
+  const timeoutCtrl = new AbortController();
+  const timer = setTimeout(() => timeoutCtrl.abort(), timeoutMs);
+
+  const signals: AbortSignal[] = [timeoutCtrl.signal];
+  if (signal) signals.push(signal);
+  const combinedSignal = typeof AbortSignal.any === 'function' ? AbortSignal.any(signals) : timeoutCtrl.signal;
+
+  try {
+    const steamUrl = `https://store.steampowered.com/api/appdetails?appids=${appId}&cc=${country}&l=english`;
+    const steamRes = await fetch(steamUrl, {
+      headers: { 'User-Agent': USER_AGENT },
+      signal: combinedSignal,
+    });
+
+    if (steamRes.ok) {
+      const steamData = (await steamRes.json()) as RawSteamAppDetailsMap;
+      return steamData?.[appId]?.data || null;
+    }
+  } catch (steamErr: unknown) {
+    if (timeoutCtrl.signal.aborted) {
+      console.warn(`[SteamStore] Valve appdetails exceeded ${timeoutMs}ms timeout for app ${appId}; proceeding with ITAD fallback.`);
+    } else {
+      const msg = steamErr instanceof Error ? steamErr.message : String(steamErr);
+      console.error('Steam appdetails error:', msg);
+    }
+  } finally {
+    clearTimeout(timer);
+  }
+  return null;
+}
+
+/**
  * Retrieves comprehensive price, store comparison, and historical low data.
  */
 export async function getGameDealInfo(
@@ -494,28 +536,14 @@ export async function getGameDealInfo(
     let steamDeal: StoreDeal | null = null;
     let bannerImage: string | null = null;
     let reviewScore: number | null = null;
+    let officialSteamTitle: string | null = null;
+    let hasOfficialSteamPrice = false;
     const itadKey = process.env.ITAD_API_KEY || ITAD_API_KEY;
 
-    // 1. Concurrently fetch Official Steam Store details and initial ITAD lookup
-    const steamPromise = (async () => {
-      if (!steamAppId) return null;
-      try {
-        const steamUrl = `https://store.steampowered.com/api/appdetails?appids=${steamAppId}&cc=${country}&l=english`;
-        const steamRes = await fetch(steamUrl, {
-          headers: { 'User-Agent': USER_AGENT },
-          signal: controller.signal,
-        });
-
-        if (steamRes.ok) {
-          const steamData = (await steamRes.json()) as RawSteamAppDetailsMap;
-          return steamData?.[steamAppId]?.data || null;
-        }
-      } catch (steamErr: unknown) {
-        const msg = steamErr instanceof Error ? steamErr.message : String(steamErr);
-        console.error('Steam appdetails error:', msg);
-      }
-      return null;
-    })();
+    // 1. Concurrently kick off bounded Steam Store details and ITAD ID lookup
+    const steamPromise = steamAppId
+      ? fetchSteamStoreAppDetails(steamAppId, country, controller.signal, 1500)
+      : Promise.resolve(null);
 
     const itadLookupPromise = (async () => {
       if (!itadKey || itadGameId) return { id: itadGameId, title: null };
@@ -549,58 +577,11 @@ export async function getGameDealInfo(
       return null;
     })();
 
-    const [appDetails, resolvedLookup] = await Promise.all([steamPromise, itadLookupPromise]);
+    // Await ITAD lookup ONLY (Valve appdetails must NOT block ITAD discovery)
+    const resolvedLookup = await itadLookupPromise;
 
     const resolvedLookupId = resolvedLookup?.id || null;
     const resolvedLookupTitle = resolvedLookup?.title || null;
-
-    let officialSteamTitle: string | null = null;
-    let hasOfficialSteamPrice = false;
-
-    if (appDetails) {
-      if (appDetails.name) {
-        officialSteamTitle = appDetails.name;
-        title = appDetails.name;
-      }
-      bannerImage = appDetails.header_image || null;
-      reviewScore = appDetails.metacritic?.score ?? null;
-
-      if (appDetails.is_free) {
-        hasOfficialSteamPrice = true;
-        steamDeal = {
-          shopName: 'Steam',
-          salePrice: 0,
-          regularPrice: 0,
-          cutPercent: 100,
-          url: `https://store.steampowered.com/app/${steamAppId}/`,
-          expiry: null,
-          currency,
-          currencySymbol,
-        };
-      } else if (appDetails.price_overview) {
-        hasOfficialSteamPrice = true;
-        steamDeal = {
-          shopName: 'Steam',
-          salePrice: appDetails.price_overview.final / 100,
-          regularPrice: appDetails.price_overview.initial / 100,
-          cutPercent: appDetails.price_overview.discount_percent,
-          url: `https://store.steampowered.com/app/${steamAppId}/`,
-          expiry: null,
-          currency,
-          currencySymbol,
-        };
-      }
-    } else {
-      // Valve appdetails failed (HTTP 429, timeout, or null response during cold burst)
-      if (resolvedLookupTitle) {
-        title = resolvedLookupTitle;
-      } else if (titleFallback) {
-        title = titleFallback;
-      }
-      if (steamAppId) {
-        bannerImage = `https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/${steamAppId}/header.jpg`;
-      }
-    }
 
     if (resolvedLookupId) {
       itadGameId = resolvedLookupId;
@@ -616,16 +597,9 @@ export async function getGameDealInfo(
     let historyLow: number | null = null;
     const storeBreakdown: Record<string, StoreDeal> = {};
 
-    if (steamDeal) {
-      storeBreakdown['Steam'] = steamDeal;
-    }
-
     let alternativeCheckStatus: 'confirmed' | 'degraded' | 'skipped' = 'confirmed';
     let alternativeCheckDegraded = false;
     let secondarySearchExecuted = false;
-
-    const rawSearchTitle = officialSteamTitle || resolvedLookupTitle || titleFallback || title;
-    const baseTitle = sanitizeTitleForItadLookup(rawSearchTitle);
 
     if (itadKey) {
       let primaryItadId = itadGameId || resolvedLookupId || null;
@@ -649,12 +623,8 @@ export async function getGameDealInfo(
               }
             } else {
               // Primary ITAD deal:
-              // NEVER allow ITAD deals for "Steam" to overwrite a valid promotional price_overview
-              // returned directly by Valve's Steam Store API!
-              // However, if Valve's appdetails failed (hasOfficialSteamPrice is false), allow ITAD's Steam deal.
-              if (shopName === 'Steam' && hasOfficialSteamPrice) {
-                continue;
-              }
+              // Store all storefront deals from ITAD. If Valve's official appdetails returns
+              // later with an authentic price_overview or free promotion, it will overwrite Steam below.
             }
 
             const dealSale = Number(d.price?.amount ?? 0);
@@ -729,10 +699,65 @@ export async function getGameDealInfo(
         }
       }
 
+      // Step 2.5: Await Valve Steam Store details (bounded by 1500ms) to overlay official pricing/metadata
+      const appDetails = await steamPromise;
+
+      if (appDetails) {
+        if (appDetails.name) {
+          officialSteamTitle = appDetails.name;
+          title = appDetails.name;
+        }
+        bannerImage = appDetails.header_image || null;
+        reviewScore = appDetails.metacritic?.score ?? null;
+
+        if (appDetails.is_free) {
+          hasOfficialSteamPrice = true;
+          steamDeal = {
+            shopName: 'Steam',
+            salePrice: 0,
+            regularPrice: 0,
+            cutPercent: 100,
+            url: `https://store.steampowered.com/app/${steamAppId}/`,
+            expiry: null,
+            currency,
+            currencySymbol,
+          };
+          storeBreakdown['Steam'] = steamDeal;
+        } else if (appDetails.price_overview) {
+          hasOfficialSteamPrice = true;
+          steamDeal = {
+            shopName: 'Steam',
+            salePrice: appDetails.price_overview.final / 100,
+            regularPrice: appDetails.price_overview.initial / 100,
+            cutPercent: appDetails.price_overview.discount_percent,
+            url: `https://store.steampowered.com/app/${steamAppId}/`,
+            expiry: null,
+            currency,
+            currencySymbol,
+          };
+          storeBreakdown['Steam'] = steamDeal;
+        } else {
+          // Officially unreleased or not purchasable on Steam
+          delete storeBreakdown['Steam'];
+        }
+      } else {
+        // Valve appdetails timed out (>1500ms) or failed
+        if (!title && resolvedLookupTitle) {
+          title = resolvedLookupTitle;
+        } else if (!title && titleFallback) {
+          title = titleFallback;
+        }
+        if (steamAppId && !bannerImage) {
+          bannerImage = `https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/${steamAppId}/header.jpg`;
+        }
+      }
+
       // Step 3 (Conditional Secondary Edition Search):
       // Secondary edition search MUST ONLY run if Step 2 returned ONLY Steam (or 0 alternative stores).
       // If Step 2 already found ANY alternative store (Epic Games Store, GOG, Nuuvem), skip Step 3.
 
+      const rawSearchTitle = officialSteamTitle || resolvedLookupTitle || titleFallback || title;
+      const baseTitle = sanitizeTitleForItadLookup(rawSearchTitle);
       const needsSecondaryEditionSearch = Object.keys(storeBreakdown).filter((k) => k !== 'Steam').length === 0;
 
       if (needsSecondaryEditionSearch && baseTitle && baseTitle !== 'Monitored Title' && baseTitle.length > 1) {
@@ -858,6 +883,50 @@ export async function getGameDealInfo(
       }
     } else {
       alternativeCheckStatus = 'skipped';
+      const appDetails = await steamPromise;
+      if (appDetails) {
+        if (appDetails.name) {
+          officialSteamTitle = appDetails.name;
+          title = appDetails.name;
+        }
+        bannerImage = appDetails.header_image || null;
+        reviewScore = appDetails.metacritic?.score ?? null;
+
+        if (appDetails.is_free) {
+          hasOfficialSteamPrice = true;
+          steamDeal = {
+            shopName: 'Steam',
+            salePrice: 0,
+            regularPrice: 0,
+            cutPercent: 100,
+            url: `https://store.steampowered.com/app/${steamAppId}/`,
+            expiry: null,
+            currency,
+            currencySymbol,
+          };
+          storeBreakdown['Steam'] = steamDeal;
+        } else if (appDetails.price_overview) {
+          hasOfficialSteamPrice = true;
+          steamDeal = {
+            shopName: 'Steam',
+            salePrice: appDetails.price_overview.final / 100,
+            regularPrice: appDetails.price_overview.initial / 100,
+            cutPercent: appDetails.price_overview.discount_percent,
+            url: `https://store.steampowered.com/app/${steamAppId}/`,
+            expiry: null,
+            currency,
+            currencySymbol,
+          };
+          storeBreakdown['Steam'] = steamDeal;
+        }
+      } else {
+        if (!title && titleFallback) {
+          title = titleFallback;
+        }
+        if (steamAppId && !bannerImage) {
+          bannerImage = `https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/${steamAppId}/header.jpg`;
+        }
+      }
     }
 
     const availableDeals = Object.values(storeBreakdown);
