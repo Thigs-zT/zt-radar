@@ -818,9 +818,11 @@ export async function resolveWishlistTelemetry(
     resolveSteamAppTitles(targetAppIds, 1200),
   ]);
 
-  const dealMap = new Map<string, GameDealInfo | PublicMarketTelemetry>();
+  const dealMap = new Map<string, PublicMarketTelemetry>();
 
-  // Query DynamoDB in parallel for cached healthy telemetry across all wishlist target items
+  // Query DynamoDB in parallel for cached healthy telemetry across all wishlist target items.
+  // To preserve ITAD burst quota when opening the wishlist grid, live getGameDealInfo calls
+  // are completely avoided; cache misses rely solely on authentic Steam batch store pricing.
   if (tableName && ddbDocClient) {
     try {
       const cachedSettled = await Promise.allSettled(
@@ -835,30 +837,7 @@ export async function resolveWishlistTelemetry(
         }
       }
     } catch {
-      // Graceful fallback to live query on DynamoDB error
-    }
-  }
-
-  // To preserve ITAD burst quota when opening the wishlist grid, only execute live lookups
-  // sequentially for at most the top 3 items with cache misses
-  const uncachedCandidates = targetItems
-    .filter((item) => !dealMap.has(item.appId))
-    .slice(0, 3);
-
-  for (const item of uncachedCandidates) {
-    try {
-      const titleFallback =
-        titleMap.get(item.appId) ||
-        titleMap.get(Number(item.appId)) ||
-        APP_DIRECTORY[item.appId] ||
-        KNOWN_GAME_TITLES[item.appId] ||
-        null;
-      const deal = await getGameDealInfo(item.appId, currency, titleFallback);
-      if (deal) {
-        dealMap.set(item.appId, deal);
-      }
-    } catch {
-      // Graceful fallback on live lookup failure
+      // Graceful fallback on DynamoDB error
     }
   }
 
@@ -908,12 +887,35 @@ export async function resolveWishlistTelemetry(
       dealInfo?.primaryDeal &&
       (dealInfo.primaryDeal.salePrice > 0 || dealInfo.primaryDeal.regularPrice > 0)
     );
+    const effectiveSteamSalePrice =
+      typeof priceInfo?.salePrice === 'number' && priceInfo.salePrice !== null
+        ? priceInfo.salePrice
+        : typeof priceInfo?.final === 'number'
+          ? priceInfo.final
+          : typeof priceInfo?.price === 'number'
+            ? priceInfo.price
+            : null;
+
+    const effectiveSteamRegularPrice =
+      typeof priceInfo?.regularPrice === 'number' && priceInfo.regularPrice !== null
+        ? priceInfo.regularPrice
+        : typeof priceInfo?.initial === 'number'
+          ? priceInfo.initial
+          : effectiveSteamSalePrice;
+
+    const effectiveSteamDiscount =
+      typeof priceInfo?.discountPercent === 'number'
+        ? priceInfo.discountPercent
+        : effectiveSteamRegularPrice && effectiveSteamSalePrice && effectiveSteamRegularPrice > effectiveSteamSalePrice
+          ? Math.round(((effectiveSteamRegularPrice - effectiveSteamSalePrice) / effectiveSteamRegularPrice) * 100)
+          : 0;
+
     const hasValidSteamPrice = Boolean(
       priceInfo &&
       !priceInfo.isUnreleased &&
-      typeof priceInfo.salePrice === 'number' &&
-      priceInfo.salePrice !== null &&
-      priceInfo.salePrice > 0
+      typeof effectiveSteamSalePrice === 'number' &&
+      effectiveSteamSalePrice !== null &&
+      effectiveSteamSalePrice > 0
     );
     const isTrulyFreeDeal = Boolean(
       dealInfo &&
@@ -934,9 +936,9 @@ export async function resolveWishlistTelemetry(
     } else if (hasValidSteamPrice) {
       // 2. Confirmed Steam store pricing
       isFree = false;
-      salePrice = priceInfo!.salePrice!;
-      regularPrice = priceInfo!.regularPrice ?? priceInfo!.initial ?? salePrice;
-      discountPercent = priceInfo!.discountPercent ?? 0;
+      salePrice = effectiveSteamSalePrice!;
+      regularPrice = effectiveSteamRegularPrice ?? salePrice;
+      discountPercent = effectiveSteamDiscount;
       isUnreleased = false;
       const steamDeal: StoreDeal = {
         shopName: 'Steam',

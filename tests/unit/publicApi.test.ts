@@ -1805,8 +1805,18 @@ describe('Public Web API Handler', () => {
       );
     });
 
-    it('should enrich top wishlist items with multi-store deal intelligence when available', async () => {
-      vi.mocked(getGameDealInfo).mockResolvedValueOnce(mockDealBaldursGate);
+    it('should enrich top wishlist items with multi-store deal intelligence when available in cache', async () => {
+      ddbMock.on(QueryCommand).resolvesOnce({
+        Items: [
+          {
+            PK: 'MARKET#v5#1086940#USD',
+            SK: 'TELEMETRY',
+            ...mockDealBaldursGate,
+            appId: '1086940',
+            ttl: Math.floor(Date.now() / 1000) + 7200,
+          },
+        ],
+      });
 
       const event: HttpApiEvent = {
         routeKey: 'GET /public/wishlist/{target}',
@@ -2185,7 +2195,7 @@ describe('Public Web API Handler', () => {
       expect(unreleasedGame.priority).toBe(5);
     });
 
-    it('should enforce deal intelligence precedence over unreleased fallback when dealInfo provides valid pricing', async () => {
+    it('should enforce deal intelligence precedence over unreleased fallback when cached dealInfo provides valid pricing', async () => {
       vi.mocked(fetchSteamWishlist).mockResolvedValueOnce({
         success: true,
         items: [
@@ -2209,7 +2219,17 @@ describe('Public Web API Handler', () => {
         ]),
       );
 
-      vi.mocked(getGameDealInfo).mockResolvedValueOnce(mockDealBaldursGate);
+      ddbMock.on(QueryCommand).resolvesOnce({
+        Items: [
+          {
+            PK: 'MARKET#v5#1086940#USD',
+            SK: 'TELEMETRY',
+            ...mockDealBaldursGate,
+            appId: '1086940',
+            ttl: Math.floor(Date.now() / 1000) + 7200,
+          },
+        ],
+      });
 
       const event: HttpApiEvent = {
         routeKey: 'GET /public/wishlist/{target}',
@@ -2410,7 +2430,7 @@ describe('Public Web API Handler', () => {
       expect(getGameDealInfo).not.toHaveBeenCalled();
     });
 
-    it('should limit live getGameDealInfo calls to at most the top 3 items when items miss cache', async () => {
+    it('should completely eliminate live getGameDealInfo calls when items miss cache and return authentic Steam prices', async () => {
       const wishlistItems = [
         { appId: '201', priority: 1, dateAdded: 500 },
         { appId: '202', priority: 2, dateAdded: 400 },
@@ -2439,7 +2459,7 @@ describe('Public Web API Handler', () => {
       const response = await handler(event);
       expect(response.statusCode).toBe(200);
 
-      expect(getGameDealInfo).toHaveBeenCalledTimes(3);
+      expect(getGameDealInfo).not.toHaveBeenCalled();
     });
   });
 
