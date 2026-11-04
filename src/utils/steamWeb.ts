@@ -1335,6 +1335,7 @@ export async function batchFetchSteamAppPrices(
                 discountPercent: 0,
                 isFree: false,
                 isUnreleased: true,
+                headerImage: null,
               });
               continue;
             }
@@ -1347,13 +1348,13 @@ export async function batchFetchSteamAppPrices(
                 discountPercent: 0,
                 isFree: false,
                 isUnreleased: true,
-                headerImage: getCanonicalHeaderImageUrl(appId),
+                headerImage: null,
               });
               continue;
             }
 
             const appDataObj = !Array.isArray(appObj.data) ? appObj.data : undefined;
-            const headerImage = appDataObj?.header_image || getCanonicalHeaderImageUrl(appId);
+            const headerImage = appDataObj?.header_image || null;
             const isFree = Boolean(appDataObj?.is_free);
             const overview = appDataObj?.price_overview;
 

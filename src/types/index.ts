@@ -326,7 +326,7 @@ export interface SteamAppPriceInfo {
   isDelisted?: boolean;
   price?: number;
   currency?: string;
-  headerImage?: string;
+  headerImage?: string | null;
   salePrice?: number | null;
   regularPrice?: number | null;
   discountPercent?: number;

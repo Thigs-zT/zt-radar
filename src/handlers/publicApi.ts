@@ -864,7 +864,8 @@ export async function resolveWishlistTelemetry(
   const items: PublicWishlistItem[] = targetItems.map((item) => {
     const appId = item.appId;
     const priceInfo = priceMap.get(Number(appId));
-    const dealInfo = dealMap.get(appId);
+    const cached = dealMap.get(appId);
+    const dealInfo = cached;
 
     const resolvedTitle =
       (dealInfo?.title && dealInfo.title !== 'Monitored Title' ? dealInfo.title : null) ||
@@ -981,7 +982,16 @@ export async function resolveWishlistTelemetry(
       storeBreakdown = undefined;
     }
 
-    const authenticImageUrl = artworkMap.get(appId) || getCanonicalHeaderImageUrl(appId);
+    const canonicalHeaderUrl = getCanonicalHeaderImageUrl(appId);
+    const cachedArtwork = artworkMap.get(appId);
+    const rawCachedImage = cached?.imageUrl || cachedArtwork;
+    const cachedImageUrl =
+      rawCachedImage && rawCachedImage !== canonicalHeaderUrl ? rawCachedImage : null;
+
+    const resolvedImageUrl =
+      cachedImageUrl ||
+      (priceInfo?.headerImage ? priceInfo.headerImage : null) ||
+      canonicalHeaderUrl;
     const authenticPriority =
       typeof item.priority === 'number'
         ? Math.floor(item.priority)
@@ -990,7 +1000,7 @@ export async function resolveWishlistTelemetry(
     return {
       appId,
       title: resolvedTitle,
-      imageUrl: authenticImageUrl,
+      imageUrl: resolvedImageUrl,
       url: `https://store.steampowered.com/app/${appId}`,
       store: 'Steam',
       priority: authenticPriority,

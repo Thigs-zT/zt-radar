@@ -503,6 +503,7 @@ describe('batchFetchSteamAppPrices', () => {
     expect(dota?.salePrice).toBe(0);
     expect(dota?.regularPrice).toBe(0);
     expect(dota?.discountPercent).toBe(0);
+    expect(dota?.headerImage).toBe('https://cdn.steam.com/570/header.jpg');
 
     // 2. Paid game with discount
     const bg3 = priceMap.get(1086940);
@@ -512,6 +513,7 @@ describe('batchFetchSteamAppPrices', () => {
     expect(bg3?.salePrice).toBe(47.99);
     expect(bg3?.regularPrice).toBe(59.99);
     expect(bg3?.discountPercent).toBe(20);
+    expect(bg3?.headerImage).toBe('https://cdn.steam.com/1086940/header.jpg');
 
     // 3. Unreleased game (missing price_overview and is_free: false)
     const bf6 = priceMap.get(2807960);
@@ -521,6 +523,7 @@ describe('batchFetchSteamAppPrices', () => {
     expect(bf6?.salePrice).toBeNull();
     expect(bf6?.regularPrice).toBeNull();
     expect(bf6?.discountPercent).toBe(0);
+    expect(bf6?.headerImage).toBe('https://cdn.steam.com/2807960/sha1_hash/header.jpg');
 
     // 4. Delisted / unsuccessful game
     const delisted = priceMap.get(999999);
@@ -529,6 +532,7 @@ describe('batchFetchSteamAppPrices', () => {
     expect(delisted?.salePrice).toBeNull();
     expect(delisted?.isFree).toBe(false);
     expect(delisted?.isUnreleased).toBe(true);
+    expect(delisted?.headerImage).toBeNull();
 
     // 5. Omitted / unreturned game
     const omitted = priceMap.get(888888);
@@ -546,6 +550,7 @@ describe('batchFetchSteamAppPrices', () => {
     expect(dbx?.salePrice).toBeNull();
     expect(dbx?.regularPrice).toBeNull();
     expect(dbx?.discountPercent).toBe(0);
+    expect(dbx?.headerImage).toBeNull();
 
     fetchSpy.mockRestore();
   });

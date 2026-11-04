@@ -2140,6 +2140,104 @@ describe('Public Web API Handler', () => {
       fetchSpy.mockRestore();
     });
 
+    it('should prioritize dynamic valve header_image from batchFetchSteamAppPrices over generic canonical fallback', async () => {
+      ddbMock.on(BatchGetCommand).resolves({
+        Responses: {},
+      });
+      const dynamicHeader =
+        'https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/2807960/dynamic_sha1_hash/header.jpg';
+
+      vi.mocked(fetchSteamWishlist).mockResolvedValueOnce({
+        success: true,
+        items: [{ appId: '2807960', priority: 1, dateAdded: 1700000000 }],
+      });
+      vi.mocked(batchFetchSteamAppPrices).mockResolvedValueOnce(
+        new Map([
+          [
+            2807960,
+            {
+              isUnreleased: true,
+              isFree: false,
+              salePrice: null,
+              regularPrice: null,
+              discountPercent: 0,
+              headerImage: dynamicHeader,
+            },
+          ],
+        ]),
+      );
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/wishlist/{target}',
+        rawPath: '/public/wishlist/76561198327022168',
+        pathParameters: {
+          target: '76561198327022168',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/wishlist/76561198327022168',
+          },
+        },
+      };
+
+      const response = await handler(event);
+      expect(response.statusCode).toBe(200);
+      const data = JSON.parse(response.body);
+      const bf6 = data.items.find((i: { appId: string }) => i.appId === '2807960');
+      expect(bf6?.imageUrl).toBe(dynamicHeader);
+    });
+
+    it('should prioritize cached imageUrl from DynamoDB over dynamic store headerImage', async () => {
+      const cachedMarketHeader = 'https://cdn.example.com/cached-market-bg3.jpg';
+      ddbMock.on(BatchGetCommand).resolves({ Responses: {} });
+      ddbMock.on(QueryCommand).resolvesOnce({
+        Items: [
+          {
+            PK: 'MARKET#v5#1086940#USD',
+            SK: 'TELEMETRY',
+            appId: '1086940',
+            imageUrl: cachedMarketHeader,
+            alternativeCheckDegraded: false,
+            isPlatformExclusive: true,
+            ttl: Math.floor(Date.now() / 1000) + 7200,
+          },
+        ],
+      });
+      vi.mocked(fetchSteamWishlist).mockResolvedValueOnce({
+        success: true,
+        items: [{ appId: '1086940', priority: 1, dateAdded: 1700000000 }],
+      });
+      vi.mocked(batchFetchSteamAppPrices).mockResolvedValueOnce(
+        new Map([
+          [
+            1086940,
+            {
+              initial: 59.99,
+              final: 47.99,
+              isFree: false,
+              headerImage: 'https://cdn.steam.com/1086940/dynamic_header.jpg',
+            },
+          ],
+        ]),
+      );
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/wishlist/{target}',
+        rawPath: '/public/wishlist/76561198327022168',
+        pathParameters: { target: '76561198327022168' },
+        requestContext: {
+          http: { method: 'GET', path: '/public/wishlist/76561198327022168' },
+        },
+      };
+
+      const response = await handler(event);
+      expect(response.statusCode).toBe(200);
+      const data = JSON.parse(response.body);
+      const bg3 = data.items.find((i: { appId: string }) => i.appId === '1086940');
+      expect(bg3?.imageUrl).toBe(cachedMarketHeader);
+    });
+
     it('should sanitize unreleased or unpriced wishlist games to return salePrice: null and isFree: false, never zero or 100% free', async () => {
       vi.mocked(getGameDealInfo).mockResolvedValueOnce(null);
       vi.mocked(fetchSteamWishlist).mockResolvedValueOnce({
