@@ -1443,19 +1443,44 @@ export function getCanonicalHeaderImageUrl(appId: string | number): string {
   return `https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/${cleanId}/header.jpg`;
 }
 
+/**
+ * Determines whether a given artwork URL is an authentic, dynamic asset URL
+ * (e.g. SHA-1 hashed CDN path or valid custom store image) rather than an unhashed
+ * canonical fallback (which often 404s or serves template/grey placeholders).
+ */
+export function isAuthenticArtworkUrl(url: string | null | undefined, appId: string | number): boolean {
+  if (!url || typeof url !== 'string') return false;
+  const cleanUrl = url.trim();
+  if (!cleanUrl.startsWith('http://') && !cleanUrl.startsWith('https://')) return false;
+  const cleanId = String(appId).trim();
+  if (!cleanId) return false;
+  if (cleanUrl === getCanonicalHeaderImageUrl(cleanId)) return false;
+  // Reject unhashed Akamai fallback URLs (e.g. .../apps/<appId>/header.jpg) which 404 or serve grey/template placeholders
+  if (
+    cleanUrl.startsWith('https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/') &&
+    cleanUrl.includes(`/${cleanId}/header.jpg`)
+  ) {
+    return false;
+  }
+  return true;
+}
+
 export interface ResolveArtworkOptions {
   ddbDocClient?: DynamoDBDocumentClient;
   tableName?: string;
   fetchedHeaders?: Map<string | number, string | null | undefined>;
+  titleMap?: Map<string | number, string>;
 }
 
 /**
  * Resolves authentic Steam artwork URLs with DynamoDB caching:
  * - Checks DynamoDB cache under PK: ASSET#<appId>, SK: METADATA.
- * - Uses cached headerImage if present and fresh (TTL 30 days).
- * - If not in cache, uses fetchedHeaders (from store API appdetails / price batch if available).
- * - If still missing, queries Valve's store API (or falls back to canonical akamai header.jpg).
- * - Persists newly resolved artwork URLs to DynamoDB with a 30-day TTL.
+ * - Uses cached headerImage if present, fresh (TTL 30 days), and authentic (SHA-1 hashed).
+ * - If not in cache, uses fetchedHeaders (if authentic).
+ * - If still missing, queries Valve's official Store Browse Service (IStoreBrowseService/GetItems/v1)
+ *   with include_assets: true to retrieve authentic SHA-1 hashed CDN assets.
+ * - Auto-heals missing titles in titleMap if provided.
+ * - Persists genuine newly resolved artwork URLs to DynamoDB with a 30-day TTL.
  */
 export async function batchResolveAuthenticArtwork(
   appIds: Array<string | number>,
@@ -1501,7 +1526,9 @@ export async function batchResolveAuthenticArtwork(
         for (const item of items) {
           const rawAppId = String(item.appId || (item.PK ? item.PK.replace('ASSET#', '') : '')).trim();
           if (rawAppId && item.headerImage && typeof item.headerImage === 'string') {
-            if (!item.ttl || Number(item.ttl) > now) {
+            const isFresh = !item.ttl || Number(item.ttl) > now;
+            const isAuthentic = isAuthenticArtworkUrl(item.headerImage, rawAppId);
+            if (isFresh && isAuthentic) {
               artworkMap.set(rawAppId, item.headerImage);
               foundIds.add(rawAppId);
             }
@@ -1526,13 +1553,13 @@ export async function batchResolveAuthenticArtwork(
     return artworkMap;
   }
 
-  // 2. Resolve missing items from fetchedHeaders or Valve Store API
+  // 2. Resolve missing items from fetchedHeaders or Valve Store Browse Service
   const newlyResolved: Array<{ appId: string; headerImage: string }> = [];
   const needStoreFetch: string[] = [];
 
   for (const appId of missingFromCache) {
     const fetched = fetchedHeaders?.get(appId) || fetchedHeaders?.get(Number(appId));
-    if (fetched && typeof fetched === 'string' && fetched.trim().length > 0) {
+    if (fetched && typeof fetched === 'string' && isAuthenticArtworkUrl(fetched, appId)) {
       artworkMap.set(appId, fetched.trim());
       newlyResolved.push({ appId, headerImage: fetched.trim() });
     } else {
@@ -1540,47 +1567,116 @@ export async function batchResolveAuthenticArtwork(
     }
   }
 
-  // 3. Query Valve Store API for any remaining unmapped titles (bounded concurrency)
+  // 3. Query Valve Store Browse Service for any remaining unmapped titles (bounded concurrency & timeout)
   if (needStoreFetch.length > 0) {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 2000);
+    const timer = setTimeout(() => controller.abort(), 2500);
 
     try {
-      const STORE_CHUNK = 25;
+      const STORE_CHUNK = 100;
       for (let i = 0; i < needStoreFetch.length; i += STORE_CHUNK) {
         const chunk = needStoreFetch.slice(i, i + STORE_CHUNK);
         try {
-          const url = `https://store.steampowered.com/api/appdetails?appids=${chunk.join(',')}&filters=basic`;
+          const inputJson = {
+            ids: chunk.map((id) => ({ appid: parseInt(id, 10) })),
+            context: {
+              language: 'english',
+              country_code: 'US',
+            },
+            data_request: {
+              include_assets: true,
+            },
+          };
+          const url = `https://api.steampowered.com/IStoreBrowseService/GetItems/v1?input_json=${encodeURIComponent(JSON.stringify(inputJson))}`;
           const res = await fetch(url, {
             headers: { 'User-Agent': USER_AGENT },
             signal: controller.signal,
           });
 
           if (res.ok) {
-            const data = (await res.json()) as Record<string, { success?: boolean; data?: { header_image?: string } }>;
-            for (const appId of chunk) {
-              const header = data?.[appId]?.data?.header_image;
-              if (header && typeof header === 'string') {
-                artworkMap.set(appId, header);
-                newlyResolved.push({ appId, headerImage: header });
+            const data = (await res.json()) as {
+              response?: {
+                store_items?: Array<{
+                  id?: number;
+                  appid?: number;
+                  name?: string;
+                  assets?: {
+                    header?: string;
+                    main_capsule?: string;
+                    hero_capsule?: string;
+                    library_capsule?: string;
+                  };
+                }>;
+              };
+            };
+
+            const storeItems = data?.response?.store_items || [];
+            const returnedIds = new Set<string>();
+
+            for (const item of storeItems) {
+              const itemAppId = String(item.appid ?? item.id ?? '').trim();
+              if (!itemAppId) continue;
+              returnedIds.add(itemAppId);
+
+              if (options.titleMap && item.name) {
+                options.titleMap.set(itemAppId, item.name);
+                options.titleMap.set(Number(itemAppId), item.name);
+              }
+
+              const candidateAssets = [
+                item.assets?.header,
+                item.assets?.main_capsule,
+                item.assets?.hero_capsule,
+                item.assets?.library_capsule,
+              ].filter((a): a is string => typeof a === 'string' && a.trim().length > 0);
+
+              let chosenAsset: string | null = null;
+              for (const cand of candidateAssets) {
+                if (cand.includes('/') || cand.startsWith('http')) {
+                  chosenAsset = cand;
+                  break;
+                }
+              }
+              if (!chosenAsset && candidateAssets.length > 0) {
+                chosenAsset = candidateAssets[0];
+              }
+
+              let resolvedUrl: string;
+              if (chosenAsset) {
+                if (chosenAsset.startsWith('http://') || chosenAsset.startsWith('https://')) {
+                  resolvedUrl = chosenAsset;
+                } else {
+                  const cleanPath = chosenAsset.replace(/^\/+/, '');
+                  resolvedUrl = `https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/${itemAppId}/${cleanPath}`;
+                }
               } else {
+                resolvedUrl = getCanonicalHeaderImageUrl(itemAppId);
+              }
+
+              artworkMap.set(itemAppId, resolvedUrl);
+              if (isAuthenticArtworkUrl(resolvedUrl, itemAppId)) {
+                newlyResolved.push({ appId: itemAppId, headerImage: resolvedUrl });
+              }
+            }
+
+            for (const appId of chunk) {
+              if (!returnedIds.has(appId)) {
                 const fallback = getCanonicalHeaderImageUrl(appId);
                 artworkMap.set(appId, fallback);
-                newlyResolved.push({ appId, headerImage: fallback });
               }
             }
           } else {
             for (const appId of chunk) {
               const fallback = getCanonicalHeaderImageUrl(appId);
               artworkMap.set(appId, fallback);
-              newlyResolved.push({ appId, headerImage: fallback });
             }
           }
         } catch {
           for (const appId of chunk) {
-            const fallback = getCanonicalHeaderImageUrl(appId);
-            artworkMap.set(appId, fallback);
-            newlyResolved.push({ appId, headerImage: fallback });
+            if (!artworkMap.has(appId)) {
+              const fallback = getCanonicalHeaderImageUrl(appId);
+              artworkMap.set(appId, fallback);
+            }
           }
         }
       }
@@ -1589,7 +1685,7 @@ export async function batchResolveAuthenticArtwork(
     }
   }
 
-  // 4. Save newly resolved assets into DynamoDB cache (chunked up to 25 items)
+  // 4. Save newly resolved authentic assets into DynamoDB cache (chunked up to 25 items)
   if (ddbDocClient && tableName && newlyResolved.length > 0) {
     try {
       const WRITE_CHUNK = 25;

@@ -34,6 +34,7 @@ import {
   getPlayerLibraryDetailed,
   batchResolveAuthenticArtwork,
   resolveAuthenticArtwork,
+  isAuthenticArtworkUrl,
   getCanonicalHeaderImageUrl,
   APP_DIRECTORY,
 } from '../utils/steamWeb.js';
@@ -859,6 +860,7 @@ export async function resolveWishlistTelemetry(
     ddbDocClient,
     tableName,
     fetchedHeaders,
+    titleMap,
   });
 
   const items: PublicWishlistItem[] = targetItems.map((item) => {
@@ -984,14 +986,18 @@ export async function resolveWishlistTelemetry(
 
     const canonicalHeaderUrl = getCanonicalHeaderImageUrl(appId);
     const cachedArtwork = artworkMap.get(appId);
-    const rawCachedImage = cached?.imageUrl || cachedArtwork;
-    const cachedImageUrl =
-      rawCachedImage && rawCachedImage !== canonicalHeaderUrl ? rawCachedImage : null;
+    const isAuthentic = (url: string | null | undefined): url is string => isAuthenticArtworkUrl(url, appId);
 
-    const resolvedImageUrl =
-      cachedImageUrl ||
-      (priceInfo?.headerImage ? priceInfo.headerImage : null) ||
-      canonicalHeaderUrl;
+    let resolvedImageUrl: string;
+    if (isAuthentic(cached?.imageUrl)) {
+      resolvedImageUrl = cached!.imageUrl;
+    } else if (isAuthentic(cachedArtwork)) {
+      resolvedImageUrl = cachedArtwork!;
+    } else if (isAuthentic(priceInfo?.headerImage)) {
+      resolvedImageUrl = priceInfo!.headerImage!;
+    } else {
+      resolvedImageUrl = cachedArtwork || canonicalHeaderUrl;
+    }
     const authenticPriority =
       typeof item.priority === 'number'
         ? Math.floor(item.priority)

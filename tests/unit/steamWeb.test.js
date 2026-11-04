@@ -7,6 +7,9 @@ import {
   buildAchievementsEmbedPayload,
   getAchievementTrackerLinks,
   batchFetchSteamAppPrices,
+  batchResolveAuthenticArtwork,
+  isAuthenticArtworkUrl,
+  getCanonicalHeaderImageUrl,
 } from '../../src/utils/steamWeb.js';
 import { BRAND_COLORS } from '../../src/utils/theme.js';
 
@@ -553,5 +556,81 @@ describe('batchFetchSteamAppPrices', () => {
     expect(dbx?.headerImage).toBeNull();
 
     fetchSpy.mockRestore();
+  });
+
+  describe('isAuthenticArtworkUrl', () => {
+    it('should identify authentic SHA-1 hashed CDN URLs as authentic', () => {
+      const hashedAkamai = 'https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/2807960/c12d12ce3c7d217398d3fcad77427bfc9d57c570/header.jpg';
+      const hashedCloudflare = 'https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/2947440/7e5d923ac622bd1775ebc9b5d4b5b0a24bf5ed40/header.jpg';
+      expect(isAuthenticArtworkUrl(hashedAkamai, 2807960)).toBe(true);
+      expect(isAuthenticArtworkUrl(hashedCloudflare, 2947440)).toBe(true);
+    });
+
+    it('should reject unhashed Akamai canonical fallback URLs', () => {
+      const canonical = getCanonicalHeaderImageUrl(2807960);
+      const canonicalWithQuery = 'https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/2807960/header.jpg?t=1700000000';
+      expect(isAuthenticArtworkUrl(canonical, 2807960)).toBe(false);
+      expect(isAuthenticArtworkUrl(canonicalWithQuery, 2807960)).toBe(false);
+    });
+
+    it('should handle null, undefined, empty, and invalid URLs', () => {
+      expect(isAuthenticArtworkUrl(null, 2807960)).toBe(false);
+      expect(isAuthenticArtworkUrl(undefined, 2807960)).toBe(false);
+      expect(isAuthenticArtworkUrl('', 2807960)).toBe(false);
+      expect(isAuthenticArtworkUrl('not-a-url', 2807960)).toBe(false);
+    });
+  });
+
+  describe('batchResolveAuthenticArtwork', () => {
+    it('should resolve authentic artwork using IStoreBrowseService/GetItems/v1', async () => {
+      const mockBrowseResponse = {
+        response: {
+          store_items: [
+            {
+              id: 2807960,
+              appid: 2807960,
+              name: 'Battlefield 6',
+              assets: {
+                header: 'c12d12ce3c7d217398d3fcad77427bfc9d57c570/header.jpg',
+              },
+            },
+            {
+              id: 2947440,
+              appid: 2947440,
+              name: 'SILENT HILL f',
+              assets: {
+                main_capsule: '6ad629396263435fa527894a4c51478149f7e59e/capsule_616x353.jpg',
+              },
+            },
+          ],
+        },
+      };
+
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
+        ok: true,
+        json: async () => mockBrowseResponse,
+      });
+
+      const titleMap = new Map();
+      const result = await batchResolveAuthenticArtwork([2807960, 2947440], { titleMap });
+
+      expect(result.get('2807960')).toBe(
+        'https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/2807960/c12d12ce3c7d217398d3fcad77427bfc9d57c570/header.jpg'
+      );
+      expect(result.get('2947440')).toBe(
+        'https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/2947440/6ad629396263435fa527894a4c51478149f7e59e/capsule_616x353.jpg'
+      );
+      expect(titleMap.get('2807960')).toBe('Battlefield 6');
+      expect(titleMap.get('2947440')).toBe('SILENT HILL f');
+
+      fetchSpy.mockRestore();
+    });
+
+    it('should fallback to canonical Akamai header.jpg when store query fails', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValueOnce(new Error('Network error'));
+      const result = await batchResolveAuthenticArtwork([12345]);
+      expect(result.get('12345')).toBe(getCanonicalHeaderImageUrl(12345));
+      fetchSpy.mockRestore();
+    });
   });
 });
