@@ -11,7 +11,7 @@
  *  4. buildUnlinkedAccountEmbed() — returns a Link Button embed payload for unlinked users.
  */
 
-import { randomBytes } from 'node:crypto';
+import { randomBytes, createHmac, timingSafeEqual } from 'node:crypto';
 import { PutCommand, GetCommand, DeleteCommand } from '@aws-sdk/lib-dynamodb';
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 
@@ -285,4 +285,222 @@ export function buildUnlinkedAccountEmbed(userId: string, loginUrl: string): obj
       ],
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// Web PWA authentication flow (mode=web)
+// ---------------------------------------------------------------------------
+
+/** Session token lifetime for web sessions: 7 days in seconds. */
+export const WEB_SESSION_TTL_SECONDS = 7 * 24 * 60 * 60;
+
+const WEB_ALLOWED_DEV_ORIGINS = ['http://localhost:5173', 'http://127.0.0.1:5173'];
+
+/** Payload encoded inside the signed web session token. */
+export interface WebSessionPayload {
+  steamId64: string;
+  personaName: string;
+  avatarUrl: string;
+  iat: number;
+  exp: number;
+}
+
+/**
+ * Validates a web redirect URI against the strict origin allowlist.
+ * Allowed: http://localhost:5173, http://127.0.0.1:5173, HTTPS origins ending in `.pages.dev`,
+ * and the configured WEB_APP_URL origin.
+ *
+ * @param redirectUri - Raw redirect_uri supplied by the client.
+ * @param webAppUrl - Optional configured web application URL.
+ * @returns The normalized redirect URI (without fragment), or null when rejected.
+ */
+export function validateWebRedirectUri(redirectUri: string | undefined | null, webAppUrl = ''): string | null {
+  if (!redirectUri || typeof redirectUri !== 'string' || redirectUri.length > 512) return null;
+
+  let parsed: URL;
+  try {
+    parsed = new URL(redirectUri);
+  } catch {
+    return null;
+  }
+
+  if (parsed.username || parsed.password) return null;
+
+  let configuredOrigin = '';
+  if (webAppUrl) {
+    try {
+      const configured = new URL(webAppUrl);
+      if (configured.protocol === 'https:' || WEB_ALLOWED_DEV_ORIGINS.includes(configured.origin)) {
+        configuredOrigin = configured.origin;
+      }
+    } catch {
+      configuredOrigin = '';
+    }
+  }
+
+  const origin = parsed.origin;
+  const isDevOrigin = WEB_ALLOWED_DEV_ORIGINS.includes(origin);
+  const isPagesDev =
+    parsed.protocol === 'https:' && parsed.hostname.endsWith('.pages.dev') && parsed.hostname.length > '.pages.dev'.length;
+  const isConfigured = configuredOrigin !== '' && origin === configuredOrigin;
+
+  if (!isDevOrigin && !isPagesDev && !isConfigured) return null;
+
+  parsed.hash = '';
+  return parsed.toString();
+}
+
+/**
+ * Generates a CSRF state token for the web flow and persists it to DynamoDB.
+ *
+ * @param redirectUri - Previously validated redirect URI.
+ * @param docClient - DynamoDB document client.
+ * @param tableName - DynamoDB table name.
+ * @returns The generated state token.
+ */
+export async function generateWebAuthState(
+  redirectUri: string,
+  docClient: DynamoDBDocumentClient,
+  tableName: string,
+): Promise<string> {
+  const token = randomBytes(32).toString('hex');
+  const expiresAt = Math.floor(Date.now() / 1000) + STATE_TOKEN_TTL_SECONDS;
+
+  await docClient.send(
+    new PutCommand({
+      TableName: tableName,
+      Item: {
+        PK: `WEB_AUTH#${token}`,
+        SK: 'OPENID_STATE',
+        state_token: token,
+        redirect_uri: redirectUri,
+        mode: 'web',
+        expires_at: expiresAt,
+        created_at: new Date().toISOString(),
+      },
+    })
+  );
+
+  return token;
+}
+
+/**
+ * Atomically consumes a web auth state record (single DeleteItem returning the old item).
+ *
+ * @param state - State token from the callback.
+ * @param docClient - DynamoDB document client.
+ * @param tableName - DynamoDB table name.
+ * @returns The stored redirect URI when the record exists and is unexpired, otherwise null.
+ */
+export async function consumeWebAuthState(
+  state: string,
+  docClient: DynamoDBDocumentClient,
+  tableName: string,
+): Promise<{ redirectUri: string } | null> {
+  if (!/^[0-9a-f]{64}$/.test(state || '')) return null;
+
+  try {
+    const result = await docClient.send(
+      new DeleteCommand({
+        TableName: tableName,
+        Key: { PK: `WEB_AUTH#${state}`, SK: 'OPENID_STATE' },
+        ReturnValues: 'ALL_OLD',
+      })
+    );
+    const item = result?.Attributes as
+      | { state_token?: string; redirect_uri?: string; mode?: string; expires_at?: number }
+      | undefined;
+    if (!item || item.mode !== 'web' || item.state_token !== state || !item.redirect_uri) return null;
+    if ((item.expires_at ?? 0) <= Math.floor(Date.now() / 1000)) return null;
+    return { redirectUri: item.redirect_uri };
+  } catch (err) {
+    console.error('Error consuming web auth state:', err);
+    return null;
+  }
+}
+
+/**
+ * Constructs the Steam OpenID 2.0 login URL for the web flow, embedding mode=web and state in return_to.
+ *
+ * @param stateToken - CSRF state token.
+ * @param baseCallbackUrl - Public HTTPS URL of the auth callback route.
+ * @returns The fully encoded Steam OpenID redirect URL.
+ */
+export function buildSteamWebLoginUrl(stateToken: string, baseCallbackUrl: string): string {
+  const returnTo = `${baseCallbackUrl}?mode=web&state=${encodeURIComponent(stateToken)}`;
+  const callbackParsed = new URL(baseCallbackUrl);
+  const realm = `${callbackParsed.protocol}//${callbackParsed.host}/`;
+
+  const params = new URLSearchParams({
+    'openid.ns': 'http://specs.openid.net/auth/2.0',
+    'openid.mode': 'checkid_setup',
+    'openid.return_to': returnTo,
+    'openid.realm': realm,
+    'openid.identity': 'http://specs.openid.net/auth/2.0/identifier_select',
+    'openid.claimed_id': 'http://specs.openid.net/auth/2.0/identifier_select',
+  });
+
+  return `${STEAM_OPENID_ENDPOINT}?${params.toString()}`;
+}
+
+/**
+ * Creates an HMAC-SHA256 signed session token: base64url(payload).base64url(signature).
+ *
+ * @param profile - Verified Steam identity.
+ * @param secret - HMAC secret.
+ * @param ttlSeconds - Token lifetime in seconds.
+ */
+export function signWebSessionToken(
+  profile: { steamId64: string; personaName: string; avatarUrl: string },
+  secret: string,
+  ttlSeconds = WEB_SESSION_TTL_SECONDS,
+): string {
+  const iat = Math.floor(Date.now() / 1000);
+  const payload: WebSessionPayload = {
+    steamId64: profile.steamId64,
+    personaName: profile.personaName,
+    avatarUrl: profile.avatarUrl,
+    iat,
+    exp: iat + ttlSeconds,
+  };
+  const body = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
+  const signature = createHmac('sha256', secret).update(body).digest('base64url');
+  return `${body}.${signature}`;
+}
+
+/**
+ * Verifies a signed web session token.
+ *
+ * @returns The decoded payload when the signature is valid and unexpired, otherwise null.
+ */
+export function verifyWebSessionToken(token: string, secret: string): WebSessionPayload | null {
+  const parts = (token || '').split('.');
+  if (parts.length !== 2 || !secret) return null;
+  const [body, signature] = parts;
+
+  const expected = createHmac('sha256', secret).update(body).digest();
+  const provided = Buffer.from(signature, 'base64url');
+  if (provided.length !== expected.length || !timingSafeEqual(provided, expected)) return null;
+
+  try {
+    const payload = JSON.parse(Buffer.from(body, 'base64url').toString('utf8')) as WebSessionPayload;
+    if (typeof payload.exp !== 'number' || payload.exp <= Math.floor(Date.now() / 1000)) return null;
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Builds the final redirect URL carrying either the signed session or an error in the URL fragment.
+ */
+export function buildWebRedirectUrl(
+  redirectUri: string,
+  result: { signedPayload: string } | { error: string },
+): string {
+  const base = redirectUri.split('#')[0];
+  if ('signedPayload' in result) {
+    return `${base}#steam_auth=${encodeURIComponent(result.signedPayload)}`;
+  }
+  return `${base}#steam_auth_error=${encodeURIComponent(result.error)}`;
 }

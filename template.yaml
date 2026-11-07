@@ -38,6 +38,11 @@ Parameters:
     Default: ""
     Description: Public HTTPS URL for the Steam OpenID callback route (e.g. https://<api-id>.execute-api.<region>.amazonaws.com/prod/auth/steam/callback)
 
+  WebAppUrl:
+    Type: String
+    Default: ""
+    Description: Optional HTTPS origin of the Web PWA allowed as a Steam OpenID web login redirect target
+
 Resources:
   # HTTP API Gateway with Rate Limiting & Throttling Protection
   DiscordApi:
@@ -100,6 +105,7 @@ Resources:
           ITAD_API_KEY: !Ref ItadApiKey
           STEAM_API_KEY: !Ref SteamApiKey
           AUTH_CALLBACK_URL: !Ref AuthCallbackUrl
+          WEB_APP_URL: !Ref WebAppUrl
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref DealsTable

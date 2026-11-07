@@ -50,6 +50,12 @@ import {
   buildSteamLoginUrl,
   verifyOpenIdAssertion,
   buildUnlinkedAccountEmbed,
+  validateWebRedirectUri,
+  generateWebAuthState,
+  consumeWebAuthState,
+  buildSteamWebLoginUrl,
+  signWebSessionToken,
+  buildWebRedirectUrl,
 } from '../utils/steamOpenId.js';
 import type {
   DiscordInteractionPayload,
@@ -80,6 +86,7 @@ const PUBLIC_KEY = process.env.DISCORD_PUBLIC_KEY || '';
 const STEAM_API_KEY = process.env.STEAM_API_KEY || '';
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN || '';
 const AUTH_CALLBACK_URL = process.env.AUTH_CALLBACK_URL || '';
+const WEB_APP_URL = process.env.WEB_APP_URL || '';
 
 const RESPONSE_TYPES = {
   PONG: 1,
@@ -325,6 +332,48 @@ export const handler = async (
   const isSteamCallback = httpMethod === 'GET' && (rawPath === '/auth/steam/callback' || rawPath.endsWith('/auth/steam/callback'));
 
   if (isSteamLogin) {
+    const loginQuery = {
+      ...(event.rawQueryString ? Object.fromEntries(new URLSearchParams(event.rawQueryString)) : {}),
+      ...(event.queryStringParameters || {}),
+    } as Record<string, string>;
+
+    if (loginQuery.mode === 'web') {
+      const redirectUri = validateWebRedirectUri(loginQuery.redirect_uri, WEB_APP_URL);
+      if (!redirectUri) {
+        return {
+          statusCode: 400,
+          headers: { 'Content-Type': 'text/html; charset=utf-8' },
+          body: '<h2>Bad Request</h2><p>Invalid or disallowed redirect_uri.</p>',
+        };
+      }
+
+      if (!AUTH_CALLBACK_URL) {
+        return {
+          statusCode: 503,
+          headers: { 'Content-Type': 'text/html; charset=utf-8' },
+          body: '<h2>Service Unavailable</h2><p>Steam OpenID callback URL is not configured.</p>',
+        };
+      }
+
+      try {
+        const webState = await generateWebAuthState(redirectUri, docClient, TABLE_NAME);
+        return {
+          statusCode: 302,
+          headers: {
+            Location: buildSteamWebLoginUrl(webState, AUTH_CALLBACK_URL),
+            'Cache-Control': 'no-cache, no-store, must-revalidate',
+          },
+          body: '',
+        };
+      } catch (err) {
+        console.error('Error generating Steam web login redirect:', err);
+        return {
+          statusCode: 500,
+          headers: { 'Content-Type': 'text/html; charset=utf-8' },
+          body: '<h2>Internal Error</h2><p>Unable to initiate Steam authentication. Please try again.</p>',
+        };
+      }
+    }
     const userId = event.queryStringParameters?.user_id || new URLSearchParams(event.rawQueryString || '').get('user_id');
 
     if (!userId) {
@@ -371,6 +420,67 @@ export const handler = async (
       ...(event.queryStringParameters || {}),
     };
     const stateToken = queryParams.state;
+
+    if (queryParams.mode === 'web') {
+      const webAuth = await consumeWebAuthState(stateToken || '', docClient, TABLE_NAME);
+      if (!webAuth) {
+        return {
+          statusCode: 403,
+          headers: { 'Content-Type': 'text/html; charset=utf-8' },
+          body: '<h2>Authentication Failed</h2><p>Invalid or expired state token. Please try signing in again.</p>',
+        };
+      }
+
+      const failureRedirect = {
+        statusCode: 302,
+        headers: {
+          Location: buildWebRedirectUrl(webAuth.redirectUri, { error: 'verification_failed' }),
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+        },
+        body: '',
+      };
+
+      try {
+        const webSteamId = await verifyOpenIdAssertion(queryParams);
+        if (!webSteamId) return failureRedirect;
+
+        let webPersonaName = 'Steam User';
+        let webAvatarUrl = '';
+        if (STEAM_API_KEY) {
+          try {
+            const summary = await getPlayerSummary(webSteamId, STEAM_API_KEY);
+            if (summary) {
+              webPersonaName = summary.personaName || 'Steam User';
+              webAvatarUrl = summary.avatarUrl || '';
+            }
+          } catch (profileErr: any) {
+            console.warn('Could not fetch Steam profile for web login:', profileErr?.message || profileErr);
+          }
+        }
+
+        const sessionSecret = PUBLIC_KEY || STEAM_API_KEY;
+        if (!sessionSecret) {
+          console.error('Web session signing secret is not configured');
+          return failureRedirect;
+        }
+
+        const signedPayload = signWebSessionToken(
+          { steamId64: webSteamId, personaName: webPersonaName, avatarUrl: webAvatarUrl },
+          sessionSecret,
+        );
+        return {
+          statusCode: 302,
+          headers: {
+            Location: buildWebRedirectUrl(webAuth.redirectUri, { signedPayload }),
+            'Cache-Control': 'no-cache, no-store, must-revalidate',
+          },
+          body: '',
+        };
+      } catch (err) {
+        console.error('Error completing Steam web login:', err);
+        return failureRedirect;
+      }
+    }
 
     // Extract the user_id that was embedded in the return_to URL's state param format
     // The state token is a 64-char hex string keyed by user ID in DynamoDB.
