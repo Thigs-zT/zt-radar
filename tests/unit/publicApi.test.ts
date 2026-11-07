@@ -2166,6 +2166,27 @@ describe('Public Web API Handler', () => {
           ],
         ]),
       );
+      vi.mocked(resolveSteamAppTitles).mockResolvedValueOnce(
+        new Map([['2807960', 'Battlefield 6']]),
+      );
+
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          response: {
+            store_items: [
+              {
+                id: 2807960,
+                appid: 2807960,
+                name: 'Battlefield 6',
+                assets: {
+                  header: 'dynamic_sha1_hash/header.jpg',
+                },
+              },
+            ],
+          },
+        }),
+      } as Response);
 
       const event: HttpApiEvent = {
         routeKey: 'GET /public/wishlist/{target}',
@@ -2181,11 +2202,15 @@ describe('Public Web API Handler', () => {
         },
       };
 
-      const response = await handler(event);
-      expect(response.statusCode).toBe(200);
-      const data = JSON.parse(response.body);
-      const bf6 = data.items.find((i: { appId: string }) => i.appId === '2807960');
-      expect(bf6?.imageUrl).toBe(dynamicHeader);
+      try {
+        const response = await handler(event);
+        expect(response.statusCode).toBe(200);
+        const data = JSON.parse(response.body);
+        const bf6 = data.items.find((i: { appId: string }) => i.appId === '2807960');
+        expect(bf6?.imageUrl).toBe(dynamicHeader);
+      } finally {
+        fetchSpy.mockRestore();
+      }
     });
 
     it('should prioritize cached imageUrl from DynamoDB over dynamic store headerImage', async () => {
