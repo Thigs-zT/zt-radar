@@ -2238,6 +2238,54 @@ describe('Public Web API Handler', () => {
       expect(bg3?.imageUrl).toBe(cachedMarketHeader);
     });
 
+    it('should hydrate authentic game title in wishlist items when title was missing or generic', async () => {
+      ddbMock.on(BatchGetCommand).resolves({ Responses: {} });
+      vi.mocked(fetchSteamWishlist).mockResolvedValueOnce({
+        success: true,
+        items: [{ appId: '1163550', priority: 1, dateAdded: 1700000000 }],
+      });
+      vi.mocked(batchFetchSteamAppPrices).mockResolvedValueOnce(new Map());
+      vi.mocked(resolveSteamAppTitles).mockResolvedValueOnce(
+        new Map([['1163550', 'Steam App #1163550']]),
+      );
+
+      const mockBrowseResponse = {
+        response: {
+          store_items: [
+            {
+              id: 1163550,
+              appid: 1163550,
+              name: 'Captain Tsubasa: Rise of New Champions',
+              assets: {
+                header: 'header.jpg',
+              },
+            },
+          ],
+        },
+      };
+
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
+        ok: true,
+        json: async () => mockBrowseResponse,
+      } as Response);
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/wishlist/{target}',
+        rawPath: '/public/wishlist/76561198327022168',
+        pathParameters: { target: '76561198327022168' },
+        requestContext: {
+          http: { method: 'GET', path: '/public/wishlist/76561198327022168' },
+        },
+      };
+
+      const response = await handler(event);
+      expect(response.statusCode).toBe(200);
+      const data = JSON.parse(response.body);
+      const tsubasa = data.items.find((i: { appId: string }) => i.appId === '1163550');
+      expect(tsubasa?.title).toBe('Captain Tsubasa: Rise of New Champions');
+      fetchSpy.mockRestore();
+    });
+
     it('should sanitize unreleased or unpriced wishlist games to return salePrice: null and isFree: false, never zero or 100% free', async () => {
       vi.mocked(getGameDealInfo).mockResolvedValueOnce(null);
       vi.mocked(fetchSteamWishlist).mockResolvedValueOnce({

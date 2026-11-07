@@ -1465,6 +1465,17 @@ export function isAuthenticArtworkUrl(url: string | null | undefined, appId: str
   return true;
 }
 
+/**
+ * Determines whether a given title string is missing, generic, or an unresolved placeholder
+ * such as 'Steam App #1163550' or 'Steam Title (1163550)'.
+ */
+export function isGenericSteamTitle(title: string | null | undefined): boolean {
+  if (!title || typeof title !== 'string') return true;
+  const trimmed = title.trim();
+  if (!trimmed) return true;
+  return /^Steam (App|Title) [#\s(]*\d+/i.test(trimmed);
+}
+
 export interface ResolveArtworkOptions {
   ddbDocClient?: DynamoDBDocumentClient;
   tableName?: string;
@@ -1475,12 +1486,12 @@ export interface ResolveArtworkOptions {
 /**
  * Resolves authentic Steam artwork URLs with DynamoDB caching:
  * - Checks DynamoDB cache under PK: ASSET#<appId>, SK: METADATA.
- * - Uses cached headerImage if present, fresh (TTL 30 days), and authentic (SHA-1 hashed).
- * - If not in cache, uses fetchedHeaders (if authentic).
- * - If still missing, queries Valve's official Store Browse Service (IStoreBrowseService/GetItems/v1)
- *   with include_assets: true to retrieve authentic SHA-1 hashed CDN assets.
- * - Auto-heals missing titles in titleMap if provided.
- * - Persists genuine newly resolved artwork URLs to DynamoDB with a 30-day TTL.
+ * - Uses cached headerImage and title if present, fresh (TTL 30 days), and authentic.
+ * - If not in cache, uses fetchedHeaders (if authentic and title not needed).
+ * - If still missing or title is generic, queries Valve's official Store Browse Service (IStoreBrowseService/GetItems/v1)
+ *   with include_assets: true to retrieve authentic SHA-1 hashed CDN assets and official item names.
+ * - Auto-heals missing or generic titles in titleMap if provided.
+ * - Persists genuine newly resolved artwork URLs and titles to DynamoDB with a 30-day TTL.
  */
 export async function batchResolveAuthenticArtwork(
   appIds: Array<string | number>,
@@ -1530,7 +1541,23 @@ export async function batchResolveAuthenticArtwork(
             const isAuthentic = isAuthenticArtworkUrl(item.headerImage, rawAppId);
             if (isFresh && isAuthentic) {
               artworkMap.set(rawAppId, item.headerImage);
-              foundIds.add(rawAppId);
+
+              // Hydrate title from DynamoDB cache if present and authentic
+              const cachedTitle = item.title && typeof item.title === 'string' ? item.title.trim() : null;
+              if (cachedTitle && !isGenericSteamTitle(cachedTitle)) {
+                if (options.titleMap) {
+                  options.titleMap.set(rawAppId, cachedTitle);
+                  options.titleMap.set(Number(rawAppId), cachedTitle);
+                }
+              }
+
+              // Check if options.titleMap still has a missing or generic title for this game
+              const currentTitle = options.titleMap?.get(rawAppId) ?? options.titleMap?.get(Number(rawAppId));
+              const titleStillNeeded = Boolean(options.titleMap && isGenericSteamTitle(currentTitle));
+
+              if (!titleStillNeeded) {
+                foundIds.add(rawAppId);
+              }
             }
           }
         }
@@ -1554,15 +1581,26 @@ export async function batchResolveAuthenticArtwork(
   }
 
   // 2. Resolve missing items from fetchedHeaders or Valve Store Browse Service
-  const newlyResolved: Array<{ appId: string; headerImage: string }> = [];
+  const newlyResolved: Array<{ appId: string; headerImage: string; title?: string }> = [];
   const needStoreFetch: string[] = [];
 
   for (const appId of missingFromCache) {
     const fetched = fetchedHeaders?.get(appId) || fetchedHeaders?.get(Number(appId));
-    if (fetched && typeof fetched === 'string' && isAuthenticArtworkUrl(fetched, appId)) {
+    const currentTitle = options.titleMap?.get(appId) ?? options.titleMap?.get(Number(appId));
+    const titleNeeded = Boolean(options.titleMap && isGenericSteamTitle(currentTitle));
+
+    if (fetched && typeof fetched === 'string' && isAuthenticArtworkUrl(fetched, appId) && !titleNeeded) {
       artworkMap.set(appId, fetched.trim());
-      newlyResolved.push({ appId, headerImage: fetched.trim() });
+      const knownTitle = currentTitle && !isGenericSteamTitle(currentTitle) ? currentTitle.trim() : undefined;
+      newlyResolved.push({
+        appId,
+        headerImage: fetched.trim(),
+        ...(knownTitle ? { title: knownTitle } : {}),
+      });
     } else {
+      if (fetched && typeof fetched === 'string' && isAuthenticArtworkUrl(fetched, appId)) {
+        artworkMap.set(appId, fetched.trim());
+      }
       needStoreFetch.push(appId);
     }
   }
@@ -1618,9 +1656,10 @@ export async function batchResolveAuthenticArtwork(
               if (!itemAppId) continue;
               returnedIds.add(itemAppId);
 
-              if (options.titleMap && item.name) {
-                options.titleMap.set(itemAppId, item.name);
-                options.titleMap.set(Number(itemAppId), item.name);
+              const itemName = item.name && typeof item.name === 'string' ? item.name.trim() : null;
+              if (options.titleMap && itemName && !isGenericSteamTitle(itemName)) {
+                options.titleMap.set(itemAppId, itemName);
+                options.titleMap.set(Number(itemAppId), itemName);
               }
 
               const candidateAssets = [
@@ -1655,7 +1694,11 @@ export async function batchResolveAuthenticArtwork(
 
               artworkMap.set(itemAppId, resolvedUrl);
               if (isAuthenticArtworkUrl(resolvedUrl, itemAppId)) {
-                newlyResolved.push({ appId: itemAppId, headerImage: resolvedUrl });
+                newlyResolved.push({
+                  appId: itemAppId,
+                  headerImage: resolvedUrl,
+                  ...(itemName && !isGenericSteamTitle(itemName) ? { title: itemName } : {}),
+                });
               }
             }
 
@@ -1685,7 +1728,7 @@ export async function batchResolveAuthenticArtwork(
     }
   }
 
-  // 4. Save newly resolved authentic assets into DynamoDB cache (chunked up to 25 items)
+  // 4. Save newly resolved authentic assets and titles into DynamoDB cache (chunked up to 25 items)
   if (ddbDocClient && tableName && newlyResolved.length > 0) {
     try {
       const WRITE_CHUNK = 25;
@@ -1701,6 +1744,7 @@ export async function batchResolveAuthenticArtwork(
                     SK: 'METADATA',
                     appId: item.appId,
                     headerImage: item.headerImage,
+                    ...(item.title ? { title: item.title } : {}),
                     ttl: now + TTL_30_DAYS,
                     updatedAt: new Date().toISOString(),
                   },

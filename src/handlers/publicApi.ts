@@ -35,6 +35,7 @@ import {
   batchResolveAuthenticArtwork,
   resolveAuthenticArtwork,
   isAuthenticArtworkUrl,
+  isGenericSteamTitle,
   getCanonicalHeaderImageUrl,
   APP_DIRECTORY,
 } from '../utils/steamWeb.js';
@@ -869,13 +870,22 @@ export async function resolveWishlistTelemetry(
     const cached = dealMap.get(appId);
     const dealInfo = cached;
 
-    const resolvedTitle =
-      (dealInfo?.title && dealInfo.title !== 'Monitored Title' ? dealInfo.title : null) ||
+    const candidateDealTitle =
+      dealInfo?.title && dealInfo.title !== 'Monitored Title' && !isGenericSteamTitle(dealInfo.title)
+        ? dealInfo.title
+        : null;
+
+    const rawTitle =
+      candidateDealTitle ||
       APP_DIRECTORY[appId] ||
       KNOWN_GAME_TITLES[appId] ||
       titleMap.get(appId) ||
-      titleMap.get(Number(appId)) ||
-      `Steam App #${appId}`;
+      titleMap.get(Number(appId));
+
+    const resolvedTitle =
+      rawTitle && !isGenericSteamTitle(rawTitle)
+        ? rawTitle
+        : `Steam App #${appId}`;
 
     let isFree = false;
     let isUnreleased = false;

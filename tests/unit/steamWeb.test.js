@@ -9,6 +9,7 @@ import {
   batchFetchSteamAppPrices,
   batchResolveAuthenticArtwork,
   isAuthenticArtworkUrl,
+  isGenericSteamTitle,
   getCanonicalHeaderImageUrl,
 } from '../../src/utils/steamWeb.js';
 import { BRAND_COLORS } from '../../src/utils/theme.js';
@@ -558,6 +559,27 @@ describe('batchFetchSteamAppPrices', () => {
     fetchSpy.mockRestore();
   });
 
+  describe('isGenericSteamTitle', () => {
+    it('should identify missing, generic, or unresolved placeholder titles', () => {
+      expect(isGenericSteamTitle('Steam App #1163550')).toBe(true);
+      expect(isGenericSteamTitle('Steam Title (1163550)')).toBe(true);
+      expect(isGenericSteamTitle('Steam App 427410')).toBe(true);
+      expect(isGenericSteamTitle('Steam Title #427410')).toBe(true);
+      expect(isGenericSteamTitle(null)).toBe(true);
+      expect(isGenericSteamTitle(undefined)).toBe(true);
+      expect(isGenericSteamTitle('')).toBe(true);
+      expect(isGenericSteamTitle('   ')).toBe(true);
+    });
+
+    it('should identify authentic titles as non-generic', () => {
+      expect(isGenericSteamTitle('Captain Tsubasa: Rise of New Champions')).toBe(false);
+      expect(isGenericSteamTitle('Abiotic Factor')).toBe(false);
+      expect(isGenericSteamTitle('Baldur\'s Gate 3')).toBe(false);
+      expect(isGenericSteamTitle('SteamWorld Dig')).toBe(false);
+      expect(isGenericSteamTitle('SteamWorld Heist II')).toBe(false);
+    });
+  });
+
   describe('isAuthenticArtworkUrl', () => {
     it('should identify authentic SHA-1 hashed CDN URLs as authentic', () => {
       const hashedAkamai = 'https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/2807960/c12d12ce3c7d217398d3fcad77427bfc9d57c570/header.jpg';
@@ -631,6 +653,79 @@ describe('batchFetchSteamAppPrices', () => {
       const result = await batchResolveAuthenticArtwork([12345]);
       expect(result.get('12345')).toBe(getCanonicalHeaderImageUrl(12345));
       fetchSpy.mockRestore();
+    });
+
+    it('should overwrite generic entry in titleMap with authentic item.name from browse response', async () => {
+      const mockBrowseResponse = {
+        response: {
+          store_items: [
+            {
+              id: 1163550,
+              appid: 1163550,
+              name: 'Captain Tsubasa: Rise of New Champions',
+              assets: {
+                header: 'header.jpg',
+              },
+            },
+            {
+              id: 427410,
+              appid: 427410,
+              name: 'Abiotic Factor',
+              assets: {
+                header: '0bccdb269cdbb25c701cd00c3179cc29647e1fb8/header_alt_assets_7.jpg',
+              },
+            },
+          ],
+        },
+      };
+
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
+        ok: true,
+        json: async () => mockBrowseResponse,
+      });
+
+      const titleMap = new Map([
+        ['1163550', 'Steam App #1163550'],
+        ['427410', 'Steam Title (427410)'],
+      ]);
+
+      await batchResolveAuthenticArtwork([1163550, 427410], { titleMap });
+
+      expect(titleMap.get('1163550')).toBe('Captain Tsubasa: Rise of New Champions');
+      expect(titleMap.get('427410')).toBe('Abiotic Factor');
+      fetchSpy.mockRestore();
+    });
+
+    it('should hydrate missing or generic titles in titleMap from DynamoDB cache', async () => {
+      const mockDdb = {
+        send: vi.fn().mockResolvedValueOnce({
+          Responses: {
+            TestTable: [
+              {
+                PK: 'ASSET#1163550',
+                SK: 'METADATA',
+                appId: '1163550',
+                headerImage: 'https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/1163550/header.jpg',
+                title: 'Captain Tsubasa: Rise of New Champions',
+                ttl: Math.floor(Date.now() / 1000) + 100000,
+              },
+            ],
+          },
+        }),
+      };
+
+      const titleMap = new Map([
+        ['1163550', 'Steam App #1163550'],
+      ]);
+
+      const artworkMap = await batchResolveAuthenticArtwork([1163550], {
+        ddbDocClient: mockDdb,
+        tableName: 'TestTable',
+        titleMap,
+      });
+
+      expect(artworkMap.get('1163550')).toBe('https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/1163550/header.jpg');
+      expect(titleMap.get('1163550')).toBe('Captain Tsubasa: Rise of New Champions');
     });
   });
 });
