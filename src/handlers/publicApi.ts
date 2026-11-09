@@ -26,6 +26,7 @@ import type {
   DossierTopGame,
   DossierTimeStreamYear,
   DossierArchetype,
+  DossierConstellationGame,
   DossierSummaryMetrics,
   PublicDossierResponse,
   DossierTelemetryApiResult,
@@ -1680,6 +1681,45 @@ export async function resolveDossierTelemetry(
   // 6. TimeStream Yearly Series
   const timeStream = buildDossierTimeStream(allGames, accountCreatedYear, currentYear);
 
+  // 7. Interactive Game Bubble Constellation (up to 250 played titles)
+  const constellationCandidates = sortedPlayedGames.slice(0, 250);
+  const constellationYearSpan = Math.max(1, 2026 - accountCreatedYear + 1);
+
+  const constellationGames: DossierConstellationGame[] = constellationCandidates.map((g) => {
+    const appId = g.appId;
+    const title = g.name || KNOWN_GAME_TITLES[String(appId)] || `App #${appId}`;
+    const hoursPlayed = Math.round(((g.playtime_forever ?? 0) / 60) * 10) / 10;
+    const sharePercent =
+      totalPlaytimeHours > 0
+        ? Math.round((hoursPlayed / totalPlaytimeHours) * 1000) / 10
+        : 0;
+
+    let year: number;
+    let isEstimatedYear: boolean;
+
+    if (g.rtime_last_played && g.rtime_last_played > 0) {
+      const playedYear = new Date(g.rtime_last_played * 1000).getUTCFullYear();
+      year = Math.max(accountCreatedYear, Math.min(2026, playedYear));
+      isEstimatedYear = false;
+    } else {
+      year = (Math.abs(appId) % constellationYearSpan) + accountCreatedYear;
+      isEstimatedYear = true;
+    }
+
+    const appIdStr = String(appId);
+    const imageUrl = artworkMap.get(appIdStr) || getCanonicalHeaderImageUrl(appIdStr);
+
+    return {
+      appId,
+      title,
+      year,
+      isEstimatedYear,
+      hoursPlayed,
+      sharePercent,
+      imageUrl,
+    };
+  });
+
   const summaryMetrics: DossierSummaryMetrics = {
     totalGames,
     playedGames,
@@ -1701,10 +1741,11 @@ export async function resolveDossierTelemetry(
     summary: summaryMetrics,
     timeStream,
     archetype,
+    constellationGames,
     updatedAt: new Date().toISOString(),
   };
 
-  // 7. Persist to DynamoDB Cache (TTL 3600 seconds)
+  // 8. Persist to DynamoDB Cache (TTL 3600 seconds)
   if (tableName && ddbDocClient) {
     try {
       const ttl = nowSec + 3600;

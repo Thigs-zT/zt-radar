@@ -820,6 +820,17 @@ export interface DossierArchetype {
   traits: string[];
 }
 
+/** A single game node in the interactive Game Bubble Constellation timeline. */
+export interface DossierConstellationGame {
+  appId: number;
+  title: string;
+  year: number;
+  isEstimatedYear: boolean;
+  hoursPlayed: number;
+  sharePercent: number;
+  imageUrl: string;
+}
+
 /** Summary playtime and tenure metrics for Gamer Dossier. */
 export interface DossierSummaryMetrics {
   totalGames: number;
@@ -849,6 +860,7 @@ export interface PublicDossierResponse {
   summary: DossierSummaryMetrics;
   timeStream: DossierTimeStreamYear[];
   archetype: DossierArchetype;
+  constellationGames: DossierConstellationGame[];
   updatedAt: string;
 }
 

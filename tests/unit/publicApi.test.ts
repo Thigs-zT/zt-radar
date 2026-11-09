@@ -3397,8 +3397,80 @@ describe('Public Web API Handler', () => {
       expect(data.archetype).toBeDefined();
       expect(data.archetype.id).toBe('FOCUS_MONK'); // top 3 share 100% >= 55%
 
+      expect(Array.isArray(data.constellationGames)).toBe(true);
+      expect(data.constellationGames).toHaveLength(2);
+      const cg1 = data.constellationGames[0];
+      expect(cg1.appId).toBe(1086940);
+      expect(cg1.title).toBe("Baldur's Gate 3");
+      expect(cg1.hoursPlayed).toBe(100);
+      expect(cg1.sharePercent).toBe(62.5);
+      expect(cg1.year).toBe(2025);
+      expect(cg1.isEstimatedYear).toBe(false);
+      expect(cg1.imageUrl).toBeDefined();
+
       expect(data.summary).toBeDefined();
       expect(data.summary.totalGames).toBe(3);
+    });
+
+    it('should properly structure constellationGames with deterministic year estimation when rtime_last_played is 0', async () => {
+      vi.mocked(getOwnedGames).mockResolvedValueOnce({
+        isPrivate: false,
+        gameCount: 2,
+        games: [
+          {
+            appId: 730,
+            appid: 730,
+            name: 'Counter-Strike 2',
+            playtime_forever: 3000, // 50h
+            rtime_last_played: 0, // untracked
+            img_icon_url: 'icon_cs2',
+          },
+          {
+            appId: 570,
+            appid: 570,
+            name: 'Dota 2',
+            playtime_forever: 1800, // 30h
+            rtime_last_played: 1704067200, // 2024
+            img_icon_url: 'icon_dota2',
+          },
+        ],
+      });
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/dossier/{target}',
+        rawPath: '/public/dossier/76561198327022168',
+        pathParameters: {
+          target: '76561198327022168',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/dossier/76561198327022168',
+          },
+        },
+      };
+
+      const response = await handler(event);
+      expect(response.statusCode).toBe(200);
+      const data = JSON.parse(response.body);
+
+      expect(Array.isArray(data.constellationGames)).toBe(true);
+      expect(data.constellationGames).toHaveLength(2);
+
+      const cs2 = data.constellationGames.find((g: { appId: number }) => g.appId === 730);
+      expect(cs2).toBeDefined();
+      expect(cs2.isEstimatedYear).toBe(true);
+      // accountCreatedYear is 2020. span = 2026 - 2020 + 1 = 7. (730 % 7) + 2020 = 2 + 2020 = 2022
+      expect(cs2.year).toBe(2022);
+      expect(cs2.hoursPlayed).toBe(50);
+      expect(cs2.sharePercent).toBe(62.5); // 50 / 80 = 62.5%
+
+      const dota = data.constellationGames.find((g: { appId: number }) => g.appId === 570);
+      expect(dota).toBeDefined();
+      expect(dota.isEstimatedYear).toBe(false);
+      expect(dota.year).toBe(2024);
+      expect(dota.hoursPlayed).toBe(30);
+      expect(dota.sharePercent).toBe(37.5); // 30 / 80 = 37.5%
     });
 
     it('should serve dossier immediately from DynamoDB cache on fresh cache hit without upstream calls', async () => {
@@ -3429,6 +3501,7 @@ describe('Public Web API Handler', () => {
           topPlayedGames: [],
         },
         timeStream: [],
+        constellationGames: [],
         archetype: {
           id: 'TACTICAL_EXPLORER',
           label: 'Tactical Explorer',
