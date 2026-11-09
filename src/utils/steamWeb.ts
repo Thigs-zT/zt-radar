@@ -31,6 +31,8 @@ import type {
   AchievementFilterMode,
   AchievementTrackerLinks,
   PlayerAchievementsResult,
+  SteamOwnedGameItem,
+  SteamOwnedGamesResult,
 } from '../types/index.js';
 import { BRAND_COLORS } from './theme.js';
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
@@ -205,6 +207,7 @@ export async function getPlayerSummary(steamId64: string, apiKey: string): Promi
       currentlyPlaying: player.gameextrainfo ?? null,
       currentlyPlayingId: player.gameid ?? null,
       timeCreated: player.timecreated ? new Date(player.timecreated * 1000).toISOString().split('T')[0] : null,
+      timeCreatedTimestamp: player.timecreated ?? null,
       countryCode: player.loccountrycode ?? null,
       realName: player.realname ?? null,
     };
@@ -796,6 +799,76 @@ export async function getPlayerLibraryDetailed(steamId64: string, apiKey: string
     };
   } catch (err) {
     console.error(`Error fetching detailed library for SteamID ${steamId64}:`, err instanceof Error ? err.message : err);
+    return null;
+  }
+}
+
+/**
+ * Fetches player owned games library with last played timestamps (rtime_last_played).
+ * Includes both paid and free titles for comprehensive playtime dossier computation.
+ */
+export async function getOwnedGames(
+  steamId64: string,
+  apiKey: string,
+): Promise<SteamOwnedGamesResult | null> {
+  if (!steamId64 || !apiKey) {
+    return null;
+  }
+
+  try {
+    const endpoint = `${API_BASE}/IPlayerService/GetOwnedGames/v1/?key=${apiKey}&steamid=${steamId64}&include_appinfo=1&include_played_free_games=1&format=json`;
+    const res = await fetchWithTimeout(endpoint, {}, 2500);
+
+    if (!res.ok) {
+      console.warn(`Steam GetOwnedGames returned status ${res.status} for ID ${steamId64}`);
+      return null;
+    }
+
+    const data = (await res.json()) as {
+      response?: {
+        games?: Array<{
+          appid?: number;
+          appId?: number;
+          name?: string;
+          playtime_forever?: number;
+          rtime_last_played?: number;
+          img_icon_url?: string;
+        }>;
+        game_count?: number;
+      };
+    };
+    const rawGames = data?.response?.games;
+
+    if (!rawGames || !Array.isArray(rawGames)) {
+      return {
+        isPrivate: true,
+        gameCount: data?.response?.game_count ?? 0,
+        games: [],
+      };
+    }
+
+    const games: SteamOwnedGameItem[] = rawGames.map((g) => {
+      const id = Number(g.appid ?? g.appId ?? 0);
+      return {
+        appId: id,
+        appid: id,
+        name: g.name ?? `App #${id}`,
+        playtime_forever: Number(g.playtime_forever ?? 0),
+        rtime_last_played: Number(g.rtime_last_played ?? 0),
+        img_icon_url: g.img_icon_url ?? null,
+      };
+    });
+
+    return {
+      isPrivate: false,
+      gameCount: data?.response?.game_count ?? games.length,
+      games,
+    };
+  } catch (err) {
+    console.error(
+      `Error fetching owned games for SteamID ${steamId64}:`,
+      err instanceof Error ? err.message : err,
+    );
     return null;
   }
 }

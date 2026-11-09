@@ -30,6 +30,8 @@ vi.mock('../../src/utils/steamWeb.js', async (importOriginal) => {
     batchFetchSteamAppPrices: vi.fn(),
     resolveSteamAppTitles: vi.fn(),
     getPlayerLibraryDetailed: vi.fn(),
+    getPlayerSummary: vi.fn(),
+    getOwnedGames: vi.fn(),
   };
 });
 
@@ -48,6 +50,9 @@ import {
   buildTrendingGamesList,
   resolveWishlistTelemetry,
   resolveBacklogTelemetry,
+  resolveDossierTelemetry,
+  computeGamerArchetype,
+  buildDossierTimeStream,
   formatCurrency,
   CORS_HEADERS,
   KNOWN_GAME_TITLES,
@@ -62,6 +67,8 @@ import {
   batchFetchSteamAppPrices,
   resolveSteamAppTitles,
   getPlayerLibraryDetailed,
+  getPlayerSummary,
+  getOwnedGames,
 } from '../../src/utils/steamWeb.js';
 
 describe('Public Web API Handler', () => {
@@ -362,6 +369,54 @@ describe('Public Web API Handler', () => {
         };
       }
       return { success: false, error: 'DATA_UNAVAILABLE' };
+    });
+
+    vi.mocked(getPlayerSummary).mockResolvedValue({
+      steamId: '76561198327022168',
+      personaName: 'zThigs',
+      profileUrl: 'https://steamcommunity.com/profiles/76561198327022168',
+      avatarUrl: 'https://cdn/avatar.jpg',
+      visibilityState: 3,
+      isPrivate: false,
+      personaState: 1,
+      personaStateLabel: 'Online',
+      currentlyPlaying: null,
+      currentlyPlayingId: null,
+      timeCreated: '2020-05-10',
+      timeCreatedTimestamp: 1589068800,
+      countryCode: 'BR',
+      realName: null,
+    });
+
+    vi.mocked(getOwnedGames).mockResolvedValue({
+      isPrivate: false,
+      gameCount: 3,
+      games: [
+        {
+          appId: 1086940,
+          appid: 1086940,
+          name: "Baldur's Gate 3",
+          playtime_forever: 6000,
+          rtime_last_played: 1735689600,
+          img_icon_url: 'icon_bg3',
+        },
+        {
+          appId: 1245620,
+          appid: 1245620,
+          name: 'ELDEN RING',
+          playtime_forever: 3600,
+          rtime_last_played: 1704067200,
+          img_icon_url: 'icon_er',
+        },
+        {
+          appId: 1091500,
+          appid: 1091500,
+          name: 'Cyberpunk 2077',
+          playtime_forever: 0,
+          rtime_last_played: 0,
+          img_icon_url: 'icon_cp2077',
+        },
+      ],
     });
   });
 
@@ -3135,6 +3190,489 @@ describe('Public Web API Handler', () => {
       expect(placeholderBrl.regularPrice).toBeNull();
       expect(placeholderBrl.primaryDeal?.currency).toBe('BRL');
       expect(placeholderBrl.primaryDeal?.currencySymbol).toBe('R$');
+    });
+  });
+
+  describe('Route: GET /public/dossier/{target}', () => {
+    it('should return 400 when target parameter is missing on base route', async () => {
+      const event: HttpApiEvent = {
+        rawPath: '/public/dossier',
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/dossier',
+          },
+        },
+      };
+
+      const response = await handler(event);
+      expect(response.statusCode).toBe(400);
+      const data = JSON.parse(response.body);
+      expect(data.error).toBe('BadRequest');
+    });
+
+    it('should return 400 when target parameter is empty whitespace', async () => {
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/dossier/{target}',
+        rawPath: '/public/dossier/   ',
+        pathParameters: {
+          target: '   ',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/dossier/   ',
+          },
+        },
+      };
+
+      const response = await handler(event);
+      expect(response.statusCode).toBe(400);
+      const data = JSON.parse(response.body);
+      expect(data.error).toBe('BadRequest');
+    });
+
+    it('should return 404 when Steam profile cannot be resolved', async () => {
+      vi.mocked(resolveSteamId).mockResolvedValueOnce(null);
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/dossier/{target}',
+        rawPath: '/public/dossier/nonexistent_user',
+        pathParameters: {
+          target: 'nonexistent_user',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/dossier/nonexistent_user',
+          },
+        },
+      };
+
+      const response = await handler(event);
+      expect(response.statusCode).toBe(404);
+      const data = JSON.parse(response.body);
+      expect(data.error).toBe('NotFound');
+    });
+
+    it('should return 404 when getPlayerSummary returns null', async () => {
+      vi.mocked(getPlayerSummary).mockResolvedValueOnce(null);
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/dossier/{target}',
+        rawPath: '/public/dossier/76561198327022168',
+        pathParameters: {
+          target: '76561198327022168',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/dossier/76561198327022168',
+          },
+        },
+      };
+
+      const response = await handler(event);
+      expect(response.statusCode).toBe(404);
+      const data = JSON.parse(response.body);
+      expect(data.error).toBe('NotFound');
+    });
+
+    it('should return 502 when getOwnedGames fails with null', async () => {
+      vi.mocked(getOwnedGames).mockResolvedValueOnce(null);
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/dossier/{target}',
+        rawPath: '/public/dossier/76561198327022168',
+        pathParameters: {
+          target: '76561198327022168',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/dossier/76561198327022168',
+          },
+        },
+      };
+
+      const response = await handler(event);
+      expect(response.statusCode).toBe(502);
+      const data = JSON.parse(response.body);
+      expect(data.error).toBe('UpstreamError');
+    });
+
+    it('should return 403 LibraryPrivate when library is marked private', async () => {
+      vi.mocked(getOwnedGames).mockResolvedValueOnce({
+        isPrivate: true,
+        gameCount: 0,
+        games: [],
+      });
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/dossier/{target}',
+        rawPath: '/public/dossier/76561198327022168',
+        pathParameters: {
+          target: '76561198327022168',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/dossier/76561198327022168',
+          },
+        },
+      };
+
+      const response = await handler(event);
+      expect(response.statusCode).toBe(403);
+      const data = JSON.parse(response.body);
+      expect(data.error).toBe('LibraryPrivate');
+    });
+
+    it('should return 403 LibraryPrivate when owned games array is empty', async () => {
+      vi.mocked(getOwnedGames).mockResolvedValueOnce({
+        isPrivate: false,
+        gameCount: 0,
+        games: [],
+      });
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/dossier/{target}',
+        rawPath: '/public/dossier/76561198327022168',
+        pathParameters: {
+          target: '76561198327022168',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/dossier/76561198327022168',
+          },
+        },
+      };
+
+      const response = await handler(event);
+      expect(response.statusCode).toBe(403);
+      const data = JSON.parse(response.body);
+      expect(data.error).toBe('LibraryPrivate');
+    });
+
+    it('should successfully compute and return dossier telemetry for valid Steam ID', async () => {
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/dossier/{target}',
+        rawPath: '/public/dossier/76561198327022168',
+        pathParameters: {
+          target: '76561198327022168',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/dossier/76561198327022168',
+          },
+        },
+      };
+
+      const response = await handler(event);
+      expect(response.statusCode).toBe(200);
+      const data = JSON.parse(response.body);
+
+      expect(data.steamId).toBe('76561198327022168');
+      expect(data.personaName).toBe('zThigs');
+      expect(data.totalGames).toBe(3);
+      expect(data.playedGames).toBe(2);
+      expect(data.unplayedGames).toBe(1);
+      expect(data.totalPlaytimeHours).toBe(160); // (6000 + 3600) / 60 = 160.0
+      expect(data.accountCreatedYear).toBe(2020);
+      expect(data.accountAgeYears).toBe(6); // 2026 - 2020 = 6
+      expect(Array.isArray(data.topPlayedGames)).toBe(true);
+      expect(data.topPlayedGames).toHaveLength(2);
+
+      const top1 = data.topPlayedGames[0];
+      expect(top1.appId).toBe(1086940);
+      expect(top1.title).toBe("Baldur's Gate 3");
+      expect(top1.hoursPlayed).toBe(100);
+      expect(top1.sharePercent).toBe(62.5); // 6000 / 9600 = 62.5%
+
+      expect(Array.isArray(data.timeStream)).toBe(true);
+      expect(data.timeStream.length).toBeGreaterThan(0);
+
+      expect(data.archetype).toBeDefined();
+      expect(data.archetype.id).toBe('FOCUS_MONK'); // top 3 share 100% >= 55%
+
+      expect(data.summary).toBeDefined();
+      expect(data.summary.totalGames).toBe(3);
+    });
+
+    it('should serve dossier immediately from DynamoDB cache on fresh cache hit without upstream calls', async () => {
+      const nowSec = Math.floor(Date.now() / 1000);
+      const cachedDossier = {
+        PK: 'DOSSIER#v1#76561198327022168',
+        SK: 'TELEMETRY',
+        steamId: '76561198327022168',
+        target: '76561198327022168',
+        personaName: 'CachedPlayer',
+        avatarUrl: 'https://cdn/cached.jpg',
+        profileUrl: 'https://steamcommunity.com/profiles/76561198327022168',
+        currency: 'USD',
+        totalGames: 42,
+        playedGames: 30,
+        unplayedGames: 12,
+        totalPlaytimeHours: 500,
+        accountCreatedYear: 2018,
+        accountAgeYears: 8,
+        topPlayedGames: [],
+        summary: {
+          totalGames: 42,
+          playedGames: 30,
+          unplayedGames: 12,
+          totalPlaytimeHours: 500,
+          accountCreatedYear: 2018,
+          accountAgeYears: 8,
+          topPlayedGames: [],
+        },
+        timeStream: [],
+        archetype: {
+          id: 'TACTICAL_EXPLORER',
+          label: 'Tactical Explorer',
+          tagline: 'Balanced gamer',
+          primaryMetricLabel: 'Average Hours',
+          primaryMetricValue: '16.7h',
+          traits: ['Balanced'],
+        },
+        updatedAt: new Date().toISOString(),
+        ttl: nowSec + 1800,
+      };
+
+      ddbMock.on(QueryCommand).resolvesOnce({
+        Items: [cachedDossier],
+      });
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/dossier/{target}',
+        rawPath: '/public/dossier/76561198327022168',
+        pathParameters: {
+          target: '76561198327022168',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/dossier/76561198327022168',
+          },
+        },
+      };
+
+      const response = await handler(event);
+      expect(response.statusCode).toBe(200);
+      const data = JSON.parse(response.body);
+      expect(data.personaName).toBe('CachedPlayer');
+      expect(data.totalGames).toBe(42);
+
+      // Upstream Steam helpers must NOT have been called due to cache hit
+      expect(vi.mocked(getPlayerSummary)).not.toHaveBeenCalled();
+      expect(vi.mocked(getOwnedGames)).not.toHaveBeenCalled();
+    });
+
+    it('should persist fresh dossier to DynamoDB cache with 3600s TTL on cache miss', async () => {
+      ddbMock.on(QueryCommand).resolvesOnce({ Items: [] });
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/dossier/{target}',
+        rawPath: '/public/dossier/76561198327022168',
+        pathParameters: {
+          target: '76561198327022168',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/dossier/76561198327022168',
+          },
+        },
+      };
+
+      const response = await handler(event);
+      expect(response.statusCode).toBe(200);
+
+      const putCalls = ddbMock.commandCalls(PutCommand);
+      const dossierPutCall = putCalls.find(
+        (call) => call.args[0].input.Item?.PK === 'DOSSIER#v1#76561198327022168',
+      );
+      expect(dossierPutCall).toBeDefined();
+      expect(dossierPutCall?.args[0].input.Item?.SK).toBe('TELEMETRY');
+      const ttl = dossierPutCall?.args[0].input.Item?.ttl;
+      expect(ttl).toBeGreaterThan(Math.floor(Date.now() / 1000));
+    });
+
+    it('should support optional currency parameter (BRL and USD)', async () => {
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/dossier/{target}',
+        rawPath: '/public/dossier/76561198327022168',
+        queryStringParameters: {
+          currency: 'BRL',
+        },
+        pathParameters: {
+          target: '76561198327022168',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/dossier/76561198327022168',
+          },
+        },
+      };
+
+      const response = await handler(event);
+      expect(response.statusCode).toBe(200);
+      const data = JSON.parse(response.body);
+      expect(data.currency).toBe('BRL');
+    });
+
+    it('should respond with 204 No Content and CORS headers on OPTIONS preflight for dossier', async () => {
+      const event: HttpApiEvent = {
+        requestContext: {
+          http: {
+            method: 'OPTIONS',
+            path: '/public/dossier/76561198327022168',
+          },
+        },
+      };
+
+      const response = await handler(event);
+      expect(response.statusCode).toBe(204);
+      expect(response.headers['Access-Control-Allow-Origin']).toBe('*');
+      expect(response.headers['Access-Control-Allow-Methods']).toContain('OPTIONS');
+      expect(response.body).toBe('');
+    });
+  });
+
+  describe('computeGamerArchetype', () => {
+    it('should classify FOCUS_MONK when top3SharePercent >= 55', () => {
+      const archetype = computeGamerArchetype({
+        top3SharePercent: 65.0,
+        unplayedRatioPercent: 20.0,
+        playedOver10hCount: 5,
+        averageHoursPerPlayedGame: 30.0,
+        totalGames: 20,
+        accountAgeYears: 5,
+      });
+
+      expect(archetype.id).toBe('FOCUS_MONK');
+      expect(archetype.label).toBe('Focus Monk');
+      expect(archetype.primaryMetricValue).toBe('65%');
+    });
+
+    it('should classify VAULT_COLLECTOR when totalGames >= 80 and unplayedRatioPercent >= 55', () => {
+      const archetype = computeGamerArchetype({
+        top3SharePercent: 40.0,
+        unplayedRatioPercent: 60.0,
+        playedOver10hCount: 10,
+        averageHoursPerPlayedGame: 15.0,
+        totalGames: 120,
+        accountAgeYears: 5,
+      });
+
+      expect(archetype.id).toBe('VAULT_COLLECTOR');
+      expect(archetype.label).toBe('Vault Collector');
+      expect(archetype.primaryMetricValue).toBe('60%');
+    });
+
+    it('should classify VETERAN_HISTORIAN when accountAgeYears >= 8 and playedOver10hCount >= 25', () => {
+      const archetype = computeGamerArchetype({
+        top3SharePercent: 35.0,
+        unplayedRatioPercent: 30.0,
+        playedOver10hCount: 28,
+        averageHoursPerPlayedGame: 25.0,
+        totalGames: 60,
+        accountAgeYears: 10,
+      });
+
+      expect(archetype.id).toBe('VETERAN_HISTORIAN');
+      expect(archetype.label).toBe('Veteran Historian');
+      expect(archetype.primaryMetricValue).toBe('28 titles');
+    });
+
+    it('should fallback to TACTICAL_EXPLORER when balanced without dominating ratios', () => {
+      const archetype = computeGamerArchetype({
+        top3SharePercent: 35.0,
+        unplayedRatioPercent: 30.0,
+        playedOver10hCount: 10,
+        averageHoursPerPlayedGame: 18.5,
+        totalGames: 45,
+        accountAgeYears: 4,
+      });
+
+      expect(archetype.id).toBe('TACTICAL_EXPLORER');
+      expect(archetype.label).toBe('Tactical Explorer');
+      expect(archetype.primaryMetricValue).toBe('18.5h');
+    });
+  });
+
+  describe('buildDossierTimeStream', () => {
+    it('should build sequential yearly timeline from accountCreatedYear to 2026', () => {
+      const games = [
+        {
+          appId: 1086940,
+          appid: 1086940,
+          name: "Baldur's Gate 3",
+          playtime_forever: 1200,
+          rtime_last_played: 1735689600, // 2025
+          img_icon_url: null,
+        },
+      ];
+
+      const stream = buildDossierTimeStream(games, 2023, 2026);
+      expect(stream).toHaveLength(4);
+      expect(stream.map((s) => s.year)).toEqual([2023, 2024, 2025, 2026]);
+
+      const year2025 = stream.find((s) => s.year === 2025);
+      expect(year2025).toBeDefined();
+      expect(year2025?.dominantGameTitle).toBe("Baldur's Gate 3");
+      expect(year2025?.recordedHours).toBe(20);
+    });
+
+    it('should cleanly distribute historical baseline activity without NaN when rtime_last_played is 0', () => {
+      const games = [
+        {
+          appId: 730,
+          appid: 730,
+          name: 'Counter-Strike 2',
+          playtime_forever: 6000, // 100 hours
+          rtime_last_played: 0,
+          img_icon_url: null,
+        },
+      ];
+
+      const stream = buildDossierTimeStream(games, 2022, 2026);
+      expect(stream).toHaveLength(5);
+
+      for (const entry of stream) {
+        expect(isNaN(entry.recordedHours)).toBe(false);
+        expect(entry.recordedHours).toBe(20); // 100h / 5 years = 20h/year
+        expect(entry.dominantGameTitle).toBe('Counter-Strike 2');
+        expect(entry.dominantGameAppId).toBe(730);
+        expect(entry.activeTitlesCount).toBe(1);
+      }
+    });
+
+    it('should return valid zero coordinates without NaN when all games are unplayed', () => {
+      const games = [
+        {
+          appId: 1091500,
+          appid: 1091500,
+          name: 'Cyberpunk 2077',
+          playtime_forever: 0,
+          rtime_last_played: 0,
+          img_icon_url: null,
+        },
+      ];
+
+      const stream = buildDossierTimeStream(games, 2024, 2026);
+      expect(stream).toHaveLength(3);
+
+      for (const entry of stream) {
+        expect(isNaN(entry.recordedHours)).toBe(false);
+        expect(entry.recordedHours).toBe(0);
+        expect(entry.activeTitlesCount).toBe(0);
+        expect(entry.dominantGameTitle).toBeNull();
+        expect(entry.dominantGameAppId).toBeNull();
+      }
     });
   });
 });

@@ -221,6 +221,18 @@ Resources:
             ApiId: !Ref DiscordApi
             Path: /public/backlog/{target}
             Method: get
+        GetPublicDossier:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref DiscordApi
+            Path: /public/dossier/{target}
+            Method: get
+        OptionsPublicDossier:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref DiscordApi
+            Path: /public/dossier/{target}
+            Method: options
 
 Outputs:
   InteractionsEndpoint:

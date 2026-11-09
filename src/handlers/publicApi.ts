@@ -8,6 +8,7 @@
  * - GET /public/duel/{duelId}: Retrieves historical library duel comparison payload from DynamoDB.
  * - GET /public/wishlist/{target}: Retrieves public Steam wishlist telemetry with live pricing and store attribution.
  * - GET /public/backlog/{target}: Retrieves public Backlog Vault telemetry with playtime metrics and live store valuation.
+ * - GET /public/dossier/{target}: Retrieves public Gamer Dossier telemetry with TimeStream and behavioral archetype.
  */
 
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
@@ -22,6 +23,14 @@ import type {
   BacklogTelemetrySummary,
   SteamAppPriceInfo,
   GameDealInfo,
+  DossierTopGame,
+  DossierTimeStreamYear,
+  DossierArchetype,
+  DossierSummaryMetrics,
+  PublicDossierResponse,
+  DossierTelemetryApiResult,
+  SteamOwnedGameItem,
+  SteamOwnedGamesResult,
 } from '../types/index.js';
 import { getHowLongToBeatStats } from '../utils/hltbNative.js';
 import { getGameDealInfo } from '../utils/itadApi.js';
@@ -32,6 +41,8 @@ import {
   batchFetchSteamAppPrices,
   resolveSteamAppTitles,
   getPlayerLibraryDetailed,
+  getPlayerSummary,
+  getOwnedGames,
   batchResolveAuthenticArtwork,
   resolveAuthenticArtwork,
   isAuthenticArtworkUrl,
@@ -1307,6 +1318,422 @@ export async function resolveBacklogTelemetry(
 }
 
 /**
+ * Computes deterministic behavioral archetype based on mathematical playtime ratios.
+ */
+export function computeGamerArchetype(params: {
+  top3SharePercent: number;
+  unplayedRatioPercent: number;
+  playedOver10hCount: number;
+  averageHoursPerPlayedGame: number;
+  totalGames: number;
+  accountAgeYears: number;
+}): DossierArchetype {
+  const {
+    top3SharePercent,
+    unplayedRatioPercent,
+    playedOver10hCount,
+    averageHoursPerPlayedGame,
+    totalGames,
+    accountAgeYears,
+  } = params;
+
+  if (top3SharePercent >= 55) {
+    return {
+      id: 'FOCUS_MONK',
+      label: 'Focus Monk',
+      tagline: 'Dedicated master channeling the vast majority of playtime into a select few core titles.',
+      primaryMetricLabel: 'Top 3 Playtime Share',
+      primaryMetricValue: `${top3SharePercent}%`,
+      traits: ['Deep Mastery', 'High Playtime Concentration', 'Selective Library Engagement'],
+    };
+  }
+
+  if (totalGames >= 80 && unplayedRatioPercent >= 55) {
+    return {
+      id: 'VAULT_COLLECTOR',
+      label: 'Vault Collector',
+      tagline: 'Curator of an expansive digital vault with an ambitious backlog waiting to be conquered.',
+      primaryMetricLabel: 'Unplayed Library Ratio',
+      primaryMetricValue: `${unplayedRatioPercent}%`,
+      traits: ['Expansive Catalog', 'Backlog Curator', 'Deal Collector'],
+    };
+  }
+
+  if (accountAgeYears >= 8 && playedOver10hCount >= 25) {
+    return {
+      id: 'VETERAN_HISTORIAN',
+      label: 'Veteran Historian',
+      tagline: 'Long-tenured Steam veteran with dozens of deep campaigns logged across multiple generations.',
+      primaryMetricLabel: 'Deep Campaigns (10h+)',
+      primaryMetricValue: `${playedOver10hCount} titles`,
+      traits: ['Multi-Year Tenure', 'Campaign Finisher', 'Broad Genre Experience'],
+    };
+  }
+
+  return {
+    id: 'TACTICAL_EXPLORER',
+    label: 'Tactical Explorer',
+    tagline: 'Balanced gamer actively exploring a versatile variety of genres and gaming experiences.',
+    primaryMetricLabel: 'Average Hours Per Game',
+    primaryMetricValue: `${averageHoursPerPlayedGame}h`,
+    traits: ['Versatile Variety', 'Balanced Playtime', 'Active Explorer'],
+  };
+}
+
+/**
+ * Builds yearly activity TimeStream series from account creation up to the current year.
+ * Distributes historical baseline activity cleanly when rtime_last_played is 0.
+ */
+export function buildDossierTimeStream(
+  games: SteamOwnedGameItem[],
+  accountCreatedYear: number,
+  currentYear: number = new Date().getUTCFullYear(),
+): DossierTimeStreamYear[] {
+  const validCreatedYear =
+    !isNaN(accountCreatedYear) && accountCreatedYear > 1990 ? accountCreatedYear : currentYear;
+  const startYear = Math.min(validCreatedYear, currentYear);
+  const timelineYears: number[] = [];
+  for (let y = startYear; y <= currentYear; y++) {
+    timelineYears.push(y);
+  }
+
+  const yearBuckets = new Map<
+    number,
+    {
+      activeGames: Array<{ appId: number; title: string; minutes: number }>;
+      recordedMinutes: number;
+    }
+  >();
+
+  for (const y of timelineYears) {
+    yearBuckets.set(y, { activeGames: [], recordedMinutes: 0 });
+  }
+
+  const playedGames = games.filter((g) => (g.playtime_forever ?? 0) > 0);
+  const untrackedGames: SteamOwnedGameItem[] = [];
+
+  for (const game of playedGames) {
+    if (game.rtime_last_played && game.rtime_last_played > 0) {
+      const playedYear = new Date(game.rtime_last_played * 1000).getUTCFullYear();
+      const targetYear = Math.max(startYear, Math.min(currentYear, playedYear));
+      const bucket = yearBuckets.get(targetYear);
+      if (bucket) {
+        bucket.activeGames.push({
+          appId: game.appId,
+          title: game.name,
+          minutes: game.playtime_forever ?? 0,
+        });
+        bucket.recordedMinutes += game.playtime_forever ?? 0;
+      }
+    } else {
+      untrackedGames.push(game);
+    }
+  }
+
+  const numYears = timelineYears.length;
+  const totalUntrackedMinutes = untrackedGames.reduce(
+    (acc, g) => acc + (g.playtime_forever ?? 0),
+    0,
+  );
+  const baselineMinutesPerYear = numYears > 0 ? totalUntrackedMinutes / numYears : 0;
+  const dominantUntracked = [...untrackedGames].sort(
+    (a, b) => (b.playtime_forever ?? 0) - (a.playtime_forever ?? 0),
+  )[0];
+
+  const timeStream: DossierTimeStreamYear[] = [];
+
+  for (const year of timelineYears) {
+    const bucket = yearBuckets.get(year)!;
+    const yearTotalMinutes = bucket.recordedMinutes + baselineMinutesPerYear;
+    const rawHours = yearTotalMinutes / 60;
+    const recordedHours = isNaN(rawHours) ? 0 : Number(rawHours.toFixed(1));
+
+    let dominantGameTitle: string | null = null;
+    let dominantGameAppId: number | null = null;
+
+    if (bucket.activeGames.length > 0) {
+      const sorted = [...bucket.activeGames].sort((a, b) => b.minutes - a.minutes);
+      dominantGameTitle = sorted[0].title;
+      dominantGameAppId = sorted[0].appId;
+    } else if (dominantUntracked && baselineMinutesPerYear > 0) {
+      dominantGameTitle = dominantUntracked.name;
+      dominantGameAppId = dominantUntracked.appId;
+    }
+
+    let activeTitlesCount = bucket.activeGames.length;
+    if (activeTitlesCount === 0 && untrackedGames.length > 0 && baselineMinutesPerYear > 0) {
+      activeTitlesCount = Math.max(1, Math.round(untrackedGames.length / numYears));
+    }
+
+    timeStream.push({
+      year,
+      activeTitlesCount: isNaN(activeTitlesCount) ? 0 : activeTitlesCount,
+      recordedHours,
+      dominantGameTitle,
+      dominantGameAppId,
+    });
+  }
+
+  return timeStream;
+}
+
+/**
+ * Resolves player Gamer Dossier telemetry including tenure, TimeStream, and behavioral archetype.
+ */
+export async function resolveDossierTelemetry(
+  target: string,
+  preferredCurrency: string = 'USD',
+  ddbDocClient: DynamoDBDocumentClient = docClient,
+  tableName: string = process.env.TABLE_NAME || '',
+): Promise<DossierTelemetryApiResult> {
+  const cleanTarget = (target || '').trim();
+  if (!cleanTarget) {
+    return {
+      success: false,
+      statusCode: 400,
+      error: 'BadRequest',
+      message: 'Missing or invalid target parameter.',
+    };
+  }
+
+  const steamApiKey = process.env.STEAM_API_KEY || '';
+  const steamId = await resolveSteamId(cleanTarget, steamApiKey);
+  if (!steamId) {
+    return {
+      success: false,
+      statusCode: 404,
+      error: 'NotFound',
+      message: `Unable to resolve Steam profile for '${cleanTarget}'.`,
+    };
+  }
+
+  const isBrl = (preferredCurrency || '').toUpperCase().trim() === 'BRL';
+  const currency = isBrl ? 'BRL' : 'USD';
+  const nowSec = Math.floor(Date.now() / 1000);
+
+  // 1. Check DynamoDB Cache
+  if (tableName && ddbDocClient) {
+    try {
+      const cacheResult = await ddbDocClient.send(
+        new QueryCommand({
+          TableName: tableName,
+          KeyConditionExpression: 'PK = :pk AND SK = :sk',
+          ExpressionAttributeValues: {
+            ':pk': `DOSSIER#v1#${steamId}`,
+            ':sk': 'TELEMETRY',
+          },
+          Limit: 1,
+        }),
+      );
+
+      if (cacheResult?.Items && Array.isArray(cacheResult.Items) && cacheResult.Items.length > 0) {
+        const cached = cacheResult.Items[0] as PublicDossierResponse & {
+          ttl?: number;
+          PK?: string;
+          SK?: string;
+        };
+        const isFresh = !cached.ttl || cached.ttl > nowSec;
+        if (isFresh) {
+          const { PK, SK, ttl, ...payload } = cached;
+          return {
+            success: true,
+            data: {
+              ...(payload as PublicDossierResponse),
+              currency,
+            },
+          };
+        }
+      }
+    } catch (cacheErr) {
+      console.warn(
+        'Failed to query DynamoDB dossier cache:',
+        cacheErr instanceof Error ? cacheErr.message : cacheErr,
+      );
+    }
+  }
+
+  // 2. Fetch Upstream Steam Telemetry in Parallel
+  const [summary, ownedGamesResult] = await Promise.all([
+    getPlayerSummary(steamId, steamApiKey),
+    getOwnedGames(steamId, steamApiKey),
+  ]);
+
+  if (!summary) {
+    return {
+      success: false,
+      statusCode: 404,
+      error: 'NotFound',
+      message: `Steam profile '${cleanTarget}' was not found.`,
+    };
+  }
+
+  if (!ownedGamesResult) {
+    return {
+      success: false,
+      statusCode: 502,
+      error: 'UpstreamError',
+      message: 'Failed to communicate with Steam servers.',
+    };
+  }
+
+  if (ownedGamesResult.isPrivate || !ownedGamesResult.games || ownedGamesResult.games.length === 0) {
+    return {
+      success: false,
+      statusCode: 403,
+      error: 'LibraryPrivate',
+      message: 'This Steam library is private or does not exist.',
+    };
+  }
+
+  let displayTarget = cleanTarget;
+  const vanityMatch = cleanTarget.match(/steamcommunity\.com\/id\/([^/?#]+)/i);
+  if (vanityMatch) {
+    displayTarget = vanityMatch[1];
+  } else {
+    const profileMatch = cleanTarget.match(/steamcommunity\.com\/profiles\/(\d{17})/i);
+    if (profileMatch) {
+      displayTarget = profileMatch[1];
+    }
+  }
+
+  const allGames = ownedGamesResult.games;
+  const totalGames = ownedGamesResult.gameCount || allGames.length;
+  const playedGamesList = allGames.filter((g) => (g.playtime_forever ?? 0) > 0);
+  const playedGames = playedGamesList.length;
+  const unplayedGames = allGames.filter((g) => (g.playtime_forever ?? 0) === 0).length;
+
+  const totalPlaytimeMinutes = allGames.reduce((acc, g) => acc + (g.playtime_forever ?? 0), 0);
+  const totalPlaytimeHours = Number((totalPlaytimeMinutes / 60).toFixed(1));
+
+  const sortedPlayedGames = [...playedGamesList].sort(
+    (a, b) => (b.playtime_forever ?? 0) - (a.playtime_forever ?? 0),
+  );
+  const top10Games = sortedPlayedGames.slice(0, 10);
+  const top10AppIds = top10Games.map((g) => g.appId);
+
+  // 3. Hydrate top 10 most-played games with authentic artwork
+  const artworkMap = await batchResolveAuthenticArtwork(top10AppIds, { ddbDocClient, tableName });
+
+  const topPlayedGames: DossierTopGame[] = top10Games.map((g) => {
+    const appIdStr = String(g.appId);
+    const imageUrl = artworkMap.get(appIdStr) || getCanonicalHeaderImageUrl(appIdStr);
+    const title = g.name || KNOWN_GAME_TITLES[appIdStr] || `App #${g.appId}`;
+    const hoursPlayed = Number(((g.playtime_forever ?? 0) / 60).toFixed(1));
+    const sharePercent =
+      totalPlaytimeMinutes > 0
+        ? Number((((g.playtime_forever ?? 0) / totalPlaytimeMinutes) * 100).toFixed(1))
+        : 0;
+
+    return {
+      appId: g.appId,
+      title,
+      imageUrl,
+      hoursPlayed,
+      sharePercent,
+    };
+  });
+
+  // 4. Determine Account Created Year & Tenure
+  const currentYear = new Date().getUTCFullYear();
+  let accountCreatedYear = currentYear;
+  if (summary.timeCreatedTimestamp) {
+    accountCreatedYear = new Date(summary.timeCreatedTimestamp * 1000).getUTCFullYear();
+  } else if (summary.timeCreated) {
+    const parsed = new Date(summary.timeCreated).getUTCFullYear();
+    if (!isNaN(parsed) && parsed > 1990) {
+      accountCreatedYear = parsed;
+    }
+  } else {
+    const yearsWithPlay = allGames
+      .filter((g) => (g.rtime_last_played ?? 0) > 0)
+      .map((g) => new Date(g.rtime_last_played * 1000).getUTCFullYear());
+    if (yearsWithPlay.length > 0) {
+      accountCreatedYear = Math.min(...yearsWithPlay);
+    }
+  }
+  accountCreatedYear = Math.min(accountCreatedYear, currentYear);
+  const accountAgeYears = Math.max(0, currentYear - accountCreatedYear);
+
+  // 5. Compute Behavioral Archetype
+  const top3PlaytimeMinutes = sortedPlayedGames
+    .slice(0, 3)
+    .reduce((acc, g) => acc + (g.playtime_forever ?? 0), 0);
+  const top3SharePercent =
+    totalPlaytimeMinutes > 0
+      ? Number(((top3PlaytimeMinutes / totalPlaytimeMinutes) * 100).toFixed(1))
+      : 0;
+  const unplayedRatioPercent =
+    totalGames > 0 ? Number(((unplayedGames / totalGames) * 100).toFixed(1)) : 0;
+  const playedOver10hCount = allGames.filter((g) => (g.playtime_forever ?? 0) >= 600).length;
+  const averageHoursPerPlayedGame =
+    playedGames > 0 ? Number((totalPlaytimeHours / playedGames).toFixed(1)) : 0;
+
+  const archetype = computeGamerArchetype({
+    top3SharePercent,
+    unplayedRatioPercent,
+    playedOver10hCount,
+    averageHoursPerPlayedGame,
+    totalGames,
+    accountAgeYears,
+  });
+
+  // 6. TimeStream Yearly Series
+  const timeStream = buildDossierTimeStream(allGames, accountCreatedYear, currentYear);
+
+  const summaryMetrics: DossierSummaryMetrics = {
+    totalGames,
+    playedGames,
+    unplayedGames,
+    totalPlaytimeHours,
+    accountCreatedYear,
+    accountAgeYears,
+    topPlayedGames,
+  };
+
+  const dossierData: PublicDossierResponse = {
+    steamId,
+    target: displayTarget,
+    personaName: summary.personaName || 'Unknown Player',
+    avatarUrl: summary.avatarUrl || null,
+    profileUrl: summary.profileUrl || `https://steamcommunity.com/profiles/${steamId}`,
+    currency,
+    ...summaryMetrics,
+    summary: summaryMetrics,
+    timeStream,
+    archetype,
+    updatedAt: new Date().toISOString(),
+  };
+
+  // 7. Persist to DynamoDB Cache (TTL 3600 seconds)
+  if (tableName && ddbDocClient) {
+    try {
+      const ttl = nowSec + 3600;
+      await ddbDocClient.send(
+        new PutCommand({
+          TableName: tableName,
+          Item: {
+            PK: `DOSSIER#v1#${steamId}`,
+            SK: 'TELEMETRY',
+            ...dossierData,
+            ttl,
+          },
+        }),
+      );
+    } catch (saveErr) {
+      console.warn(
+        'Failed to persist dossier telemetry to DynamoDB:',
+        saveErr instanceof Error ? saveErr.message : saveErr,
+      );
+    }
+  }
+
+  return {
+    success: true,
+    data: dossierData,
+  };
+}
+
+/**
  * Main Lambda handler for the Public Web API companion endpoints.
  */
 export const handler = async (event: HttpApiEvent): Promise<PublicApiResponse> => {
@@ -1620,6 +2047,62 @@ export const handler = async (event: HttpApiEvent): Promise<PublicApiResponse> =
       const currencyParam = event.queryStringParameters?.currency;
       const preferredCurrency = (currencyParam || 'USD').toUpperCase() === 'BRL' ? 'BRL' : 'USD';
       const result = await resolveBacklogTelemetry(cleanTarget, preferredCurrency);
+      if (!result.success) {
+        return createJsonResponse(result.statusCode, {
+          error: result.error,
+          message: result.message,
+        });
+      }
+
+      return createJsonResponse(200, result.data);
+    }
+
+    // Route 7: GET /public/dossier/{target}
+    const isDossierBaseRoute =
+      rawPath === '/public/dossier' ||
+      rawPath === '/public/dossier/' ||
+      rawPath.endsWith('/prod/public/dossier') ||
+      rawPath.endsWith('/prod/public/dossier/');
+
+    if (isDossierBaseRoute && (!event.pathParameters || !event.pathParameters.target)) {
+      return createJsonResponse(400, {
+        error: 'BadRequest',
+        message: 'Missing or invalid target parameter.',
+      });
+    }
+
+    const isExplicitDossierRoute = event.routeKey === 'GET /public/dossier/{target}';
+    const hasDossierSubpath =
+      rawPath.includes('/public/dossier/') &&
+      Boolean(rawPath.split('/public/dossier/')[1]?.split('?')[0]?.trim());
+    const hasDossierTargetParam =
+      Boolean(event.pathParameters && 'target' in event.pathParameters) &&
+      (rawPath.includes('/public/dossier') || isExplicitDossierRoute);
+
+    if (isExplicitDossierRoute || hasDossierTargetParam || hasDossierSubpath) {
+      let target = event.pathParameters?.target;
+      if (!target && rawPath.includes('/public/dossier/')) {
+        const parts = rawPath.split('/public/dossier/');
+        target = parts[1]?.split('?')[0];
+      }
+
+      if (!target || target.trim() === '') {
+        return createJsonResponse(400, {
+          error: 'BadRequest',
+          message: 'Missing or invalid target parameter.',
+        });
+      }
+
+      let cleanTarget = target.trim();
+      try {
+        cleanTarget = decodeURIComponent(cleanTarget).trim();
+      } catch {
+        // Fallback to raw target
+      }
+
+      const currencyParam = event.queryStringParameters?.currency;
+      const preferredCurrency = (currencyParam || 'USD').toUpperCase() === 'BRL' ? 'BRL' : 'USD';
+      const result = await resolveDossierTelemetry(cleanTarget, preferredCurrency, docClient, tableName);
       if (!result.success) {
         return createJsonResponse(result.statusCode, {
           error: result.error,

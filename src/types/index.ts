@@ -268,6 +268,7 @@ export interface SteamPlayerSummary {
   currentlyPlaying: string | null;
   currentlyPlayingId: string | null;
   timeCreated: string | null;
+  timeCreatedTimestamp?: number | null;
   countryCode: string | null;
   realName: string | null;
 }
@@ -765,5 +766,95 @@ export interface BacklogTelemetrySummary {
   totalBacklogValueFormatted: string;
   unplayedItems: PublicBacklogItem[];
 }
+
+// ---------------------------------------------------------------------------
+// Steam Owned Games (with Last Played Timestamps)
+// ---------------------------------------------------------------------------
+
+/** A single owned game item returned by getOwnedGames with last played timestamp. */
+export interface SteamOwnedGameItem {
+  appId: number;
+  appid: number;
+  name: string;
+  playtime_forever: number;
+  rtime_last_played: number;
+  img_icon_url?: string | null;
+}
+
+/** Result shape returned by getOwnedGames helper. */
+export interface SteamOwnedGamesResult {
+  isPrivate: boolean;
+  gameCount: number;
+  games: SteamOwnedGameItem[];
+}
+
+// ---------------------------------------------------------------------------
+// Public Gamer Dossier Telemetry
+// ---------------------------------------------------------------------------
+
+/** Top played game item within a player's Gamer Dossier. */
+export interface DossierTopGame {
+  appId: number;
+  title: string;
+  imageUrl: string;
+  hoursPlayed: number;
+  sharePercent: number;
+}
+
+/** Yearly activity metric entry for the Gamer Dossier TimeStream. */
+export interface DossierTimeStreamYear {
+  year: number;
+  activeTitlesCount: number;
+  recordedHours: number;
+  dominantGameTitle: string | null;
+  dominantGameAppId: number | null;
+}
+
+/** Categorized gamer behavioral archetype profile. */
+export interface DossierArchetype {
+  id: 'FOCUS_MONK' | 'VAULT_COLLECTOR' | 'VETERAN_HISTORIAN' | 'TACTICAL_EXPLORER';
+  label: string;
+  tagline: string;
+  primaryMetricLabel: string;
+  primaryMetricValue: string;
+  traits: string[];
+}
+
+/** Summary playtime and tenure metrics for Gamer Dossier. */
+export interface DossierSummaryMetrics {
+  totalGames: number;
+  playedGames: number;
+  unplayedGames: number;
+  totalPlaytimeHours: number;
+  accountCreatedYear: number;
+  accountAgeYears: number;
+  topPlayedGames: DossierTopGame[];
+}
+
+/** Public Gamer Dossier response payload for Web / PWA companion. */
+export interface PublicDossierResponse {
+  steamId: string;
+  target: string;
+  personaName: string;
+  avatarUrl: string | null;
+  profileUrl: string;
+  currency: string;
+  totalGames: number;
+  playedGames: number;
+  unplayedGames: number;
+  totalPlaytimeHours: number;
+  accountCreatedYear: number;
+  accountAgeYears: number;
+  topPlayedGames: DossierTopGame[];
+  summary: DossierSummaryMetrics;
+  timeStream: DossierTimeStreamYear[];
+  archetype: DossierArchetype;
+  updatedAt: string;
+}
+
+/** Result shape returned by resolveDossierTelemetry. */
+export type DossierTelemetryApiResult =
+  | { success: true; data: PublicDossierResponse }
+  | { success: false; statusCode: number; error: string; message: string };
 
 
