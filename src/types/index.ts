@@ -483,7 +483,7 @@ export interface SteamMostPlayedEntry {
   peakToday: number | null;
 }
 
-/** A single ranked entry from getSteamTrendingGames(). */
+/** A single ranked entry from getSteamTrendingGames() and resolveTrendingGames(). */
 export interface SteamTrendingEntry {
   rank: number;
   appId: number;
@@ -491,6 +491,26 @@ export interface SteamTrendingEntry {
   currentPlayers: number | null;
   priceText: string;
   headerImage: string | null;
+  bestStore?: 'steam' | 'nuuvem' | 'epic' | 'gog' | string;
+  bestPriceUsd?: number | null;
+  bestPriceBrl?: number | null;
+  cutPercent?: number;
+  isATL?: boolean;
+  dealUrl?: string | null;
+  regularPrice?: number | null;
+  salePrice?: number | null;
+}
+
+/** Enriched trending game summary reflecting multi-store deal intelligence. */
+export interface TrendingGameSummary extends SteamTrendingEntry {
+  bestStore: 'steam' | 'nuuvem' | 'epic' | 'gog' | string;
+  bestPriceUsd: number | null;
+  bestPriceBrl: number | null;
+  cutPercent: number;
+  isATL: boolean;
+  dealUrl?: string | null;
+  regularPrice?: number | null;
+  salePrice?: number | null;
 }
 
 // ---------------------------------------------------------------------------

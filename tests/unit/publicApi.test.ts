@@ -231,13 +231,52 @@ describe('Public Web API Handler', () => {
     vi.mocked(getGameDealInfo).mockImplementation(async (rawId, currency = 'USD') => {
       const cleanId = String(rawId).replace('steam:', '').trim();
       const isBrl = currency === 'BRL';
+      const sym = isBrl ? 'R$' : '$';
 
       if (cleanId === '1086940') {
         return isBrl ? mockDealBaldursGateBrl : mockDealBaldursGate;
       }
 
+      if (cleanId === '1091500') {
+        return {
+          gameId: 'steam_1091500',
+          title: 'Cyberpunk 2077',
+          imageUrl: 'https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/1091500/header.jpg',
+          reviewScore: 86,
+          steamAppId: '1091500',
+          dealType: 'CURATED_DEAL',
+          isAllTimeLow: true,
+          allTimeLowPrice: isBrl ? 99.95 : 29.99,
+          expiry: null,
+          primaryDeal: {
+            shopName: 'Steam',
+            salePrice: isBrl ? 99.95 : 29.99,
+            regularPrice: isBrl ? 199.90 : 59.99,
+            cutPercent: 50,
+            url: 'https://store.steampowered.com/app/1091500',
+            expiry: null,
+            currency: isBrl ? 'BRL' : 'USD',
+            currencySymbol: sym,
+          },
+          cheaperAlternative: null,
+          storeBreakdown: {
+            Steam: {
+              shopName: 'Steam',
+              salePrice: isBrl ? 99.95 : 29.99,
+              regularPrice: isBrl ? 199.90 : 59.99,
+              cutPercent: 50,
+              url: 'https://store.steampowered.com/app/1091500',
+              expiry: null,
+              currency: isBrl ? 'BRL' : 'USD',
+              currencySymbol: sym,
+            },
+          },
+          alternativeCheckStatus: 'confirmed',
+          alternativeCheckDegraded: false,
+        };
+      }
+
       const title = KNOWN_GAME_TITLES[cleanId] || `Steam Application ${cleanId}`;
-      const sym = isBrl ? 'R$' : '$';
       const salePrice = isBrl ? 99.99 : 19.99;
       const regularPrice = isBrl ? 199.99 : 39.99;
 
@@ -1199,8 +1238,66 @@ describe('Public Web API Handler', () => {
         expect(response.statusCode).toBe(200);
         const data = JSON.parse(response.body);
         expect(Array.isArray(data)).toBe(true);
-        expect(data.length).toBe(1);
+        expect(data.length).toBe(2);
         expect(data[0].appId).toBe('1145360');
+        expect(data[1].appId).toBe('1145350');
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+
+    it('should return up to 6 matching results from Steam Store search when multiple games match query', async () => {
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = vi.fn(async (url) => {
+        const urlStr = String(url);
+        if (urlStr.includes('store.steampowered.com/api/storesearch')) {
+          return {
+            ok: true,
+            json: async () => ({
+              total: 8,
+              items: [
+                { id: 101, name: 'ELDEN RING Shadow of the Erdtree', type: 'app' },
+                { id: 1245620, name: 'ELDEN RING', type: 'app' },
+                { id: 102, name: 'ELDEN RING NIGHTREIGN', type: 'app' },
+                { id: 103, name: 'ELDEN RING Deluxe Edition', type: 'app' },
+                { id: 104, name: 'ELDEN RING Soundtrack', type: 'app' },
+                { id: 105, name: 'ELDEN RING Artbook', type: 'app' },
+                { id: 106, name: 'ELDEN RING Extra 1', type: 'app' },
+                { id: 107, name: 'ELDEN RING Extra 2', type: 'app' },
+              ],
+            }),
+          } as Response;
+        }
+        return originalFetch(url);
+      });
+
+      try {
+        const event: HttpApiEvent = {
+          routeKey: 'GET /public/market',
+          rawPath: '/public/market',
+          queryStringParameters: {
+            q: 'elden ring',
+          },
+          requestContext: {
+            http: {
+              method: 'GET',
+              path: '/public/market',
+            },
+          },
+        };
+
+        const response = await handler(event);
+
+        expect(response.statusCode).toBe(200);
+        const data = JSON.parse(response.body);
+        expect(Array.isArray(data)).toBe(true);
+        expect(data.length).toBe(6);
+        // Exact match comes first
+        expect(data[0].appId).toBe('1245620');
+        expect(data[0].title).toBe('ELDEN RING');
+        // Other matches follow
+        expect(data[1].appId).toBe('101');
+        expect(data[2].appId).toBe('102');
       } finally {
         globalThis.fetch = originalFetch;
       }
@@ -1229,7 +1326,7 @@ describe('Public Web API Handler', () => {
       const data = JSON.parse(response.body);
       expect(Array.isArray(data)).toBe(true);
       expect(data.length).toBeGreaterThanOrEqual(6);
-      expect(data.length).toBeLessThanOrEqual(8);
+      expect(data.length).toBeLessThanOrEqual(16);
 
       // Confirm F2P titles were filtered out
       const appIds = data.map((g: SteamTrendingEntry) => g.appId);
@@ -1331,7 +1428,7 @@ describe('Public Web API Handler', () => {
       const data = JSON.parse(response.body);
       expect(Array.isArray(data)).toBe(true);
       expect(data.length).toBeGreaterThanOrEqual(6);
-      expect(data.length).toBeLessThanOrEqual(8);
+      expect(data.length).toBeLessThanOrEqual(16);
 
       const appIds = data.map((g: SteamTrendingEntry) => g.appId);
       expect(appIds).not.toContain(1675200);
@@ -1421,7 +1518,7 @@ describe('Public Web API Handler', () => {
       const data = JSON.parse(response.body);
       expect(Array.isArray(data)).toBe(true);
       expect(data.length).toBeGreaterThanOrEqual(6);
-      expect(data.length).toBeLessThanOrEqual(8);
+      expect(data.length).toBeLessThanOrEqual(16);
 
       data.forEach((entry: SteamTrendingEntry, idx: number) => {
         expect(entry.rank).toBe(idx + 1);
@@ -1550,6 +1647,111 @@ describe('Public Web API Handler', () => {
       expect(trendingPut?.args[0].input.Item?.SK).toBe('TELEMETRY');
       expect(Array.isArray(trendingPut?.args[0].input.Item?.items)).toBe(true);
       expect(trendingPut?.args[0].input.Item?.ttl).toBeGreaterThan(Math.floor(Date.now() / 1000));
+    });
+
+    it('should enrich trending games with multi-store ITAD deal intelligence, lowest storefront, and accurate flags', async () => {
+      // Mock game where Steam is full price ($59.99, 0% cut) but Nuuvem has 15% discount ($50.99)
+      const mockNuuvemCheaperDeal: GameDealInfo = {
+        gameId: 'steam_999001',
+        title: 'Action RPG Hit',
+        imageUrl: 'https://example.com/action.jpg',
+        reviewScore: 90,
+        steamAppId: '999001',
+        dealType: 'CURATED_DEAL',
+        isAllTimeLow: true,
+        allTimeLowPrice: 50.99,
+        expiry: null,
+        primaryDeal: {
+          shopName: 'Steam',
+          salePrice: 59.99,
+          regularPrice: 59.99,
+          cutPercent: 0,
+          url: 'https://store.steampowered.com/app/999001/',
+          expiry: null,
+          currency: 'USD',
+          currencySymbol: '$',
+        },
+        cheaperAlternative: {
+          shopName: 'Nuuvem',
+          salePrice: 50.99,
+          regularPrice: 59.99,
+          cutPercent: 15,
+          url: 'https://www.nuuvem.com/item/action-rpg-hit',
+          expiry: null,
+          currency: 'USD',
+          currencySymbol: '$',
+        },
+        storeBreakdown: {
+          Steam: {
+            shopName: 'Steam',
+            salePrice: 59.99,
+            regularPrice: 59.99,
+            cutPercent: 0,
+            url: 'https://store.steampowered.com/app/999001/',
+            expiry: null,
+            currency: 'USD',
+            currencySymbol: '$',
+          },
+          Nuuvem: {
+            shopName: 'Nuuvem',
+            salePrice: 50.99,
+            regularPrice: 59.99,
+            cutPercent: 15,
+            url: 'https://www.nuuvem.com/item/action-rpg-hit',
+            expiry: null,
+            currency: 'USD',
+            currencySymbol: '$',
+          },
+        },
+        alternativeCheckStatus: 'confirmed',
+        alternativeCheckDegraded: false,
+      };
+
+      vi.mocked(getSteamTrendingGames).mockResolvedValueOnce([
+        {
+          rank: 1,
+          appId: 999001,
+          name: 'Action RPG Hit',
+          currentPlayers: 45000,
+          priceText: '$ 59.99',
+          headerImage: 'https://example.com/action.jpg',
+        },
+      ]);
+
+      vi.mocked(getGameDealInfo).mockImplementation(async (rawId) => {
+        if (String(rawId).includes('999001')) {
+          return mockNuuvemCheaperDeal;
+        }
+        return null;
+      });
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/market/trending',
+        rawPath: '/public/market/trending',
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/market/trending',
+          },
+        },
+      };
+
+      const response = await handler(event);
+
+      expect(response.statusCode).toBe(200);
+      const data = JSON.parse(response.body);
+      expect(Array.isArray(data)).toBe(true);
+      expect(data.length).toBe(16);
+
+      // Verify the first game was enriched with Nuuvem offer
+      const enrichedGame = data[0];
+      expect(enrichedGame.appId).toBe(999001);
+      expect(enrichedGame.bestStore).toBe('nuuvem');
+      expect(enrichedGame.cutPercent).toBe(15);
+      expect(enrichedGame.bestPriceUsd).toBe(50.99);
+      expect(enrichedGame.priceText).toBe('$ 50.99 (-15%)');
+      expect(enrichedGame.isATL).toBe(true);
+      expect(enrichedGame.dealUrl).toBe('https://www.nuuvem.com/item/action-rpg-hit');
     });
   });
 

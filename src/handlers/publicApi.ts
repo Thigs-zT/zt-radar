@@ -16,6 +16,7 @@ import { DynamoDBDocumentClient, QueryCommand, PutCommand } from '@aws-sdk/lib-d
 import type {
   PublicMarketTelemetry,
   SteamTrendingEntry,
+  TrendingGameSummary,
   StoreDeal,
   PublicWishlistItem,
   PublicWishlistResponse,
@@ -107,6 +108,15 @@ export const KNOWN_GAME_TITLES: Record<string, string> = {
   '252490': 'Rust',
   '1449690': 'The Walking Dead: The Telltale Definitive Series',
   '3240220': 'Grand Theft Auto V Enhanced',
+  '582010': 'MONSTER HUNTER: WORLD',
+  '1174180': 'Red Dead Redemption 2',
+  '990080': 'Hogwarts Legacy',
+  '2358720': 'Black Myth: Wukong',
+  '553850': 'HELLDIVERS 2',
+  '1326470': 'Sons Of The Forest',
+  '1551360': 'Forza Horizon 5',
+  '2669320': 'EA SPORTS FC 25',
+  '381210': 'Dead by Daylight',
 };
 
 /** Prominent monitored games for curated market listings. */
@@ -141,6 +151,18 @@ export const HARDWARE_NAME_PATTERNS: RegExp[] = [
   /\bbase station\b/i,
   /\bvr kit\b/i,
 ];
+
+/**
+ * Normalizes storefront display name to one of the 4 verified storefront slugs:
+ * 'steam', 'nuuvem', 'epic', 'gog'.
+ */
+export function normalizeStoreSlug(shopName?: string | null): 'steam' | 'nuuvem' | 'epic' | 'gog' {
+  const lower = (shopName || '').toLowerCase().trim();
+  if (lower.includes('nuuvem')) return 'nuuvem';
+  if (lower.includes('epic')) return 'epic';
+  if (lower.includes('gog')) return 'gog';
+  return 'steam';
+}
 
 /**
  * Constructs a standardized HTTP API Gateway response with security and CORS headers.
@@ -453,7 +475,7 @@ export async function resolveCuratedMarketList(
 /**
  * Builds structured fallback trending games telemetry excluding Free-to-Play titles.
  */
-export function buildTrendingGamesList(preferredCurrency: string = 'USD'): SteamTrendingEntry[] {
+export function buildTrendingGamesList(preferredCurrency: string = 'USD'): TrendingGameSummary[] {
   const isBrl = (preferredCurrency || '').toUpperCase().trim() === 'BRL';
   return [
     {
@@ -463,6 +485,14 @@ export function buildTrendingGamesList(preferredCurrency: string = 'USD'): Steam
       currentPlayers: 54000,
       priceText: isBrl ? 'R$ 99.95 (-50%)' : '$ 29.99 (-50%)',
       headerImage: 'https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/1091500/header.jpg',
+      bestStore: 'steam',
+      bestPriceUsd: 29.99,
+      bestPriceBrl: 99.95,
+      cutPercent: 50,
+      isATL: true,
+      dealUrl: 'https://store.steampowered.com/app/1091500/',
+      regularPrice: isBrl ? 199.9 : 59.99,
+      salePrice: isBrl ? 99.95 : 29.99,
     },
     {
       rank: 2,
@@ -471,6 +501,14 @@ export function buildTrendingGamesList(preferredCurrency: string = 'USD'): Steam
       currentPlayers: 82000,
       priceText: isBrl ? 'R$ 159.99 (-20%)' : '$ 47.99 (-20%)',
       headerImage: 'https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/1086940/header.jpg',
+      bestStore: 'steam',
+      bestPriceUsd: 47.99,
+      bestPriceBrl: 159.99,
+      cutPercent: 20,
+      isATL: true,
+      dealUrl: 'https://store.steampowered.com/app/1086940/',
+      regularPrice: isBrl ? 199.99 : 59.99,
+      salePrice: isBrl ? 159.99 : 47.99,
     },
     {
       rank: 3,
@@ -479,6 +517,14 @@ export function buildTrendingGamesList(preferredCurrency: string = 'USD'): Steam
       currentPlayers: 67000,
       priceText: isBrl ? 'R$ 149.94 (-40%)' : '$ 35.99 (-40%)',
       headerImage: 'https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/1245620/header.jpg',
+      bestStore: 'steam',
+      bestPriceUsd: 35.99,
+      bestPriceBrl: 149.94,
+      cutPercent: 40,
+      isATL: true,
+      dealUrl: 'https://store.steampowered.com/app/1245620/',
+      regularPrice: isBrl ? 249.9 : 59.99,
+      salePrice: isBrl ? 149.94 : 35.99,
     },
     {
       rank: 4,
@@ -487,6 +533,14 @@ export function buildTrendingGamesList(preferredCurrency: string = 'USD'): Steam
       currentPlayers: 31000,
       priceText: isBrl ? 'R$ 32.49 (-75%)' : '$ 9.99 (-75%)',
       headerImage: 'https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/292030/header.jpg',
+      bestStore: 'steam',
+      bestPriceUsd: 9.99,
+      bestPriceBrl: 32.49,
+      cutPercent: 75,
+      isATL: true,
+      dealUrl: 'https://store.steampowered.com/app/292030/',
+      regularPrice: isBrl ? 129.99 : 39.99,
+      salePrice: isBrl ? 32.49 : 9.99,
     },
     {
       rank: 5,
@@ -495,6 +549,14 @@ export function buildTrendingGamesList(preferredCurrency: string = 'USD'): Steam
       currentPlayers: 28000,
       priceText: isBrl ? 'R$ 49.95 (-50%)' : '$ 14.99 (-50%)',
       headerImage: 'https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/582010/header.jpg',
+      bestStore: 'steam',
+      bestPriceUsd: 14.99,
+      bestPriceBrl: 49.95,
+      cutPercent: 50,
+      isATL: true,
+      dealUrl: 'https://store.steampowered.com/app/582010/',
+      regularPrice: isBrl ? 99.9 : 29.99,
+      salePrice: isBrl ? 49.95 : 14.99,
     },
     {
       rank: 6,
@@ -503,6 +565,14 @@ export function buildTrendingGamesList(preferredCurrency: string = 'USD'): Steam
       currentPlayers: 39000,
       priceText: isBrl ? 'R$ 98.96 (-67%)' : '$ 19.79 (-67%)',
       headerImage: 'https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/1174180/header.jpg',
+      bestStore: 'steam',
+      bestPriceUsd: 19.79,
+      bestPriceBrl: 98.96,
+      cutPercent: 67,
+      isATL: true,
+      dealUrl: 'https://store.steampowered.com/app/1174180/',
+      regularPrice: isBrl ? 299.9 : 59.99,
+      salePrice: isBrl ? 98.96 : 19.79,
     },
     {
       rank: 7,
@@ -511,6 +581,14 @@ export function buildTrendingGamesList(preferredCurrency: string = 'USD'): Steam
       currentPlayers: 21000,
       priceText: isBrl ? 'R$ 124.99 (-50%)' : '$ 29.99 (-50%)',
       headerImage: 'https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/990080/header.jpg',
+      bestStore: 'steam',
+      bestPriceUsd: 29.99,
+      bestPriceBrl: 124.99,
+      cutPercent: 50,
+      isATL: true,
+      dealUrl: 'https://store.steampowered.com/app/990080/',
+      regularPrice: isBrl ? 249.99 : 59.99,
+      salePrice: isBrl ? 124.99 : 29.99,
     },
     {
       rank: 8,
@@ -519,6 +597,142 @@ export function buildTrendingGamesList(preferredCurrency: string = 'USD'): Steam
       currentPlayers: 65000,
       priceText: isBrl ? 'R$ 229.99' : '$ 59.99',
       headerImage: 'https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/2358720/header.jpg',
+      bestStore: 'steam',
+      bestPriceUsd: 59.99,
+      bestPriceBrl: 229.99,
+      cutPercent: 0,
+      isATL: false,
+      dealUrl: 'https://store.steampowered.com/app/2358720/',
+      regularPrice: isBrl ? 229.99 : 59.99,
+      salePrice: isBrl ? 229.99 : 59.99,
+    },
+    {
+      rank: 9,
+      appId: 271590,
+      name: 'Grand Theft Auto V',
+      currentPlayers: 95000,
+      priceText: isBrl ? 'R$ 41.20 (-50%)' : '$ 14.99 (-50%)',
+      headerImage: 'https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/271590/header.jpg',
+      bestStore: 'steam',
+      bestPriceUsd: 14.99,
+      bestPriceBrl: 41.2,
+      cutPercent: 50,
+      isATL: true,
+      dealUrl: 'https://store.steampowered.com/app/271590/',
+      regularPrice: isBrl ? 82.4 : 29.99,
+      salePrice: isBrl ? 41.2 : 14.99,
+    },
+    {
+      rank: 10,
+      appId: 252490,
+      name: 'Rust',
+      currentPlayers: 78000,
+      priceText: isBrl ? 'R$ 51.50 (-50%)' : '$ 19.99 (-50%)',
+      headerImage: 'https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/252490/header.jpg',
+      bestStore: 'steam',
+      bestPriceUsd: 19.99,
+      bestPriceBrl: 51.5,
+      cutPercent: 50,
+      isATL: false,
+      dealUrl: 'https://store.steampowered.com/app/252490/',
+      regularPrice: isBrl ? 103.0 : 39.99,
+      salePrice: isBrl ? 51.5 : 19.99,
+    },
+    {
+      rank: 11,
+      appId: 1145360,
+      name: 'Hades',
+      currentPlayers: 18000,
+      priceText: isBrl ? 'R$ 25.15 (-66%)' : '$ 8.49 (-66%)',
+      headerImage: 'https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/1145360/header.jpg',
+      bestStore: 'steam',
+      bestPriceUsd: 8.49,
+      bestPriceBrl: 25.15,
+      cutPercent: 66,
+      isATL: true,
+      dealUrl: 'https://store.steampowered.com/app/1145360/',
+      regularPrice: isBrl ? 73.99 : 24.99,
+      salePrice: isBrl ? 25.15 : 8.49,
+    },
+    {
+      rank: 12,
+      appId: 553850,
+      name: 'HELLDIVERS 2',
+      currentPlayers: 42000,
+      priceText: isBrl ? 'R$ 199.50' : '$ 39.99',
+      headerImage: 'https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/553850/header.jpg',
+      bestStore: 'steam',
+      bestPriceUsd: 39.99,
+      bestPriceBrl: 199.5,
+      cutPercent: 0,
+      isATL: false,
+      dealUrl: 'https://store.steampowered.com/app/553850/',
+      regularPrice: isBrl ? 199.5 : 39.99,
+      salePrice: isBrl ? 199.5 : 39.99,
+    },
+    {
+      rank: 13,
+      appId: 1326470,
+      name: 'Sons Of The Forest',
+      currentPlayers: 15000,
+      priceText: isBrl ? 'R$ 48.94 (-45%)' : '$ 16.49 (-45%)',
+      headerImage: 'https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/1326470/header.jpg',
+      bestStore: 'steam',
+      bestPriceUsd: 16.49,
+      bestPriceBrl: 48.94,
+      cutPercent: 45,
+      isATL: true,
+      dealUrl: 'https://store.steampowered.com/app/1326470/',
+      regularPrice: isBrl ? 88.99 : 29.99,
+      salePrice: isBrl ? 48.94 : 16.49,
+    },
+    {
+      rank: 14,
+      appId: 1551360,
+      name: 'Forza Horizon 5',
+      currentPlayers: 22000,
+      priceText: isBrl ? 'R$ 124.50 (-50%)' : '$ 29.99 (-50%)',
+      headerImage: 'https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/1551360/header.jpg',
+      bestStore: 'steam',
+      bestPriceUsd: 29.99,
+      bestPriceBrl: 124.5,
+      cutPercent: 50,
+      isATL: true,
+      dealUrl: 'https://store.steampowered.com/app/1551360/',
+      regularPrice: isBrl ? 249.0 : 59.99,
+      salePrice: isBrl ? 124.5 : 29.99,
+    },
+    {
+      rank: 15,
+      appId: 2669320,
+      name: 'EA SPORTS FC 25',
+      currentPlayers: 51000,
+      priceText: isBrl ? 'R$ 174.50 (-50%)' : '$ 34.99 (-50%)',
+      headerImage: 'https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/2669320/header.jpg',
+      bestStore: 'steam',
+      bestPriceUsd: 34.99,
+      bestPriceBrl: 174.5,
+      cutPercent: 50,
+      isATL: true,
+      dealUrl: 'https://store.steampowered.com/app/2669320/',
+      regularPrice: isBrl ? 349.0 : 69.99,
+      salePrice: isBrl ? 174.5 : 34.99,
+    },
+    {
+      rank: 16,
+      appId: 381210,
+      name: 'Dead by Daylight',
+      currentPlayers: 36000,
+      priceText: isBrl ? 'R$ 19.99 (-60%)' : '$ 7.99 (-60%)',
+      headerImage: 'https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/381210/header.jpg',
+      bestStore: 'steam',
+      bestPriceUsd: 7.99,
+      bestPriceBrl: 19.99,
+      cutPercent: 60,
+      isATL: true,
+      dealUrl: 'https://store.steampowered.com/app/381210/',
+      regularPrice: isBrl ? 49.99 : 19.99,
+      salePrice: isBrl ? 19.99 : 7.99,
     },
   ];
 }
@@ -531,15 +745,16 @@ export function buildTrendingGamesList(preferredCurrency: string = 'USD'): Steam
  * - Filters out Free-to-Play titles and non-discounted promotional labels.
  * - Filters out Valve hardware and physical peripherals (Steam Deck, Valve Index, Controller, etc.).
  * - Deduplicates items by appId so identical games never appear more than once.
- * - Backfills from curated commercial games if needed to guarantee between 6 and 8 entries.
+ * - Backfills from curated commercial games if needed to guarantee up to 16 entries.
+ * - Enriches multi-store deal intelligence via cached/live ITAD lookups.
  * - Re-indexes sequential ranks (1, 2, 3...) after filtering.
- * - Caches result in DynamoDB and returns trending games.
+ * - Caches result in DynamoDB and returns enriched trending games.
  */
 export async function resolveTrendingGames(
   preferredCurrency: string = 'USD',
   ddbDocClient: DynamoDBDocumentClient = docClient,
   tableName: string = process.env.TABLE_NAME || '',
-): Promise<SteamTrendingEntry[]> {
+): Promise<TrendingGameSummary[]> {
   const isBrl = (preferredCurrency || '').toUpperCase().trim() === 'BRL';
   const currency = isBrl ? 'BRL' : 'USD';
   const nowSec = Math.floor(Date.now() / 1000);
@@ -561,7 +776,7 @@ export async function resolveTrendingGames(
 
       if (cacheResult?.Items && Array.isArray(cacheResult.Items) && cacheResult.Items.length > 0) {
         const cached = cacheResult.Items[0] as {
-          items?: SteamTrendingEntry[];
+          items?: TrendingGameSummary[];
           ttl?: number;
         };
         const isFresh = !cached.ttl || cached.ttl > nowSec;
@@ -615,40 +830,155 @@ export async function resolveTrendingGames(
       }
 
       seenAppIds.add(game.appId);
-      filtered.push({
-        ...game,
-        rank: filtered.length + 1,
-      });
+      filtered.push(game);
 
-      if (filtered.length >= 8) {
+      if (filtered.length >= 16) {
         break;
       }
     }
 
-    // Backfill from curated commercial games if filtered count is less than 6
-    if (filtered.length < 6) {
+    // Backfill from curated commercial games if filtered count is less than 16
+    if (filtered.length < 16) {
       const fallbackGames = buildTrendingGamesList(currency);
       for (const fallback of fallbackGames) {
         if (!seenAppIds.has(fallback.appId)) {
           seenAppIds.add(fallback.appId);
-          filtered.push({
-            ...fallback,
-            rank: filtered.length + 1,
-          });
-          if (filtered.length >= 8) {
+          filtered.push(fallback);
+          if (filtered.length >= 16) {
             break;
           }
         }
       }
     }
 
-    const finalTrending = filtered.slice(0, 8).map((game, idx) => ({
-      ...game,
-      rank: idx + 1,
-    }));
+    const candidateList = filtered.slice(0, 16);
+
+    // Multi-store enrichment using cached/live ITAD deal lookups
+    const enrichedList: TrendingGameSummary[] = await Promise.all(
+      candidateList.map(async (candidate, idx): Promise<TrendingGameSummary> => {
+        let dealInfo: GameDealInfo | PublicMarketTelemetry | null = null;
+        if (tableName && ddbDocClient) {
+          dealInfo = await getCachedMarketTelemetry(String(candidate.appId), currency, ddbDocClient, tableName);
+        }
+
+        if (!dealInfo) {
+          try {
+            dealInfo = await Promise.race([
+              getGameDealInfo(String(candidate.appId), currency, candidate.name),
+              new Promise<null>((resolve) => setTimeout(() => resolve(null), 2500)),
+            ]);
+          } catch {
+            dealInfo = null;
+          }
+        }
+
+        let bestStore: 'steam' | 'nuuvem' | 'epic' | 'gog' = 'steam';
+        let bestPriceUsd: number | null = null;
+        let bestPriceBrl: number | null = null;
+        let cutPercent = 0;
+        let isATL = false;
+        let salePrice: number | null = null;
+        let regularPrice: number | null = null;
+        let dealUrl: string | null = candidate.headerImage
+          ? `https://store.steampowered.com/app/${candidate.appId}/`
+          : null;
+        let priceText = candidate.priceText;
+
+        if (dealInfo && dealInfo.primaryDeal) {
+          const allOffers: StoreDeal[] = dealInfo.storeBreakdown
+            ? Object.values(dealInfo.storeBreakdown)
+            : [dealInfo.primaryDeal];
+
+          if (
+            dealInfo.cheaperAlternative &&
+            !allOffers.some((o) => o.shopName === dealInfo.cheaperAlternative?.shopName)
+          ) {
+            allOffers.push(dealInfo.cheaperAlternative);
+          }
+
+          const lowestOffer = allOffers.reduce((best, curr) => {
+            if (typeof curr.salePrice !== 'number') return best;
+            if (typeof best.salePrice !== 'number') return curr;
+            return curr.salePrice < best.salePrice ? curr : best;
+          }, dealInfo.cheaperAlternative || dealInfo.primaryDeal);
+
+          bestStore = normalizeStoreSlug(lowestOffer.shopName);
+          cutPercent =
+            typeof lowestOffer.cutPercent === 'number'
+              ? Math.max(0, Math.round(lowestOffer.cutPercent))
+              : 0;
+          isATL = Boolean(dealInfo.isAllTimeLow);
+          salePrice = typeof lowestOffer.salePrice === 'number' ? lowestOffer.salePrice : null;
+          regularPrice = typeof lowestOffer.regularPrice === 'number' ? lowestOffer.regularPrice : null;
+          dealUrl = lowestOffer.url || dealUrl;
+
+          if (currency === 'BRL') {
+            bestPriceBrl = salePrice;
+            bestPriceUsd = (candidate as TrendingGameSummary).bestPriceUsd ?? null;
+          } else {
+            bestPriceUsd = salePrice;
+            bestPriceBrl = (candidate as TrendingGameSummary).bestPriceBrl ?? null;
+          }
+
+          if (salePrice !== null) {
+            if (salePrice === 0) {
+              priceText = 'Free to Play';
+            } else {
+              const sym = currency === 'BRL' ? 'R$' : '$';
+              const cutStr = cutPercent > 0 ? ` (-${cutPercent}%)` : '';
+              priceText = `${sym} ${salePrice.toFixed(2)}${cutStr}`;
+            }
+          }
+        } else {
+          const existing = candidate as TrendingGameSummary;
+          if (existing.bestStore) {
+            bestStore = existing.bestStore as 'steam' | 'nuuvem' | 'epic' | 'gog';
+            bestPriceUsd = existing.bestPriceUsd ?? null;
+            bestPriceBrl = existing.bestPriceBrl ?? null;
+            cutPercent = existing.cutPercent ?? 0;
+            isATL = Boolean(existing.isATL);
+            salePrice = existing.salePrice ?? null;
+            regularPrice = existing.regularPrice ?? null;
+            dealUrl = existing.dealUrl ?? dealUrl;
+            priceText = existing.priceText;
+          } else {
+            const cutMatch = (candidate.priceText || '').match(/\(-(\d+)%\)/);
+            cutPercent = cutMatch ? parseInt(cutMatch[1], 10) : 0;
+            const priceMatch = (candidate.priceText || '').match(/(?:\$|R\$)\s*([\d,.]+)/);
+            const parsed = priceMatch ? parseFloat(priceMatch[1].replace(',', '.')) : null;
+            salePrice = parsed;
+            if (currency === 'BRL') {
+              bestPriceBrl = parsed;
+            } else {
+              bestPriceUsd = parsed;
+            }
+          }
+        }
+
+        return {
+          rank: idx + 1,
+          appId: candidate.appId,
+          name: candidate.name,
+          currentPlayers: candidate.currentPlayers ?? null,
+          priceText,
+          headerImage:
+            candidate.headerImage ||
+            dealInfo?.imageUrl ||
+            getCanonicalHeaderImageUrl(String(candidate.appId)),
+          bestStore,
+          bestPriceUsd,
+          bestPriceBrl,
+          cutPercent,
+          isATL,
+          dealUrl,
+          regularPrice,
+          salePrice,
+        };
+      }),
+    );
 
     // 2. Persist to DynamoDB cache with 15-minute TTL
-    if (tableName && ddbDocClient && finalTrending.length > 0) {
+    if (tableName && ddbDocClient && enrichedList.length > 0) {
       try {
         await ddbDocClient.send(
           new PutCommand({
@@ -656,7 +986,7 @@ export async function resolveTrendingGames(
             Item: {
               PK: `MARKET#TRENDING#${currency}`,
               SK: 'TELEMETRY',
-              items: finalTrending,
+              items: enrichedList,
               ttl: nowSec + 900, // 15-minute TTL
               updatedAt: new Date().toISOString(),
             },
@@ -670,8 +1000,8 @@ export async function resolveTrendingGames(
       }
     }
 
-    if (finalTrending.length > 0) {
-      return finalTrending;
+    if (enrichedList.length > 0) {
+      return enrichedList;
     }
   } catch (error) {
     console.error(
@@ -680,7 +1010,7 @@ export async function resolveTrendingGames(
     );
   }
 
-  return buildTrendingGamesList(currency).slice(0, 8);
+  return buildTrendingGamesList(currency).slice(0, 16);
 }
 
 
@@ -1880,22 +2210,53 @@ export const handler = async (event: HttpApiEvent): Promise<PublicApiResponse> =
               total?: number;
               items?: Array<{ id?: number | string; name?: string; type?: string }>;
             };
-            const items = searchData?.items || [];
+            const rawItems = searchData?.items || [];
             const normalizedQuery = searchQuery.trim().toLowerCase();
-            const exactMatch = items.find(
-              (i) => i.id && i.name && i.name.trim().toLowerCase() === normalizedQuery,
-            );
-            const topMatch = exactMatch || items.find((i) => i.id) || items[0];
 
-            if (topMatch?.id) {
-              const item = await resolveMarketTelemetry(
-                String(topMatch.id),
-                preferredCurrency,
-                docClient,
-                tableName,
-                topMatch.name?.trim() || null,
+            // 1. Filter out items without valid IDs and non-app types if specified
+            const seenAppIds = new Set<string>();
+            const validItems: Array<{ id: string; name: string }> = [];
+
+            for (const item of rawItems) {
+              if (item.id === undefined || item.id === null) continue;
+              const appIdStr = String(item.id).trim();
+              if (!appIdStr || seenAppIds.has(appIdStr)) continue;
+              if (item.type && item.type !== 'app') continue;
+
+              seenAppIds.add(appIdStr);
+              validItems.push({
+                id: appIdStr,
+                name: (item.name || '').trim(),
+              });
+            }
+
+            // 2. Sort: exact match first (priority 0), prefix match second (priority 1), others third (priority 2)
+            const sortedItems = [...validItems].sort((a, b) => {
+              const aName = a.name.toLowerCase();
+              const bName = b.name.toLowerCase();
+
+              const aPriority = aName === normalizedQuery ? 0 : aName.startsWith(normalizedQuery) ? 1 : 2;
+              const bPriority = bName === normalizedQuery ? 0 : bName.startsWith(normalizedQuery) ? 1 : 2;
+
+              return aPriority - bPriority;
+            });
+
+            // 3. Return up to 6 matching results
+            const topMatches = sortedItems.slice(0, 6);
+
+            if (topMatches.length > 0) {
+              const results = await Promise.all(
+                topMatches.map((m) =>
+                  resolveMarketTelemetry(
+                    m.id,
+                    preferredCurrency,
+                    docClient,
+                    tableName,
+                    m.name || null,
+                  ),
+                ),
               );
-              return createJsonResponse(200, [item]);
+              return createJsonResponse(200, results);
             }
           }
           return createJsonResponse(200, []);
