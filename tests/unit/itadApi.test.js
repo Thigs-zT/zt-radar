@@ -917,6 +917,204 @@ describe('ITAD API Utilities', () => {
       expect(deal?.alternativeCheckDegraded).toBe(false);
       expect(deal?.alternativeCheckStatus).toBe('confirmed');
     });
+
+    it('should enforce strict 1800ms ITAD timeout and fail fast with graceful Steam-only degraded fallback', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      vi.useFakeTimers();
+      try {
+        let itadSignalAborted = false;
+        globalThis.fetch = vi.fn(async (url, init) => {
+          const urlStr = String(url);
+          if (urlStr.includes('store.steampowered.com/api/appdetails')) {
+            return {
+              ok: true,
+              json: async () => ({
+                '1029690': {
+                  success: true,
+                  data: {
+                    name: 'Sniper Elite 5',
+                    header_image: 'https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/1029690/header.jpg',
+                    price_overview: { initial: 4999, final: 4999, discount_percent: 0 },
+                  },
+                },
+              }),
+            };
+          }
+          if (urlStr.includes('isthereanydeal.com')) {
+            return new Promise((_resolve, reject) => {
+              if (init?.signal) {
+                init.signal.addEventListener('abort', () => {
+                  itadSignalAborted = true;
+                  reject(new DOMException('Aborted', 'AbortError'));
+                }, { once: true });
+              }
+            });
+          }
+          return { ok: false, status: 404 };
+        });
+
+        const dealPromise = getGameDealInfo('1029690', 'USD', 'Sniper Elite 5');
+        await vi.advanceTimersByTimeAsync(1800);
+        const deal = await dealPromise;
+
+        expect(itadSignalAborted).toBe(true);
+        expect(deal).toBeDefined();
+        expect(deal?.title).toBe('Sniper Elite 5');
+        expect(deal?.alternativeCheckDegraded).toBe(true);
+        expect(deal?.alternativeCheckStatus).toBe('degraded');
+        expect(deal?.isPlatformExclusive).toBe(false);
+        expect(deal?.primaryDeal.shopName).toBe('Steam');
+        expect(deal?.primaryDeal.salePrice).toBe(49.99);
+        expect(Object.keys(deal?.storeBreakdown || {})).toEqual(['Steam']);
+      } finally {
+        vi.useRealTimers();
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('should resolve direct Steam AppID mapping via shop 61 before falling back to fuzzy title search', async () => {
+      let fuzzySearchCalled = false;
+      let shop61Body = null;
+
+      globalThis.fetch = vi.fn(async (url, init) => {
+        const urlStr = String(url);
+        if (urlStr.includes('store.steampowered.com/api/appdetails')) {
+          return {
+            ok: true,
+            json: async () => ({
+              '1029690': {
+                success: true,
+                data: {
+                  name: 'Sniper Elite 5',
+                  price_overview: { initial: 4999, final: 4999, discount_percent: 0 },
+                },
+              },
+            }),
+          };
+        }
+        if (urlStr.includes('/games/lookup/v1')) {
+          return {
+            ok: true,
+            json: async () => ({ found: false }),
+          };
+        }
+        if (urlStr.includes('/lookup/id/shop/61/v1')) {
+          shop61Body = JSON.parse(init?.body || '[]');
+          return {
+            ok: true,
+            json: async () => ({
+              'app/1029690': 'uuid-sniper-elite-5',
+            }),
+          };
+        }
+        if (urlStr.includes('/games/search/v1')) {
+          fuzzySearchCalled = true;
+          return { ok: true, json: async () => [] };
+        }
+        if (urlStr.includes('/games/prices/v3')) {
+          return {
+            ok: true,
+            json: async () => [
+              {
+                id: 'uuid-sniper-elite-5',
+                deals: [
+                  { shop: { name: 'Steam' }, price: { amount: 49.99 }, regular: { amount: 49.99 }, cut: 0, url: 'https://store.steampowered.com/app/1029690/' },
+                  { shop: { name: 'Epic Games Store' }, price: { amount: 9.99 }, regular: { amount: 49.99 }, cut: 80, url: 'https://store.epicgames.com/p/sniper-elite-5' },
+                  { shop: { name: 'Nuuvem' }, price: { amount: 12.49 }, regular: { amount: 49.99 }, cut: 75, url: 'https://nuuvem.com/item/sniper-elite-5' },
+                ],
+              },
+            ],
+          };
+        }
+        if (urlStr.includes('/games/historylow/v1')) {
+          return {
+            ok: true,
+            json: async () => [{ id: 'uuid-sniper-elite-5', low: { price: { amount: 9.99 } } }],
+          };
+        }
+        return { ok: false, status: 404 };
+      });
+
+      const deal = await getGameDealInfo('1029690', 'USD');
+
+      expect(shop61Body).toEqual(['app/1029690']);
+      expect(fuzzySearchCalled).toBe(false);
+      expect(deal).toBeDefined();
+      expect(deal?.alternativeCheckStatus).toBe('confirmed');
+      expect(deal?.alternativeCheckDegraded).toBe(false);
+      expect(deal?.storeBreakdown['Steam']?.salePrice).toBe(49.99);
+      expect(deal?.storeBreakdown['Epic Games Store']?.salePrice).toBe(9.99);
+      expect(deal?.storeBreakdown['Nuuvem']?.salePrice).toBe(12.49);
+      expect(deal?.cheaperAlternative?.shopName).toBe('Epic Games Store');
+    });
+
+    it('should mark alternativeCheckDegraded true and isPlatformExclusive false when secondary search prices fail', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        globalThis.fetch = vi.fn(async (url, init) => {
+          const urlStr = String(url);
+          if (urlStr.includes('store.steampowered.com/api/appdetails')) {
+            return {
+              ok: true,
+              json: async () => ({
+                '1029690': {
+                  success: true,
+                  data: {
+                    name: 'Sniper Elite 5',
+                    price_overview: { initial: 4999, final: 4999, discount_percent: 0 },
+                  },
+                },
+              }),
+            };
+          }
+          if (urlStr.includes('/games/lookup/v1')) {
+            return {
+              ok: true,
+              json: async () => ({ found: true, game: { id: 'uuid-se5-base' } }),
+            };
+          }
+          if (urlStr.includes('/games/prices/v3')) {
+            const body = JSON.parse(init?.body || '[]');
+            if (body.includes('uuid-se5-base')) {
+              return {
+                ok: true,
+                json: async () => [
+                  {
+                    id: 'uuid-se5-base',
+                    deals: [
+                      { shop: { name: 'Steam' }, price: { amount: 49.99 }, regular: { amount: 49.99 }, cut: 0, url: 'https://steam.com' },
+                    ],
+                  },
+                ],
+              };
+            }
+            return { ok: false, status: 500 };
+          }
+          if (urlStr.includes('/games/search/v1')) {
+            return {
+              ok: true,
+              json: async () => [
+                { id: 'uuid-se5-complete', title: 'Sniper Elite 5: Complete Edition', type: 'game' },
+              ],
+            };
+          }
+          if (urlStr.includes('/games/historylow/v1')) {
+            return { ok: true, json: async () => [] };
+          }
+          return { ok: false, status: 404 };
+        });
+
+        const deal = await getGameDealInfo('1029690', 'USD');
+
+        expect(deal).toBeDefined();
+        expect(deal?.alternativeCheckDegraded).toBe(true);
+        expect(deal?.alternativeCheckStatus).toBe('degraded');
+        expect(deal?.isPlatformExclusive).toBe(false);
+        expect(deal?.storeBreakdown['Steam']?.salePrice).toBe(49.99);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
   });
   describe('fetchSteamStoreAppDetails', () => {
     let originalFetch;

@@ -901,7 +901,7 @@ describe('Public Web API Handler', () => {
       expect(getGameDealInfo).toHaveBeenCalledWith('1086940', 'USD', "Baldur's Gate 3");
     });
 
-    it('should persist live telemetry to DynamoDB cache when alternativeCheckDegraded is false with 7200s TTL', async () => {
+    it('should persist live telemetry to DynamoDB cache when alternativeCheckDegraded is false with 86400s TTL', async () => {
       const event: HttpApiEvent = {
         routeKey: 'GET /public/market/{appId}',
         rawPath: '/public/market/1086940',
@@ -926,8 +926,10 @@ describe('Public Web API Handler', () => {
       expect(marketPut).toBeDefined();
       expect(marketPut?.args[0].input.Item?.SK).toBe('TELEMETRY');
       expect(marketPut?.args[0].input.Item?.alternativeCheckDegraded).toBe(false);
-      // Verify increased TTL of 7200 seconds (2 hours)
-      expect(marketPut?.args[0].input.Item?.ttl).toBeGreaterThanOrEqual(Math.floor(Date.now() / 1000) + 7100);
+      // Verify 24-hour TTL (86400 seconds) for verified multi-store telemetry
+      const nowSec = Math.floor(Date.now() / 1000);
+      expect(marketPut?.args[0].input.Item?.ttl).toBeGreaterThanOrEqual(nowSec + 86300);
+      expect(marketPut?.args[0].input.Item?.ttl).toBeLessThanOrEqual(nowSec + 86500);
     });
 
     it('should accept optional title query parameter and pass it into getGameDealInfo', async () => {
@@ -985,6 +987,227 @@ describe('Public Web API Handler', () => {
       const putCalls = ddbMock.commandCalls(PutCommand);
       const marketPut = putCalls.find((call) => call.args[0].input.Item?.PK === 'MARKET#v5#1086940#USD');
       expect(marketPut).toBeUndefined();
+    });
+
+    it('should NOT cache Steam-only fallback (0 partner deals) in DynamoDB even if isPlatformExclusive is true', async () => {
+      vi.mocked(getGameDealInfo).mockResolvedValueOnce({
+        gameId: 'steam_1029690',
+        title: 'Sniper Elite 5',
+        imageUrl: 'https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/1029690/header.jpg',
+        reviewScore: 81,
+        steamAppId: '1029690',
+        dealType: 'CURATED_DEAL',
+        isAllTimeLow: false,
+        allTimeLowPrice: null,
+        expiry: null,
+        primaryDeal: {
+          shopName: 'Steam',
+          salePrice: 49.99,
+          regularPrice: 49.99,
+          cutPercent: 0,
+          url: 'https://store.steampowered.com/app/1029690/',
+          expiry: null,
+          currency: 'USD',
+          currencySymbol: '$',
+        },
+        cheaperAlternative: null,
+        storeBreakdown: {
+          Steam: {
+            shopName: 'Steam',
+            salePrice: 49.99,
+            regularPrice: 49.99,
+            cutPercent: 0,
+            url: 'https://store.steampowered.com/app/1029690/',
+            expiry: null,
+            currency: 'USD',
+            currencySymbol: '$',
+          },
+        },
+        alternativeCheckStatus: 'confirmed',
+        alternativeCheckDegraded: false,
+        isPlatformExclusive: true,
+      });
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/market/{appId}',
+        rawPath: '/public/market/1029690',
+        pathParameters: {
+          appId: '1029690',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/market/1029690',
+          },
+        },
+      };
+
+      const response = await handler(event);
+
+      expect(response.statusCode).toBe(200);
+      const data = JSON.parse(response.body);
+      expect(data.appId).toBe('1029690');
+      expect(data.primaryDeal.shopName).toBe('Steam');
+      expect(data.primaryDeal.salePrice).toBe(49.99);
+
+      const putCalls = ddbMock.commandCalls(PutCommand);
+      const marketPut = putCalls.find((call) => call.args[0].input.Item?.PK === 'MARKET#v5#1029690#USD');
+      expect(marketPut).toBeUndefined();
+    });
+
+    it('should bypass stale Steam-only cache record even if marked isPlatformExclusive and heal via live lookup', async () => {
+      const nowSec = Math.floor(Date.now() / 1000);
+      const poisonedSteamOnlyCached = {
+        PK: 'MARKET#v5#1029690#USD',
+        SK: 'TELEMETRY',
+        appId: '1029690',
+        title: 'Sniper Elite 5',
+        storeBreakdown: {
+          Steam: {
+            shopName: 'Steam',
+            salePrice: 49.99,
+            regularPrice: 49.99,
+            cutPercent: 0,
+            url: 'https://store.steampowered.com/app/1029690/',
+            expiry: null,
+            currency: 'USD',
+            currencySymbol: '$',
+          },
+        },
+        alternativeCheckStatus: 'confirmed',
+        alternativeCheckDegraded: false,
+        isPlatformExclusive: true,
+        ttl: nowSec + 86400,
+      };
+
+      ddbMock.on(QueryCommand).resolves({
+        Items: [poisonedSteamOnlyCached],
+      });
+
+      vi.mocked(getGameDealInfo).mockResolvedValueOnce({
+        gameId: 'steam_1029690',
+        title: 'Sniper Elite 5',
+        imageUrl: 'https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/1029690/header.jpg',
+        reviewScore: 81,
+        steamAppId: '1029690',
+        dealType: 'CURATED_DEAL',
+        isAllTimeLow: true,
+        allTimeLowPrice: 9.99,
+        expiry: null,
+        primaryDeal: {
+          shopName: 'Steam',
+          salePrice: 49.99,
+          regularPrice: 49.99,
+          cutPercent: 0,
+          url: 'https://store.steampowered.com/app/1029690/',
+          expiry: null,
+          currency: 'USD',
+          currencySymbol: '$',
+        },
+        cheaperAlternative: {
+          shopName: 'Epic Games Store',
+          salePrice: 9.99,
+          regularPrice: 49.99,
+          cutPercent: 80,
+          url: 'https://store.epicgames.com/p/sniper-elite-5',
+          expiry: null,
+          currency: 'USD',
+          currencySymbol: '$',
+        },
+        storeBreakdown: {
+          Steam: {
+            shopName: 'Steam',
+            salePrice: 49.99,
+            regularPrice: 49.99,
+            cutPercent: 0,
+            url: 'https://store.steampowered.com/app/1029690/',
+            expiry: null,
+            currency: 'USD',
+            currencySymbol: '$',
+          },
+          'Epic Games Store': {
+            shopName: 'Epic Games Store',
+            salePrice: 9.99,
+            regularPrice: 49.99,
+            cutPercent: 80,
+            url: 'https://store.epicgames.com/p/sniper-elite-5',
+            expiry: null,
+            currency: 'USD',
+            currencySymbol: '$',
+          },
+        },
+        alternativeCheckStatus: 'confirmed',
+        alternativeCheckDegraded: false,
+      });
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/market/{appId}',
+        rawPath: '/public/market/1029690',
+        pathParameters: {
+          appId: '1029690',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/market/1029690',
+          },
+        },
+      };
+
+      const response = await handler(event);
+
+      expect(response.statusCode).toBe(200);
+      const data = JSON.parse(response.body);
+      expect(data.cheaperAlternative?.shopName).toBe('Epic Games Store');
+      expect(data.cheaperAlternative?.salePrice).toBe(9.99);
+      expect(getGameDealInfo).toHaveBeenCalledWith('1029690', 'USD', null);
+
+      const putCalls = ddbMock.commandCalls(PutCommand);
+      const healedPut = putCalls.find((call) => call.args[0].input.Item?.PK === 'MARKET#v5#1029690#USD');
+      expect(healedPut).toBeDefined();
+      expect(healedPut?.args[0].input.Item?.ttl).toBeGreaterThanOrEqual(nowSec + 86300);
+    });
+
+    it('should trigger fast graceful fallback without caching when deal lookup stalls beyond timeout', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      vi.useFakeTimers();
+      try {
+        vi.mocked(getGameDealInfo).mockImplementationOnce(() => new Promise(() => {}));
+
+        const event: HttpApiEvent = {
+          routeKey: 'GET /public/market/{appId}',
+          rawPath: '/public/market/1029690',
+          pathParameters: {
+            appId: '1029690',
+          },
+          queryStringParameters: {
+            title: 'Sniper Elite 5',
+          },
+          requestContext: {
+            http: {
+              method: 'GET',
+              path: '/public/market/1029690',
+            },
+          },
+        };
+
+        const responsePromise = handler(event);
+        await vi.advanceTimersByTimeAsync(2600);
+        const response = await responsePromise;
+
+        expect(response.statusCode).toBe(200);
+        const data = JSON.parse(response.body);
+        expect(data.appId).toBe('1029690');
+        expect(data.title).toBe('Sniper Elite 5');
+        expect(data.primaryDeal?.shopName).toBe('Steam');
+
+        const putCalls = ddbMock.commandCalls(PutCommand);
+        const marketPut = putCalls.find((call) => call.args[0].input.Item?.PK === 'MARKET#v5#1029690#USD');
+        expect(marketPut).toBeUndefined();
+      } finally {
+        vi.useRealTimers();
+        warnSpy.mockRestore();
+      }
     });
   });
 

@@ -235,6 +235,9 @@ export function buildMarketTelemetryPlaceholder(
   };
 }
 
+const MARKET_CACHE_TTL_SECONDS = 86400;
+const MARKET_DEAL_LOOKUP_TIMEOUT_MS = 2500;
+
 /**
  * Retrieves healthy multi-store market telemetry from DynamoDB cache if fresh and un-degraded.
  */
@@ -265,10 +268,14 @@ export async function getCachedMarketTelemetry(
     if (cacheResult?.Items && Array.isArray(cacheResult.Items) && cacheResult.Items.length > 0) {
       const cached = cacheResult.Items[0] as PublicMarketTelemetry & { ttl?: number };
       const isFresh = !cached.ttl || cached.ttl > nowSec;
-      const storeCount = Object.keys(cached.storeBreakdown || {}).length;
+      const storeKeys = Object.keys(cached.storeBreakdown || {});
+      const storeCount = storeKeys.length;
+      const partnerDealsCount = storeKeys.filter((shop) => shop.toLowerCase() !== 'steam').length;
       const isHealthy =
         cached.alternativeCheckDegraded === false &&
-        (storeCount > 1 || cached.isPlatformExclusive === true);
+        cached.alternativeCheckStatus !== 'degraded' &&
+        cached.alternativeCheckStatus !== 'skipped' &&
+        (partnerDealsCount > 0 || (storeCount === 0 && cached.isPlatformExclusive === true));
 
       if (isFresh && isHealthy) {
         return {
@@ -307,8 +314,8 @@ export async function getCachedMarketTelemetry(
 /**
  * Resolves live market telemetry and multi-store deal intelligence for a specific Steam title.
  * Checks DynamoDB DealsTable (PK: MARKET#v5#${appId}#${currency}, SK: TELEMETRY) for cached un-degraded multi-store telemetry.
- * If cache miss or degraded, queries live intelligence and persists to cache for 2 hours (7200s) when healthy.
- * Gracefully falls back to clean default telemetry on timeout or API unavailability.
+ * If cache miss or degraded, queries live intelligence and persists to cache for 24 hours (86400s) only when multi-store ITAD data is verified.
+ * Bypasses DynamoDB caching entirely for degraded or Steam-only (0 partner deals) fallbacks to avoid negative caching.
  */
 export async function resolveMarketTelemetry(
   appId: string,
@@ -329,9 +336,19 @@ export async function resolveMarketTelemetry(
     return cached;
   }
 
-  // 2. Fetch live data via getGameDealInfo
+  // 2. Fetch live data via getGameDealInfo with defensive outer timeout guard
+  let lookupTimer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const dealInfo = await getGameDealInfo(cleanAppId, currency, effectiveTitleFallback);
+    const dealInfo = await Promise.race([
+      getGameDealInfo(cleanAppId, currency, effectiveTitleFallback),
+      new Promise<null>((resolve) => {
+        lookupTimer = setTimeout(() => {
+          console.warn(`[MarketTelemetry] Deal lookup exceeded ${MARKET_DEAL_LOOKUP_TIMEOUT_MS}ms for appId ${cleanAppId}; returning fallback.`);
+          resolve(null);
+        }, MARKET_DEAL_LOOKUP_TIMEOUT_MS);
+      }),
+    ]);
+
     if (dealInfo && dealInfo.primaryDeal) {
       const resolvedTitle =
         dealInfo.title && dealInfo.title !== 'Monitored Title'
@@ -369,11 +386,15 @@ export async function resolveMarketTelemetry(
         updatedAt: new Date().toISOString(),
       };
 
-      // 3. Cache only if healthy multi-store data or confirmed platform exclusive
-      const storeCount = Object.keys(storeBreakdown).length;
+      // 3. Cache only when multi-store ITAD data is verified (never cache degraded or Steam-only fallbacks)
+      const partnerDealsCount = Object.keys(storeBreakdown).filter(
+        (shop) => shop.toLowerCase() !== 'steam',
+      ).length;
       const isHealthy =
         telemetry.alternativeCheckDegraded === false &&
-        (storeCount > 1 || telemetry.isPlatformExclusive === true);
+        telemetry.alternativeCheckStatus !== 'degraded' &&
+        telemetry.alternativeCheckStatus !== 'skipped' &&
+        partnerDealsCount > 0;
 
       if (tableName && ddbDocClient && isHealthy) {
         try {
@@ -384,7 +405,7 @@ export async function resolveMarketTelemetry(
                 PK: `MARKET#v5#${cleanAppId}#${currency}`,
                 SK: 'TELEMETRY',
                 ...telemetry,
-                ttl: nowSec + 7200, // 2 hours TTL
+                ttl: nowSec + MARKET_CACHE_TTL_SECONDS,
               },
             }),
           );
@@ -403,6 +424,8 @@ export async function resolveMarketTelemetry(
       `Error resolving market telemetry for appId ${cleanAppId}:`,
       error instanceof Error ? error.message : String(error),
     );
+  } finally {
+    if (lookupTimer) clearTimeout(lookupTimer);
   }
 
   return buildMarketTelemetryPlaceholder(cleanAppId, currency, effectiveTitleFallback);
