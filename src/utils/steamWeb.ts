@@ -33,6 +33,8 @@ import type {
   PlayerAchievementsResult,
   SteamOwnedGameItem,
   SteamOwnedGamesResult,
+  SteamRawFriend,
+  SteamFriendListResult,
 } from '../types/index.js';
 import { BRAND_COLORS } from './theme.js';
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
@@ -172,6 +174,30 @@ type RawSteamPlayer = {
 };
 
 /**
+ * Normalizes a raw Valve Steam player summary payload into canonical domain shape.
+ */
+function normalizeRawSteamPlayer(player: RawSteamPlayer): SteamPlayerSummary {
+  return {
+    steamId: player.steamid,
+    personaName: player.personaname ?? 'Unknown Player',
+    profileUrl: player.profileurl ?? `https://steamcommunity.com/profiles/${player.steamid}`,
+    avatarUrl: player.avatarfull || player.avatarmedium || player.avatar || null,
+    visibilityState: player.communityvisibilitystate ?? 1,
+    isPrivate: player.communityvisibilitystate !== 3,
+    personaState: player.personastate ?? 0,
+    personaStateLabel: getPersonaStateText(player.personastate ?? 0),
+    currentlyPlaying: player.gameextrainfo ?? null,
+    currentlyPlayingId: player.gameid ?? null,
+    timeCreated: player.timecreated
+      ? new Date(player.timecreated * 1000).toISOString().split('T')[0]
+      : null,
+    timeCreatedTimestamp: player.timecreated ?? null,
+    countryCode: player.loccountrycode ?? null,
+    realName: player.realname ?? null,
+  };
+}
+
+/**
  * Fetches player summary (Persona name, online status, avatar, creation date) from Steam.
  */
 export async function getPlayerSummary(steamId64: string, apiKey: string): Promise<SteamPlayerSummary | null> {
@@ -195,25 +221,128 @@ export async function getPlayerSummary(steamId64: string, apiKey: string): Promi
       return null;
     }
 
-    return {
-      steamId: player.steamid,
-      personaName: player.personaname ?? 'Unknown Player',
-      profileUrl: player.profileurl ?? `https://steamcommunity.com/profiles/${player.steamid}`,
-      avatarUrl: player.avatarfull ?? player.avatarmedium ?? player.avatar ?? null,
-      visibilityState: player.communityvisibilitystate ?? 1,
-      isPrivate: player.communityvisibilitystate !== 3,
-      personaState: player.personastate ?? 0,
-      personaStateLabel: getPersonaStateText(player.personastate ?? 0),
-      currentlyPlaying: player.gameextrainfo ?? null,
-      currentlyPlayingId: player.gameid ?? null,
-      timeCreated: player.timecreated ? new Date(player.timecreated * 1000).toISOString().split('T')[0] : null,
-      timeCreatedTimestamp: player.timecreated ?? null,
-      countryCode: player.loccountrycode ?? null,
-      realName: player.realname ?? null,
-    };
+    return normalizeRawSteamPlayer(player);
   } catch (err) {
     console.error(`Error fetching player summary for SteamID ${steamId64}:`, err instanceof Error ? err.message : err);
     return null;
+  }
+}
+
+/**
+ * Batch-fetches player summaries for up to 100 SteamID64s in a single HTTP call.
+ */
+export async function getPlayerSummaries(
+  steamIds: string[],
+  apiKey: string = process.env['STEAM_API_KEY'] ?? '',
+): Promise<SteamPlayerSummary[]> {
+  if (!Array.isArray(steamIds) || steamIds.length === 0 || !apiKey) {
+    return [];
+  }
+
+  const validIds = Array.from(
+    new Set(
+      steamIds
+        .map((id) => (typeof id === 'string' ? id.trim() : ''))
+        .filter((id) => /^\d{17}$/.test(id)),
+    ),
+  ).slice(0, 100);
+
+  if (validIds.length === 0) {
+    return [];
+  }
+
+  try {
+    const endpoint = `${API_BASE}/ISteamUser/GetPlayerSummaries/v2/?key=${apiKey}&steamids=${validIds.join(',')}`;
+    const res = await fetchWithTimeout(endpoint, {}, 2400);
+
+    if (!res.ok) {
+      console.warn(`Steam GetPlayerSummaries batch returned status ${res.status} for ${validIds.length} IDs`);
+      return [];
+    }
+
+    const data = (await res.json()) as { response?: { players?: RawSteamPlayer[] } };
+    const players = data?.response?.players;
+
+    if (!Array.isArray(players)) {
+      return [];
+    }
+
+    return players.map(normalizeRawSteamPlayer);
+  } catch (err) {
+    console.error(
+      'Error fetching batch player summaries:',
+      err instanceof Error ? err.message : err,
+    );
+    return [];
+  }
+}
+
+type RawSteamFriendEntry = {
+  steamid?: string;
+  relationship?: string;
+  friend_since?: number;
+};
+
+/**
+ * Fetches a player's public Steam friends list via ISteamUser/GetFriendList/v1.
+ */
+export async function getSteamFriendList(
+  steamId64: string,
+  apiKey: string = process.env['STEAM_API_KEY'] ?? '',
+): Promise<SteamFriendListResult> {
+  const cleanId = typeof steamId64 === 'string' ? steamId64.trim() : '';
+  if (!cleanId || !/^\d{17}$/.test(cleanId)) {
+    return { success: false, error: 'INVALID_ID' };
+  }
+
+  if (!apiKey) {
+    return { success: false, error: 'CONFIG_REQUIRED' };
+  }
+
+  try {
+    const endpoint = `${API_BASE}/ISteamUser/GetFriendList/v1/?key=${apiKey}&steamid=${cleanId}&relationship=friend`;
+    const res = await fetchWithTimeout(endpoint, {}, 2400);
+
+    if (res.status === 401 || res.status === 403) {
+      return { success: false, error: 'PRIVATE' };
+    }
+
+    if (res.status === 404) {
+      return { success: false, error: 'NOT_FOUND' };
+    }
+
+    if (!res.ok) {
+      console.warn(`Steam GetFriendList returned status ${res.status} for ID ${cleanId}`);
+      return { success: false, error: 'FETCH_ERROR' };
+    }
+
+    const data = (await res.json()) as {
+      friendslist?: {
+        friends?: RawSteamFriendEntry[];
+      };
+    };
+
+    if (!data?.friendslist) {
+      return { success: false, error: 'PRIVATE' };
+    }
+
+    const rawFriends = Array.isArray(data.friendslist.friends) ? data.friendslist.friends : [];
+    const friends: SteamRawFriend[] = rawFriends
+      .filter((f) => typeof f.steamid === 'string' && /^\d{17}$/.test(f.steamid.trim()))
+      .map((f) => ({
+        steamId: f.steamid!.trim(),
+        relationship: f.relationship || 'friend',
+        friendSince:
+          typeof f.friend_since === 'number' && Number.isFinite(f.friend_since) ? f.friend_since : 0,
+      }));
+
+    return { success: true, friends };
+  } catch (err) {
+    console.error(
+      `Error fetching Steam friend list for SteamID ${cleanId}:`,
+      err instanceof Error ? err.message : err,
+    );
+    return { success: false, error: 'FETCH_ERROR' };
   }
 }
 

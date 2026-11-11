@@ -233,6 +233,18 @@ Resources:
             ApiId: !Ref DiscordApi
             Path: /public/dossier/{target}
             Method: options
+        GetPublicFriends:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref DiscordApi
+            Path: /public/friends/{target}
+            Method: get
+        OptionsPublicFriends:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref DiscordApi
+            Path: /public/friends/{target}
+            Method: options
 
 Outputs:
   InteractionsEndpoint:

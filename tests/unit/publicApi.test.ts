@@ -31,6 +31,8 @@ vi.mock('../../src/utils/steamWeb.js', async (importOriginal) => {
     resolveSteamAppTitles: vi.fn(),
     getPlayerLibraryDetailed: vi.fn(),
     getPlayerSummary: vi.fn(),
+    getPlayerSummaries: vi.fn(),
+    getSteamFriendList: vi.fn(),
     getOwnedGames: vi.fn(),
   };
 });
@@ -68,6 +70,8 @@ import {
   resolveSteamAppTitles,
   getPlayerLibraryDetailed,
   getPlayerSummary,
+  getPlayerSummaries,
+  getSteamFriendList,
   getOwnedGames,
 } from '../../src/utils/steamWeb.js';
 
@@ -457,6 +461,63 @@ describe('Public Web API Handler', () => {
         },
       ],
     });
+
+    vi.mocked(getSteamFriendList).mockResolvedValue({
+      success: true,
+      friends: [
+        { steamId: '76561198000000003', relationship: 'friend', friendSince: 1650000000 },
+        { steamId: '76561198000000001', relationship: 'friend', friendSince: 1600000000 },
+        { steamId: '76561198000000002', relationship: 'friend', friendSince: 1620000000 },
+      ],
+    });
+
+    vi.mocked(getPlayerSummaries).mockResolvedValue([
+      {
+        steamId: '76561198000000003',
+        personaName: 'Zelda',
+        profileUrl: 'https://steamcommunity.com/profiles/76561198000000003',
+        avatarUrl: 'https://avatars.steamstatic.com/zelda_full.jpg',
+        visibilityState: 3,
+        isPrivate: false,
+        personaState: 1,
+        personaStateLabel: 'Online',
+        currentlyPlaying: null,
+        currentlyPlayingId: null,
+        timeCreated: null,
+        countryCode: null,
+        realName: null,
+      },
+      {
+        steamId: '76561198000000001',
+        personaName: 'alice',
+        profileUrl: 'https://steamcommunity.com/id/alice',
+        avatarUrl: 'https://avatars.steamstatic.com/alice_full.jpg',
+        visibilityState: 3,
+        isPrivate: false,
+        personaState: 0,
+        personaStateLabel: 'Offline',
+        currentlyPlaying: null,
+        currentlyPlayingId: null,
+        timeCreated: null,
+        countryCode: null,
+        realName: null,
+      },
+      {
+        steamId: '76561198000000002',
+        personaName: 'Bob',
+        profileUrl: 'https://steamcommunity.com/id/bob',
+        avatarUrl: 'https://avatars.steamstatic.com/bob_medium.jpg',
+        visibilityState: 3,
+        isPrivate: false,
+        personaState: 1,
+        personaStateLabel: 'Online',
+        currentlyPlaying: null,
+        currentlyPlayingId: null,
+        timeCreated: null,
+        countryCode: null,
+        realName: null,
+      },
+    ]);
   });
 
   afterEach(() => {
@@ -3948,6 +4009,417 @@ describe('Public Web API Handler', () => {
         expect(entry.dominantGameTitle).toBeNull();
         expect(entry.dominantGameAppId).toBeNull();
       }
+    });
+  });
+
+  describe('Route: GET /public/friends/{target}', () => {
+    it('should return 400 when target parameter is missing on base route', async () => {
+      const event: HttpApiEvent = {
+        rawPath: '/public/friends',
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/friends',
+          },
+        },
+      };
+
+      const response = await handler(event);
+      expect(response.statusCode).toBe(400);
+      const data = JSON.parse(response.body);
+      expect(data.error).toBe('BadRequest');
+    });
+
+    it('should return 400 when target parameter is empty whitespace', async () => {
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/friends/{target}',
+        rawPath: '/public/friends/   ',
+        pathParameters: {
+          target: '   ',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/friends/   ',
+          },
+        },
+      };
+
+      const response = await handler(event);
+      expect(response.statusCode).toBe(400);
+      const data = JSON.parse(response.body);
+      expect(data.error).toBe('BadRequest');
+    });
+
+    it('should return 404 when Steam profile cannot be resolved', async () => {
+      vi.mocked(resolveSteamId).mockResolvedValueOnce(null);
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/friends/{target}',
+        rawPath: '/public/friends/nonexistent_user',
+        pathParameters: {
+          target: 'nonexistent_user',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/friends/nonexistent_user',
+          },
+        },
+      };
+
+      const response = await handler(event);
+      expect(response.statusCode).toBe(404);
+      const data = JSON.parse(response.body);
+      expect(data.error).toBe('NotFound');
+    });
+
+    it('should return 404 when getPlayerSummary returns null', async () => {
+      vi.mocked(getPlayerSummary).mockResolvedValueOnce(null);
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/friends/{target}',
+        rawPath: '/public/friends/76561198327022168',
+        pathParameters: {
+          target: '76561198327022168',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/friends/76561198327022168',
+          },
+        },
+      };
+
+      const response = await handler(event);
+      expect(response.statusCode).toBe(404);
+      const data = JSON.parse(response.body);
+      expect(data.error).toBe('NotFound');
+    });
+
+    it('should return 403 FriendsListPrivate when the friends list is private', async () => {
+      vi.mocked(getSteamFriendList).mockResolvedValueOnce({
+        success: false,
+        error: 'PRIVATE',
+      });
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/friends/{target}',
+        rawPath: '/public/friends/76561198327022168',
+        pathParameters: {
+          target: '76561198327022168',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/friends/76561198327022168',
+          },
+        },
+      };
+
+      const response = await handler(event);
+      expect(response.statusCode).toBe(403);
+      const data = JSON.parse(response.body);
+      expect(data.error).toBe('FriendsListPrivate');
+      expect(data.message).toBe('The Steam friends list for this profile is private.');
+      expect(vi.mocked(getPlayerSummaries)).not.toHaveBeenCalled();
+    });
+
+    it('should return 403 FriendsListPrivate when player profile summary is marked private', async () => {
+      vi.mocked(getPlayerSummary).mockResolvedValueOnce({
+        steamId: '76561198327022168',
+        personaName: 'PrivateUser',
+        profileUrl: 'https://steamcommunity.com/profiles/76561198327022168',
+        avatarUrl: null,
+        visibilityState: 1,
+        isPrivate: true,
+        personaState: 0,
+        personaStateLabel: 'Offline',
+        currentlyPlaying: null,
+        currentlyPlayingId: null,
+        timeCreated: null,
+        countryCode: null,
+        realName: null,
+      });
+      vi.mocked(getSteamFriendList).mockResolvedValueOnce({
+        success: true,
+        friends: [],
+      });
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/friends/{target}',
+        rawPath: '/public/friends/76561198327022168',
+        pathParameters: {
+          target: '76561198327022168',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/friends/76561198327022168',
+          },
+        },
+      };
+
+      const response = await handler(event);
+      expect(response.statusCode).toBe(403);
+      const data = JSON.parse(response.body);
+      expect(data.error).toBe('FriendsListPrivate');
+    });
+
+    it('should return 502 UpstreamError when getSteamFriendList fails with FETCH_ERROR', async () => {
+      vi.mocked(getSteamFriendList).mockResolvedValueOnce({
+        success: false,
+        error: 'FETCH_ERROR',
+      });
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/friends/{target}',
+        rawPath: '/public/friends/76561198327022168',
+        pathParameters: {
+          target: '76561198327022168',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/friends/76561198327022168',
+          },
+        },
+      };
+
+      const response = await handler(event);
+      expect(response.statusCode).toBe(502);
+      const data = JSON.parse(response.body);
+      expect(data.error).toBe('UpstreamError');
+    });
+
+    it('should fetch friends, batch-resolve profiles in one call, and sort alphabetically case-insensitive', async () => {
+      ddbMock.on(QueryCommand).resolvesOnce({ Items: [] });
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/friends/{target}',
+        rawPath: '/public/friends/zthigs',
+        pathParameters: {
+          target: 'zthigs',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/friends/zthigs',
+          },
+        },
+      };
+
+      const response = await handler(event);
+      expect(response.statusCode).toBe(200);
+      const data = JSON.parse(response.body);
+
+      expect(data.steamId).toBe('76561198327022168');
+      expect(data.target).toBe('zthigs');
+      expect(data.personaName).toBe('zThigs');
+      expect(data.totalFriends).toBe(3);
+      expect(Array.isArray(data.friends)).toBe(true);
+      expect(data.friends).toHaveLength(3);
+
+      // Verify single batch call to getPlayerSummaries
+      expect(vi.mocked(getPlayerSummaries)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(getPlayerSummaries)).toHaveBeenCalledWith(
+        ['76561198000000003', '76561198000000001', '76561198000000002'],
+        expect.any(String),
+      );
+
+      // Verify alphabetical case-insensitive sorting: alice -> Bob -> Zelda
+      expect(data.friends.map((f: { personaName: string }) => f.personaName)).toEqual([
+        'alice',
+        'Bob',
+        'Zelda',
+      ]);
+
+      expect(data.friends[0]).toEqual({
+        steamId: '76561198000000001',
+        personaName: 'alice',
+        avatarUrl: 'https://avatars.steamstatic.com/alice_full.jpg',
+        profileUrl: 'https://steamcommunity.com/id/alice',
+        relationship: 'friend',
+        friendSince: 1600000000,
+      });
+
+      expect(data.friends[1]).toEqual({
+        steamId: '76561198000000002',
+        personaName: 'Bob',
+        avatarUrl: 'https://avatars.steamstatic.com/bob_medium.jpg',
+        profileUrl: 'https://steamcommunity.com/id/bob',
+        relationship: 'friend',
+        friendSince: 1620000000,
+      });
+
+      expect(data.friends[2]).toEqual({
+        steamId: '76561198000000003',
+        personaName: 'Zelda',
+        avatarUrl: 'https://avatars.steamstatic.com/zelda_full.jpg',
+        profileUrl: 'https://steamcommunity.com/profiles/76561198000000003',
+        relationship: 'friend',
+        friendSince: 1650000000,
+      });
+    });
+
+    it('should cap batch enrichment to 100 friends while preserving totalFriends count', async () => {
+      const manyFriends = Array.from({ length: 120 }, (_, idx) => ({
+        steamId: (76561198000000100n + BigInt(idx)).toString(),
+        relationship: 'friend',
+        friendSince: 1700000000 + idx,
+      }));
+      vi.mocked(getSteamFriendList).mockResolvedValueOnce({
+        success: true,
+        friends: manyFriends,
+      });
+      vi.mocked(getPlayerSummaries).mockResolvedValueOnce(
+        manyFriends.slice(0, 100).map((f, i) => ({
+          steamId: f.steamId,
+          personaName: `Friend_${String(100 - i).padStart(3, '0')}`,
+          profileUrl: `https://steamcommunity.com/profiles/${f.steamId}`,
+          avatarUrl: `https://avatars.steamstatic.com/${i}_full.jpg`,
+          visibilityState: 3,
+          isPrivate: false,
+          personaState: 1,
+          personaStateLabel: 'Online',
+          currentlyPlaying: null,
+          currentlyPlayingId: null,
+          timeCreated: null,
+          countryCode: null,
+          realName: null,
+        })),
+      );
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/friends/{target}',
+        rawPath: '/public/friends/76561198327022168',
+        pathParameters: {
+          target: '76561198327022168',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/friends/76561198327022168',
+          },
+        },
+      };
+
+      const response = await handler(event);
+      expect(response.statusCode).toBe(200);
+      const data = JSON.parse(response.body);
+      expect(data.totalFriends).toBe(120);
+      expect(data.friends).toHaveLength(100);
+      expect(vi.mocked(getPlayerSummaries).mock.calls[0][0]).toHaveLength(100);
+      expect(data.friends[0].personaName).toBe('Friend_001');
+      expect(data.friends[99].personaName).toBe('Friend_100');
+    });
+
+    it('should serve friends list immediately from DynamoDB cache on fresh cache hit without upstream calls', async () => {
+      const nowSec = Math.floor(Date.now() / 1000);
+      const cachedFriendsPayload = {
+        PK: 'FRIENDS#v1#76561198327022168',
+        SK: 'TELEMETRY',
+        steamId: '76561198327022168',
+        target: '76561198327022168',
+        personaName: 'zThigs',
+        avatarUrl: 'https://cdn/avatar.jpg',
+        profileUrl: 'https://steamcommunity.com/profiles/76561198327022168',
+        totalFriends: 1,
+        friends: [
+          {
+            steamId: '76561198000000099',
+            personaName: 'CachedFriend',
+            avatarUrl: 'https://cdn/cached_friend.jpg',
+            profileUrl: 'https://steamcommunity.com/profiles/76561198000000099',
+            relationship: 'friend',
+            friendSince: 1680000000,
+          },
+        ],
+        updatedAt: new Date().toISOString(),
+        ttl: nowSec + 1800,
+      };
+
+      ddbMock.on(QueryCommand).resolvesOnce({
+        Items: [cachedFriendsPayload],
+      });
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/friends/{target}',
+        rawPath: '/public/friends/76561198327022168',
+        pathParameters: {
+          target: '76561198327022168',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/friends/76561198327022168',
+          },
+        },
+      };
+
+      const response = await handler(event);
+      expect(response.statusCode).toBe(200);
+      const data = JSON.parse(response.body);
+      expect(data.friends).toHaveLength(1);
+      expect(data.friends[0].personaName).toBe('CachedFriend');
+      expect(data.PK).toBeUndefined();
+      expect(data.SK).toBeUndefined();
+      expect(data.ttl).toBeUndefined();
+
+      // Upstream Steam helpers must NOT have been called due to cache hit
+      expect(vi.mocked(getPlayerSummary)).not.toHaveBeenCalled();
+      expect(vi.mocked(getSteamFriendList)).not.toHaveBeenCalled();
+      expect(vi.mocked(getPlayerSummaries)).not.toHaveBeenCalled();
+    });
+
+    it('should persist fresh friends list to DynamoDB cache with 3600s TTL on cache miss', async () => {
+      ddbMock.on(QueryCommand).resolvesOnce({ Items: [] });
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/friends/{target}',
+        rawPath: '/public/friends/76561198327022168',
+        pathParameters: {
+          target: '76561198327022168',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/friends/76561198327022168',
+          },
+        },
+      };
+
+      const beforeSec = Math.floor(Date.now() / 1000);
+      const response = await handler(event);
+      const afterSec = Math.floor(Date.now() / 1000);
+      expect(response.statusCode).toBe(200);
+
+      const putCalls = ddbMock.commandCalls(PutCommand);
+      const friendsPutCall = putCalls.find(
+        (call) => call.args[0].input.Item?.PK === 'FRIENDS#v1#76561198327022168',
+      );
+      expect(friendsPutCall).toBeDefined();
+      expect(friendsPutCall?.args[0].input.Item?.SK).toBe('TELEMETRY');
+      const ttl = friendsPutCall?.args[0].input.Item?.ttl as number;
+      expect(ttl).toBeGreaterThanOrEqual(beforeSec + 3600);
+      expect(ttl).toBeLessThanOrEqual(afterSec + 3600);
+    });
+
+    it('should respond with 204 No Content and CORS headers on OPTIONS preflight for friends', async () => {
+      const event: HttpApiEvent = {
+        requestContext: {
+          http: {
+            method: 'OPTIONS',
+            path: '/public/friends/76561198327022168',
+          },
+        },
+      };
+
+      const response = await handler(event);
+      expect(response.statusCode).toBe(204);
+      expect(response.headers['Access-Control-Allow-Origin']).toBe('*');
+      expect(response.headers['Access-Control-Allow-Methods']).toContain('OPTIONS');
+      expect(response.body).toBe('');
     });
   });
 });

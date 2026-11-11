@@ -9,6 +9,7 @@
  * - GET /public/wishlist/{target}: Retrieves public Steam wishlist telemetry with live pricing and store attribution.
  * - GET /public/backlog/{target}: Retrieves public Backlog Vault telemetry with playtime metrics and live store valuation.
  * - GET /public/dossier/{target}: Retrieves public Gamer Dossier telemetry with TimeStream and behavioral archetype.
+ * - GET /public/friends/{target}: Retrieves public Steam friends list enriched with persona names and avatars.
  */
 
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
@@ -33,6 +34,10 @@ import type {
   DossierTelemetryApiResult,
   SteamOwnedGameItem,
   SteamOwnedGamesResult,
+  SteamPlayerSummary,
+  PublicSteamFriend,
+  PublicFriendsResponse,
+  FriendsTelemetryApiResult,
 } from '../types/index.js';
 import { getHowLongToBeatStats } from '../utils/hltbNative.js';
 import { getGameDealInfo } from '../utils/itadApi.js';
@@ -44,6 +49,8 @@ import {
   resolveSteamAppTitles,
   getPlayerLibraryDetailed,
   getPlayerSummary,
+  getPlayerSummaries,
+  getSteamFriendList,
   getOwnedGames,
   batchResolveAuthenticArtwork,
   resolveAuthenticArtwork,
@@ -2105,6 +2112,238 @@ export async function resolveDossierTelemetry(
 }
 
 /**
+ * Extracts a clean display target from a Steam profile URL, vanity name, or SteamID64.
+ */
+function extractDisplayTarget(cleanTarget: string): string {
+  const vanityMatch = cleanTarget.match(/steamcommunity\.com\/id\/([^/?#]+)/i);
+  if (vanityMatch) {
+    return vanityMatch[1];
+  }
+  const profileMatch = cleanTarget.match(/steamcommunity\.com\/profiles\/(\d{17})/i);
+  if (profileMatch) {
+    return profileMatch[1];
+  }
+  return cleanTarget;
+}
+
+/**
+ * Resolves a player's public Steam friends list enriched with persona names and avatars.
+ * Uses 1-hour DynamoDB caching under PK: FRIENDS#v1#${steamId}, SK: TELEMETRY.
+ */
+export async function resolveSteamFriendsTelemetry(
+  target: string,
+  ddbDocClient: DynamoDBDocumentClient = docClient,
+  tableName: string = process.env.TABLE_NAME || '',
+): Promise<FriendsTelemetryApiResult> {
+  const cleanTarget = (target || '').trim();
+  if (!cleanTarget) {
+    return {
+      success: false,
+      statusCode: 400,
+      error: 'BadRequest',
+      message: 'Missing or invalid target parameter.',
+    };
+  }
+
+  const steamApiKey = process.env.STEAM_API_KEY || '';
+  const steamId = await resolveSteamId(cleanTarget, steamApiKey);
+  if (!steamId) {
+    return {
+      success: false,
+      statusCode: 404,
+      error: 'NotFound',
+      message: `Unable to resolve Steam profile for '${cleanTarget}'.`,
+    };
+  }
+
+  const nowSec = Math.floor(Date.now() / 1000);
+
+  // 1. Check 1-hour DynamoDB Cache
+  if (tableName && ddbDocClient) {
+    try {
+      const cacheResult = await ddbDocClient.send(
+        new QueryCommand({
+          TableName: tableName,
+          KeyConditionExpression: 'PK = :pk AND SK = :sk',
+          ExpressionAttributeValues: {
+            ':pk': `FRIENDS#v1#${steamId}`,
+            ':sk': 'TELEMETRY',
+          },
+          Limit: 1,
+        }),
+      );
+
+      if (cacheResult?.Items && Array.isArray(cacheResult.Items) && cacheResult.Items.length > 0) {
+        const cached = cacheResult.Items[0] as PublicFriendsResponse & {
+          ttl?: number;
+          PK?: string;
+          SK?: string;
+        };
+        const isFresh = !cached.ttl || cached.ttl > nowSec;
+        if (isFresh) {
+          const { PK: _pk, SK: _sk, ttl: _ttl, ...payload } = cached;
+          return {
+            success: true,
+            data: payload as PublicFriendsResponse,
+          };
+        }
+      }
+    } catch (cacheErr) {
+      console.warn(
+        'Failed to query DynamoDB friends cache:',
+        cacheErr instanceof Error ? cacheErr.message : cacheErr,
+      );
+    }
+  }
+
+  // 2. Fetch Target Summary and Raw Friends List in Parallel
+  const [summary, friendListResult] = await Promise.all([
+    getPlayerSummary(steamId, steamApiKey),
+    getSteamFriendList(steamId, steamApiKey),
+  ]);
+
+  if (!friendListResult.success) {
+    if (friendListResult.error === 'CONFIG_REQUIRED') {
+      return {
+        success: false,
+        statusCode: 500,
+        error: 'ConfigurationError',
+        message: 'Steam API configuration is missing.',
+      };
+    }
+    if (friendListResult.error === 'INVALID_ID') {
+      return {
+        success: false,
+        statusCode: 400,
+        error: 'BadRequest',
+        message: 'Invalid SteamID provided.',
+      };
+    }
+    if (friendListResult.error === 'PRIVATE') {
+      return {
+        success: false,
+        statusCode: 403,
+        error: 'FriendsListPrivate',
+        message: 'The Steam friends list for this profile is private.',
+      };
+    }
+    if (friendListResult.error === 'NOT_FOUND') {
+      return {
+        success: false,
+        statusCode: 404,
+        error: 'NotFound',
+        message: `Steam profile '${cleanTarget}' was not found.`,
+      };
+    }
+  }
+
+  if (!summary) {
+    return {
+      success: false,
+      statusCode: 404,
+      error: 'NotFound',
+      message: `Steam profile '${cleanTarget}' was not found.`,
+    };
+  }
+
+  if (!friendListResult.success) {
+    if (summary.isPrivate) {
+      return {
+        success: false,
+        statusCode: 403,
+        error: 'FriendsListPrivate',
+        message: 'The Steam friends list for this profile is private.',
+      };
+    }
+    return {
+      success: false,
+      statusCode: 502,
+      error: 'UpstreamError',
+      message: 'Failed to communicate with Steam servers.',
+    };
+  }
+
+  if (summary.isPrivate && friendListResult.friends.length === 0) {
+    return {
+      success: false,
+      statusCode: 403,
+      error: 'FriendsListPrivate',
+      message: 'The Steam friends list for this profile is private.',
+    };
+  }
+
+  // 3. Batch-resolve up to 100 friend profiles in a single GetPlayerSummaries call
+  const rawFriends = friendListResult.friends;
+  const totalFriends = rawFriends.length;
+  const cappedFriends = rawFriends.slice(0, 100);
+
+  const summaryMap = new Map<string, SteamPlayerSummary>();
+  if (cappedFriends.length > 0) {
+    const friendIds = cappedFriends.map((f) => f.steamId);
+    const friendSummaries = await getPlayerSummaries(friendIds, steamApiKey);
+    for (const playerSummary of friendSummaries) {
+      summaryMap.set(playerSummary.steamId, playerSummary);
+    }
+  }
+
+  const friends: PublicSteamFriend[] = cappedFriends
+    .map((friend) => {
+      const profile = summaryMap.get(friend.steamId);
+      return {
+        steamId: friend.steamId,
+        personaName: profile?.personaName || `Steam User ${friend.steamId}`,
+        avatarUrl: profile?.avatarUrl || '',
+        profileUrl: profile?.profileUrl || `https://steamcommunity.com/profiles/${friend.steamId}`,
+        relationship: friend.relationship || 'friend',
+        friendSince: friend.friendSince ?? 0,
+      };
+    })
+    .sort((a, b) => {
+      const cmp = a.personaName.localeCompare(b.personaName, 'en', { sensitivity: 'base' });
+      return cmp !== 0 ? cmp : a.steamId.localeCompare(b.steamId);
+    });
+
+  const friendsData: PublicFriendsResponse = {
+    steamId,
+    target: extractDisplayTarget(cleanTarget),
+    personaName: summary.personaName || 'Unknown Player',
+    avatarUrl: summary.avatarUrl || null,
+    profileUrl: summary.profileUrl || `https://steamcommunity.com/profiles/${steamId}`,
+    totalFriends,
+    friends,
+    updatedAt: new Date().toISOString(),
+  };
+
+  // 4. Persist to DynamoDB Cache (TTL 3600 seconds)
+  if (tableName && ddbDocClient) {
+    try {
+      const ttl = nowSec + 3600;
+      await ddbDocClient.send(
+        new PutCommand({
+          TableName: tableName,
+          Item: {
+            PK: `FRIENDS#v1#${steamId}`,
+            SK: 'TELEMETRY',
+            ...friendsData,
+            ttl,
+          },
+        }),
+      );
+    } catch (saveErr) {
+      console.warn(
+        'Failed to persist friends telemetry to DynamoDB:',
+        saveErr instanceof Error ? saveErr.message : saveErr,
+      );
+    }
+  }
+
+  return {
+    success: true,
+    data: friendsData,
+  };
+}
+
+/**
  * Main Lambda handler for the Public Web API companion endpoints.
  */
 export const handler = async (event: HttpApiEvent): Promise<PublicApiResponse> => {
@@ -2505,6 +2744,58 @@ export const handler = async (event: HttpApiEvent): Promise<PublicApiResponse> =
       const currencyParam = event.queryStringParameters?.currency;
       const preferredCurrency = (currencyParam || 'USD').toUpperCase() === 'BRL' ? 'BRL' : 'USD';
       const result = await resolveDossierTelemetry(cleanTarget, preferredCurrency, docClient, tableName);
+      if (!result.success) {
+        return createJsonResponse(result.statusCode, {
+          error: result.error,
+          message: result.message,
+        });
+      }
+
+      return createJsonResponse(200, result.data);
+    }
+
+    // Route 8: GET /public/friends/{target}
+    const isFriendsBaseRoute =
+      rawPath === '/public/friends' ||
+      rawPath === '/public/friends/' ||
+      rawPath.endsWith('/prod/public/friends') ||
+      rawPath.endsWith('/prod/public/friends/');
+
+    if (isFriendsBaseRoute && (!event.pathParameters || !event.pathParameters.target)) {
+      return createJsonResponse(400, {
+        error: 'BadRequest',
+        message: 'Missing or invalid target parameter.',
+      });
+    }
+
+    const isExplicitFriendsRoute = event.routeKey === 'GET /public/friends/{target}';
+    const hasFriendsSubpath = rawPath.includes('/public/friends/');
+    const hasFriendsTargetParam =
+      Boolean(event.pathParameters && 'target' in event.pathParameters) &&
+      (rawPath.includes('/public/friends') || isExplicitFriendsRoute);
+
+    if (isExplicitFriendsRoute || hasFriendsTargetParam || hasFriendsSubpath) {
+      let target = event.pathParameters?.target;
+      if (!target && rawPath.includes('/public/friends/')) {
+        const parts = rawPath.split('/public/friends/');
+        target = parts[1]?.split('?')[0];
+      }
+
+      if (!target || target.trim() === '') {
+        return createJsonResponse(400, {
+          error: 'BadRequest',
+          message: 'Missing or invalid target parameter.',
+        });
+      }
+
+      let cleanTarget = target.trim();
+      try {
+        cleanTarget = decodeURIComponent(cleanTarget).trim();
+      } catch {
+        // Fallback to raw target
+      }
+
+      const result = await resolveSteamFriendsTelemetry(cleanTarget, docClient, tableName);
       if (!result.success) {
         return createJsonResponse(result.statusCode, {
           error: result.error,

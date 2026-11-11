@@ -889,4 +889,51 @@ export type DossierTelemetryApiResult =
   | { success: true; data: PublicDossierResponse }
   | { success: false; statusCode: number; error: string; message: string };
 
+// ---------------------------------------------------------------------------
+// Public Steam Friends List Telemetry
+// ---------------------------------------------------------------------------
+
+/** Raw friend entry returned by ISteamUser/GetFriendList/v1. */
+export interface SteamRawFriend {
+  steamId: string;
+  relationship: string;
+  friendSince: number;
+}
+
+/** Result shape returned by getSteamFriendList helper. */
+export type SteamFriendListResult =
+  | { success: true; friends: SteamRawFriend[] }
+  | {
+      success: false;
+      error: 'PRIVATE' | 'NOT_FOUND' | 'CONFIG_REQUIRED' | 'INVALID_ID' | 'FETCH_ERROR';
+    };
+
+/** Enriched Steam friend entry for the Duel Arena opponent picker. */
+export interface PublicSteamFriend {
+  steamId: string;
+  personaName: string;
+  avatarUrl: string;
+  profileUrl: string;
+  relationship: string;
+  friendSince: number;
+}
+
+/** Public Steam Friends list response payload for Web / PWA companion. */
+export interface PublicFriendsResponse {
+  steamId: string;
+  target: string;
+  personaName: string;
+  avatarUrl: string | null;
+  profileUrl: string;
+  totalFriends: number;
+  friends: PublicSteamFriend[];
+  updatedAt: string;
+}
+
+/** Result shape returned by resolveSteamFriendsTelemetry. */
+export type FriendsTelemetryApiResult =
+  | { success: true; data: PublicFriendsResponse }
+  | { success: false; statusCode: number; error: string; message: string };
+
+
 
