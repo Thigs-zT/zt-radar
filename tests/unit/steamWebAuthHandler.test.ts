@@ -1,7 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mockClient } from 'aws-sdk-client-mock';
 import { DynamoDBDocumentClient, PutCommand, GetCommand, DeleteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
-import { verifyWebSessionToken } from '../../src/utils/steamOpenId.js';
+import {
+  verifyWebSessionToken,
+  validateWebRedirectUri,
+  buildSteamWebLoginUrl,
+} from '../../src/utils/steamOpenId.js';
 
 vi.mock('../../src/utils/steamWeb.js', async (importOriginal) => {
   const actual = await importOriginal<Record<string, unknown>>();
@@ -66,7 +70,12 @@ describe('Steam OpenID web login handler routes', () => {
     });
 
   describe('GET /auth/steam/login', () => {
-    it.each(['http://localhost:5173', 'https://zt-radar.pages.dev/app'])('redirects to Steam for %s', async (uri) => {
+    it.each([
+      'http://localhost:5173',
+      'https://zt-radar.pages.dev/app',
+      'https://ztradar.app',
+      'https://www.ztradar.app/app',
+    ])('redirects to Steam for %s', async (uri) => {
       ddbMock.on(PutCommand).resolves({});
       const res = await handler(loginEvent(new URLSearchParams({ mode: 'web', redirect_uri: uri }).toString()));
       expect(res.statusCode).toBe(302);
@@ -79,6 +88,24 @@ describe('Steam OpenID web login handler routes', () => {
       expect(item.PK).toBe(`WEB_AUTH#${state}`);
       expect(item.SK).toBe('OPENID_STATE');
       expect(item.mode).toBe('web');
+    });
+
+    it('uses ztradar.app realm and callback when AUTH_CALLBACK_URL targets the custom domain', async () => {
+      vi.resetModules();
+      vi.stubEnv('AUTH_CALLBACK_URL', 'https://ztradar.app/auth/steam/callback');
+      const { handler: customDomainHandler } = (await import('../../src/handlers/discordBot.js')) as {
+        handler: typeof handler;
+      };
+      ddbMock.on(PutCommand).resolves({});
+
+      const res = await customDomainHandler(
+        loginEvent(new URLSearchParams({ mode: 'web', redirect_uri: 'https://ztradar.app' }).toString()),
+      );
+      expect(res.statusCode).toBe(302);
+      const location = new URL(res.headers!.Location);
+      expect(location.searchParams.get('openid.realm')).toBe('https://ztradar.app/');
+      const returnTo = location.searchParams.get('openid.return_to')!;
+      expect(returnTo).toMatch(/^https:\/\/ztradar\.app\/auth\/steam\/callback\?mode=web&state=[0-9a-f]{64}$/);
     });
 
     it('rejects a malicious redirect_uri with 400 and writes nothing', async () => {
@@ -173,6 +200,41 @@ describe('Steam OpenID web login handler routes', () => {
       expect(res.body).toContain('Steam Account Linked');
       const update = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
       expect(update.Key).toEqual({ PK: 'USER#123456789012345678', SK: 'CONFIG' });
+    });
+  });
+
+  describe('Custom domain origin & OpenID realm (ztradar.app)', () => {
+    it('allows https://ztradar.app and subdomains via validateWebRedirectUri', () => {
+      expect(validateWebRedirectUri('https://ztradar.app')).toBe('https://ztradar.app/');
+      expect(validateWebRedirectUri('https://www.ztradar.app')).toBe('https://www.ztradar.app/');
+      expect(validateWebRedirectUri('https://ztradar.app/wishlist?view=compact#hash')).toBe(
+        'https://ztradar.app/wishlist?view=compact',
+      );
+      expect(validateWebRedirectUri('https://www.ztradar.app/auth#frag')).toBe('https://www.ztradar.app/auth');
+    });
+
+    it('rejects insecure or lookalike ztradar.app origins', () => {
+      for (const badUri of [
+        'http://ztradar.app',
+        'http://www.ztradar.app',
+        'https://evilztradar.app',
+        'https://ztradar.app.evil.com',
+        'https://.ztradar.app',
+        'https://user:pass@ztradar.app',
+      ]) {
+        expect(validateWebRedirectUri(badUri)).toBeNull();
+      }
+    });
+
+    it('generates ztradar.app realm and callback in buildSteamWebLoginUrl', () => {
+      const authCallbackUrl = 'https://ztradar.app/auth/steam/callback';
+      const loginUrl = new URL(buildSteamWebLoginUrl(STATE, authCallbackUrl));
+
+      expect(loginUrl.origin + loginUrl.pathname).toBe('https://steamcommunity.com/openid/login');
+      expect(loginUrl.searchParams.get('openid.realm')).toBe('https://ztradar.app/');
+      expect(loginUrl.searchParams.get('openid.return_to')).toBe(
+        `https://ztradar.app/auth/steam/callback?mode=web&state=${STATE}`,
+      );
     });
   });
 });

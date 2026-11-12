@@ -307,8 +307,8 @@ export interface WebSessionPayload {
 
 /**
  * Validates a web redirect URI against the strict origin allowlist.
- * Allowed: http://localhost:5173, http://127.0.0.1:5173, HTTPS origins ending in `.pages.dev`,
- * and the configured WEB_APP_URL origin.
+ * Allowed: http://localhost:5173, http://127.0.0.1:5173, HTTPS origins for `ztradar.app`
+ * (root or subdomains), HTTPS origins ending in `.pages.dev`, and the configured WEB_APP_URL origin.
  *
  * @param redirectUri - Raw redirect_uri supplied by the client.
  * @param webAppUrl - Optional configured web application URL.
@@ -340,11 +340,15 @@ export function validateWebRedirectUri(redirectUri: string | undefined | null, w
 
   const origin = parsed.origin;
   const isDevOrigin = WEB_ALLOWED_DEV_ORIGINS.includes(origin);
+  const isZtRadarDomain =
+    parsed.protocol === 'https:' &&
+    (parsed.hostname === 'ztradar.app' ||
+      (parsed.hostname.endsWith('.ztradar.app') && parsed.hostname.length > '.ztradar.app'.length));
   const isPagesDev =
     parsed.protocol === 'https:' && parsed.hostname.endsWith('.pages.dev') && parsed.hostname.length > '.pages.dev'.length;
   const isConfigured = configuredOrigin !== '' && origin === configuredOrigin;
 
-  if (!isDevOrigin && !isPagesDev && !isConfigured) return null;
+  if (!isDevOrigin && !isZtRadarDomain && !isPagesDev && !isConfigured) return null;
 
   parsed.hash = '';
   return parsed.toString();
