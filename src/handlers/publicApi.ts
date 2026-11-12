@@ -193,7 +193,11 @@ export function buildMarketTelemetryPlaceholder(
   const cleanAppId = appId.trim();
   const storeUrl = `https://store.steampowered.com/app/${cleanAppId}`;
   const bannerUrl = getCanonicalHeaderImageUrl(cleanAppId);
-  const title = titleFallback || KNOWN_GAME_TITLES[cleanAppId] || `Steam Application ${cleanAppId}`;
+  const title =
+    titleFallback ||
+    KNOWN_GAME_TITLES[cleanAppId] ||
+    APP_DIRECTORY?.[cleanAppId] ||
+    `Steam Application ${cleanAppId}`;
 
   const isBrl = (preferredCurrency || '').toUpperCase().trim() === 'BRL';
   const currency = isBrl ? 'BRL' : 'USD';
@@ -237,6 +241,145 @@ export function buildMarketTelemetryPlaceholder(
 
 const MARKET_CACHE_TTL_SECONDS = 86400;
 const MARKET_DEAL_LOOKUP_TIMEOUT_MS = 2500;
+const TRENDING_ENRICH_CONCURRENCY = 4;
+
+/**
+ * Ensures all discovered storefronts from storeBreakdown, primaryDeal, and cheaperAlternative
+ * are preserved cleanly without case-insensitive duplicates.
+ */
+function normalizeStoreBreakdown(
+  rawBreakdown?: Record<string, StoreDeal> | null,
+  primaryDeal?: StoreDeal | null,
+  cheaperAlternative?: StoreDeal | null,
+): Record<string, StoreDeal> {
+  const breakdown: Record<string, StoreDeal> = {};
+  const seenLower = new Set<string>();
+
+  const addOffer = (keyHint: string | undefined, deal: StoreDeal | null | undefined) => {
+    if (!deal) return;
+    const key = (keyHint || deal.shopName || '').trim();
+    if (!key) return;
+    const lowerKey = key.toLowerCase();
+    if (!seenLower.has(lowerKey)) {
+      seenLower.add(lowerKey);
+      breakdown[key] = deal;
+    }
+  };
+
+  if (rawBreakdown && typeof rawBreakdown === 'object') {
+    for (const [key, deal] of Object.entries(rawBreakdown)) {
+      addOffer(key, deal);
+    }
+  }
+  if (primaryDeal) {
+    addOffer(primaryDeal.shopName, primaryDeal);
+  }
+  if (cheaperAlternative) {
+    addOffer(cheaperAlternative.shopName, cheaperAlternative);
+  }
+
+  return breakdown;
+}
+
+function countPartnerDeals(storeBreakdown?: Record<string, StoreDeal> | null): number {
+  if (!storeBreakdown) return 0;
+  return Object.keys(storeBreakdown).filter((shop) => shop.toLowerCase() !== 'steam').length;
+}
+
+function isHealthyMultiStoreTelemetry(telemetry: {
+  storeBreakdown?: Record<string, StoreDeal> | null;
+  alternativeCheckDegraded?: boolean;
+  alternativeCheckStatus?: 'confirmed' | 'degraded' | 'skipped';
+}): boolean {
+  return (
+    telemetry.alternativeCheckDegraded === false &&
+    telemetry.alternativeCheckStatus !== 'degraded' &&
+    telemetry.alternativeCheckStatus !== 'skipped' &&
+    countPartnerDeals(telemetry.storeBreakdown) > 0
+  );
+}
+
+/**
+ * Constructs canonical PublicMarketTelemetry from resolved GameDealInfo.
+ */
+function buildPublicMarketTelemetry(
+  cleanAppId: string,
+  dealInfo: GameDealInfo,
+  imageUrl: string,
+  titleFallback: string | null = null,
+): PublicMarketTelemetry {
+  const effectiveTitleFallback =
+    titleFallback || KNOWN_GAME_TITLES[cleanAppId] || APP_DIRECTORY?.[cleanAppId] || null;
+  const resolvedTitle =
+    dealInfo.title && dealInfo.title !== 'Monitored Title'
+      ? dealInfo.title
+      : effectiveTitleFallback || `Steam Application ${cleanAppId}`;
+
+  const primaryDeal = dealInfo.primaryDeal;
+  const storeBreakdown = normalizeStoreBreakdown(
+    dealInfo.storeBreakdown,
+    primaryDeal,
+    dealInfo.cheaperAlternative || null,
+  );
+
+  return {
+    ...dealInfo,
+    appId: cleanAppId,
+    gameId: dealInfo.gameId || `steam_${cleanAppId}`,
+    title: resolvedTitle,
+    imageUrl,
+    steamAppId: cleanAppId,
+    primaryDeal,
+    cheaperAlternative: dealInfo.cheaperAlternative || null,
+    storeBreakdown,
+    alternativeCheckStatus: dealInfo.alternativeCheckStatus || 'confirmed',
+    alternativeCheckDegraded: dealInfo.alternativeCheckDegraded ?? false,
+    isPlatformExclusive: dealInfo.isPlatformExclusive,
+    isUnreleased: dealInfo.isUnreleased,
+    salePrice: primaryDeal.salePrice,
+    regularPrice: primaryDeal.regularPrice,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+/**
+ * Persists verified multi-store telemetry to DynamoDB (PK: MARKET#v5#${appId}#${currency}, SK: TELEMETRY)
+ * with 24h TTL. Never persists degraded or Steam-only (0 partner deals) records.
+ */
+export async function persistMarketTelemetryCache(
+  telemetry: PublicMarketTelemetry,
+  currency: string,
+  ddbDocClient: DynamoDBDocumentClient = docClient,
+  tableName: string = process.env.TABLE_NAME || '',
+): Promise<void> {
+  if (!tableName || !ddbDocClient) return;
+  if (!isHealthyMultiStoreTelemetry(telemetry)) return;
+
+  const cleanAppId = String(telemetry.appId || telemetry.steamAppId || '').trim();
+  if (!cleanAppId) return;
+
+  const normalizedCurrency = currency.toUpperCase().trim() === 'BRL' ? 'BRL' : 'USD';
+  const nowSec = Math.floor(Date.now() / 1000);
+
+  try {
+    await ddbDocClient.send(
+      new PutCommand({
+        TableName: tableName,
+        Item: {
+          PK: `MARKET#v5#${cleanAppId}#${normalizedCurrency}`,
+          SK: 'TELEMETRY',
+          ...telemetry,
+          ttl: nowSec + MARKET_CACHE_TTL_SECONDS,
+        },
+      }),
+    );
+  } catch (putErr) {
+    console.warn(
+      `[MarketCache] Cache save failed for ${cleanAppId}:`,
+      putErr instanceof Error ? putErr.message : String(putErr),
+    );
+  }
+}
 
 /**
  * Retrieves healthy multi-store market telemetry from DynamoDB cache if fresh and un-degraded.
@@ -268,9 +411,14 @@ export async function getCachedMarketTelemetry(
     if (cacheResult?.Items && Array.isArray(cacheResult.Items) && cacheResult.Items.length > 0) {
       const cached = cacheResult.Items[0] as PublicMarketTelemetry & { ttl?: number };
       const isFresh = !cached.ttl || cached.ttl > nowSec;
-      const storeKeys = Object.keys(cached.storeBreakdown || {});
+      const normalizedBreakdown = normalizeStoreBreakdown(
+        cached.storeBreakdown,
+        cached.primaryDeal,
+        cached.cheaperAlternative ?? null,
+      );
+      const storeKeys = Object.keys(normalizedBreakdown);
       const storeCount = storeKeys.length;
-      const partnerDealsCount = storeKeys.filter((shop) => shop.toLowerCase() !== 'steam').length;
+      const partnerDealsCount = countPartnerDeals(normalizedBreakdown);
       const isHealthy =
         cached.alternativeCheckDegraded === false &&
         cached.alternativeCheckStatus !== 'degraded' &&
@@ -291,7 +439,7 @@ export async function getCachedMarketTelemetry(
           expiry: cached.expiry ?? null,
           primaryDeal: cached.primaryDeal,
           cheaperAlternative: cached.cheaperAlternative ?? null,
-          storeBreakdown: cached.storeBreakdown,
+          storeBreakdown: normalizedBreakdown,
           alternativeCheckStatus: cached.alternativeCheckStatus || 'confirmed',
           alternativeCheckDegraded: false,
           isPlatformExclusive: cached.isPlatformExclusive,
@@ -327,8 +475,8 @@ export async function resolveMarketTelemetry(
   const cleanAppId = appId.trim();
   const isBrl = (preferredCurrency || '').toUpperCase().trim() === 'BRL';
   const currency = isBrl ? 'BRL' : 'USD';
-  const nowSec = Math.floor(Date.now() / 1000);
-  const effectiveTitleFallback = titleFallback || KNOWN_GAME_TITLES[cleanAppId] || null;
+  const effectiveTitleFallback =
+    titleFallback || KNOWN_GAME_TITLES[cleanAppId] || APP_DIRECTORY?.[cleanAppId] || null;
 
   // 1. Check DynamoDB Multi-Store Telemetry Cache
   const cached = await getCachedMarketTelemetry(cleanAppId, currency, ddbDocClient, tableName);
@@ -350,72 +498,21 @@ export async function resolveMarketTelemetry(
     ]);
 
     if (dealInfo && dealInfo.primaryDeal) {
-      const resolvedTitle =
-        dealInfo.title && dealInfo.title !== 'Monitored Title'
-          ? dealInfo.title
-          : effectiveTitleFallback || `Steam Application ${cleanAppId}`;
-
-      const primaryDeal = dealInfo.primaryDeal;
-      const storeBreakdown =
-        dealInfo.storeBreakdown && Object.keys(dealInfo.storeBreakdown).length > 0
-          ? dealInfo.storeBreakdown
-          : { [primaryDeal.shopName]: primaryDeal };
-
       const authenticImageUrl = await resolveAuthenticArtwork(cleanAppId, {
         ddbDocClient,
         tableName,
         fetchedHeader: dealInfo.imageUrl,
       });
 
-      const telemetry: PublicMarketTelemetry = {
-        ...dealInfo,
-        appId: cleanAppId,
-        gameId: dealInfo.gameId || `steam_${cleanAppId}`,
-        title: resolvedTitle,
-        imageUrl: authenticImageUrl,
-        steamAppId: cleanAppId,
-        primaryDeal,
-        cheaperAlternative: dealInfo.cheaperAlternative || null,
-        storeBreakdown,
-        alternativeCheckStatus: dealInfo.alternativeCheckStatus || 'confirmed',
-        alternativeCheckDegraded: dealInfo.alternativeCheckDegraded ?? false,
-        isPlatformExclusive: dealInfo.isPlatformExclusive,
-        isUnreleased: dealInfo.isUnreleased,
-        salePrice: primaryDeal.salePrice,
-        regularPrice: primaryDeal.regularPrice,
-        updatedAt: new Date().toISOString(),
-      };
+      const telemetry = buildPublicMarketTelemetry(
+        cleanAppId,
+        dealInfo,
+        authenticImageUrl,
+        effectiveTitleFallback,
+      );
 
       // 3. Cache only when multi-store ITAD data is verified (never cache degraded or Steam-only fallbacks)
-      const partnerDealsCount = Object.keys(storeBreakdown).filter(
-        (shop) => shop.toLowerCase() !== 'steam',
-      ).length;
-      const isHealthy =
-        telemetry.alternativeCheckDegraded === false &&
-        telemetry.alternativeCheckStatus !== 'degraded' &&
-        telemetry.alternativeCheckStatus !== 'skipped' &&
-        partnerDealsCount > 0;
-
-      if (tableName && ddbDocClient && isHealthy) {
-        try {
-          await ddbDocClient.send(
-            new PutCommand({
-              TableName: tableName,
-              Item: {
-                PK: `MARKET#v5#${cleanAppId}#${currency}`,
-                SK: 'TELEMETRY',
-                ...telemetry,
-                ttl: nowSec + MARKET_CACHE_TTL_SECONDS,
-              },
-            }),
-          );
-        } catch (putErr) {
-          console.warn(
-            `[MarketCache] Cache save failed for ${cleanAppId}:`,
-            putErr instanceof Error ? putErr.message : String(putErr),
-          );
-        }
-      }
+      await persistMarketTelemetryCache(telemetry, currency, ddbDocClient, tableName);
 
       return telemetry;
     }
@@ -823,10 +920,18 @@ export async function resolveTrendingGames(
   }
 
   try {
-    const rawTrending = await Promise.race([
-      getSteamTrendingGames(50, currency),
-      new Promise<SteamTrendingEntry[]>((resolve) => setTimeout(() => resolve([]), 4000)),
-    ]);
+    let trendingTimer: ReturnType<typeof setTimeout> | undefined;
+    let rawTrending: SteamTrendingEntry[] = [];
+    try {
+      rawTrending = await Promise.race([
+        getSteamTrendingGames(50, currency),
+        new Promise<SteamTrendingEntry[]>((resolve) => {
+          trendingTimer = setTimeout(() => resolve([]), 4000);
+        }),
+      ]);
+    } finally {
+      if (trendingTimer) clearTimeout(trendingTimer);
+    }
 
     const seenAppIds = new Set<number>();
     const filtered: SteamTrendingEntry[] = [];
@@ -883,129 +988,189 @@ export async function resolveTrendingGames(
 
     const candidateList = filtered.slice(0, 16);
 
-    // Multi-store enrichment using cached/live ITAD deal lookups
-    const enrichedList: TrendingGameSummary[] = await Promise.all(
-      candidateList.map(async (candidate, idx): Promise<TrendingGameSummary> => {
-        let dealInfo: GameDealInfo | PublicMarketTelemetry | null = null;
-        if (tableName && ddbDocClient) {
-          dealInfo = await getCachedMarketTelemetry(String(candidate.appId), currency, ddbDocClient, tableName);
-        }
+    // 1. Pre-check per-game DynamoDB cache in parallel so cached titles consume 0 ITAD requests
+    const dealInfoByAppId = new Map<string, GameDealInfo | PublicMarketTelemetry | null>();
+    const cacheMissEntries: SteamTrendingEntry[] = [];
 
-        if (!dealInfo) {
-          try {
-            dealInfo = await Promise.race([
-              getGameDealInfo(String(candidate.appId), currency, candidate.name),
-              new Promise<null>((resolve) => setTimeout(() => resolve(null), 2500)),
-            ]);
-          } catch {
-            dealInfo = null;
-          }
-        }
+    const cacheLookups =
+      tableName && ddbDocClient
+        ? await Promise.all(
+            candidateList.map(async (candidate) => ({
+              candidate,
+              cached: await getCachedMarketTelemetry(
+                String(candidate.appId),
+                currency,
+                ddbDocClient,
+                tableName,
+              ),
+            })),
+          )
+        : candidateList.map((candidate) => ({ candidate, cached: null }));
 
-        let bestStore: 'steam' | 'nuuvem' | 'epic' | 'gog' = 'steam';
-        let bestPriceUsd: number | null = null;
-        let bestPriceBrl: number | null = null;
-        let cutPercent = 0;
-        let isATL = false;
-        let salePrice: number | null = null;
-        let regularPrice: number | null = null;
-        let dealUrl: string | null = candidate.headerImage
-          ? `https://store.steampowered.com/app/${candidate.appId}/`
-          : null;
-        let priceText = candidate.priceText;
+    for (const entry of cacheLookups) {
+      const appIdStr = String(entry.candidate.appId);
+      if (entry.cached) {
+        dealInfoByAppId.set(appIdStr, entry.cached);
+      } else {
+        cacheMissEntries.push(entry.candidate);
+      }
+    }
+
+    // 2. Resolve cache misses with bounded concurrency to prevent ITAD burst exhaustion
+    // and cross-hydrate per-game cache (PK: MARKET#v5#<appId>#<currency>) when partner deals exist
+    let missCursor = 0;
+    const enrichMissWorker = async (): Promise<void> => {
+      while (missCursor < cacheMissEntries.length) {
+        const candidate = cacheMissEntries[missCursor++];
+        if (!candidate) break;
+
+        const appIdStr = String(candidate.appId);
+        let dealTimer: ReturnType<typeof setTimeout> | undefined;
+        let dealInfo: GameDealInfo | null = null;
+
+        try {
+          dealInfo = await Promise.race([
+            getGameDealInfo(appIdStr, currency, candidate.name),
+            new Promise<null>((resolve) => {
+              dealTimer = setTimeout(() => resolve(null), MARKET_DEAL_LOOKUP_TIMEOUT_MS);
+            }),
+          ]);
+        } catch {
+          dealInfo = null;
+        } finally {
+          if (dealTimer) clearTimeout(dealTimer);
+        }
 
         if (dealInfo && dealInfo.primaryDeal) {
-          const allOffers: StoreDeal[] = dealInfo.storeBreakdown
-            ? Object.values(dealInfo.storeBreakdown)
-            : [dealInfo.primaryDeal];
+          const resolvedImageUrl = isAuthenticArtworkUrl(dealInfo.imageUrl, appIdStr)
+            ? dealInfo.imageUrl!
+            : isAuthenticArtworkUrl(candidate.headerImage, appIdStr)
+              ? candidate.headerImage!
+              : dealInfo.imageUrl || candidate.headerImage || getCanonicalHeaderImageUrl(appIdStr);
 
-          if (
-            dealInfo.cheaperAlternative &&
-            !allOffers.some((o) => o.shopName === dealInfo.cheaperAlternative?.shopName)
-          ) {
-            allOffers.push(dealInfo.cheaperAlternative);
-          }
+          const telemetry = buildPublicMarketTelemetry(
+            appIdStr,
+            dealInfo,
+            resolvedImageUrl,
+            candidate.name,
+          );
+          dealInfoByAppId.set(appIdStr, telemetry);
 
-          const lowestOffer = allOffers.reduce((best, curr) => {
-            if (typeof curr.salePrice !== 'number') return best;
-            if (typeof best.salePrice !== 'number') return curr;
-            return curr.salePrice < best.salePrice ? curr : best;
-          }, dealInfo.cheaperAlternative || dealInfo.primaryDeal);
-
-          bestStore = normalizeStoreSlug(lowestOffer.shopName);
-          cutPercent =
-            typeof lowestOffer.cutPercent === 'number'
-              ? Math.max(0, Math.round(lowestOffer.cutPercent))
-              : 0;
-          isATL = Boolean(dealInfo.isAllTimeLow);
-          salePrice = typeof lowestOffer.salePrice === 'number' ? lowestOffer.salePrice : null;
-          regularPrice = typeof lowestOffer.regularPrice === 'number' ? lowestOffer.regularPrice : null;
-          dealUrl = lowestOffer.url || dealUrl;
-
-          if (currency === 'BRL') {
-            bestPriceBrl = salePrice;
-            bestPriceUsd = (candidate as TrendingGameSummary).bestPriceUsd ?? null;
-          } else {
-            bestPriceUsd = salePrice;
-            bestPriceBrl = (candidate as TrendingGameSummary).bestPriceBrl ?? null;
-          }
-
-          if (salePrice !== null) {
-            if (salePrice === 0) {
-              priceText = 'Free to Play';
-            } else {
-              const sym = currency === 'BRL' ? 'R$' : '$';
-              const cutStr = cutPercent > 0 ? ` (-${cutPercent}%)` : '';
-              priceText = `${sym} ${salePrice.toFixed(2)}${cutStr}`;
-            }
-          }
+          await persistMarketTelemetryCache(telemetry, currency, ddbDocClient, tableName);
         } else {
-          const existing = candidate as TrendingGameSummary;
-          if (existing.bestStore) {
-            bestStore = existing.bestStore as 'steam' | 'nuuvem' | 'epic' | 'gog';
-            bestPriceUsd = existing.bestPriceUsd ?? null;
-            bestPriceBrl = existing.bestPriceBrl ?? null;
-            cutPercent = existing.cutPercent ?? 0;
-            isATL = Boolean(existing.isATL);
-            salePrice = existing.salePrice ?? null;
-            regularPrice = existing.regularPrice ?? null;
-            dealUrl = existing.dealUrl ?? dealUrl;
-            priceText = existing.priceText;
-          } else {
-            const cutMatch = (candidate.priceText || '').match(/\(-(\d+)%\)/);
-            cutPercent = cutMatch ? parseInt(cutMatch[1], 10) : 0;
-            const priceMatch = (candidate.priceText || '').match(/(?:\$|R\$)\s*([\d,.]+)/);
-            const parsed = priceMatch ? parseFloat(priceMatch[1].replace(',', '.')) : null;
-            salePrice = parsed;
-            if (currency === 'BRL') {
-              bestPriceBrl = parsed;
-            } else {
-              bestPriceUsd = parsed;
-            }
-          }
+          dealInfoByAppId.set(appIdStr, dealInfo);
+        }
+      }
+    };
+
+    if (cacheMissEntries.length > 0) {
+      const workerCount = Math.min(TRENDING_ENRICH_CONCURRENCY, cacheMissEntries.length);
+      await Promise.all(Array.from({ length: workerCount }, () => enrichMissWorker()));
+    }
+
+    // 3. Assemble enriched trending entries preserving exact candidate rank order
+    const enrichedList: TrendingGameSummary[] = candidateList.map((candidate, idx): TrendingGameSummary => {
+      const dealInfo = dealInfoByAppId.get(String(candidate.appId)) || null;
+
+      let bestStore: 'steam' | 'nuuvem' | 'epic' | 'gog' = 'steam';
+      let bestPriceUsd: number | null = null;
+      let bestPriceBrl: number | null = null;
+      let cutPercent = 0;
+      let isATL = false;
+      let salePrice: number | null = null;
+      let regularPrice: number | null = null;
+      let dealUrl: string | null = candidate.headerImage
+        ? `https://store.steampowered.com/app/${candidate.appId}/`
+        : null;
+      let priceText = candidate.priceText;
+
+      if (dealInfo && dealInfo.primaryDeal) {
+        const normalizedBreakdown = normalizeStoreBreakdown(
+          dealInfo.storeBreakdown,
+          dealInfo.primaryDeal,
+          dealInfo.cheaperAlternative || null,
+        );
+        const allOffers: StoreDeal[] = Object.values(normalizedBreakdown);
+
+        const lowestOffer = allOffers.reduce((best, curr) => {
+          if (typeof curr.salePrice !== 'number') return best;
+          if (typeof best.salePrice !== 'number') return curr;
+          return curr.salePrice < best.salePrice ? curr : best;
+        }, dealInfo.cheaperAlternative || dealInfo.primaryDeal);
+
+        bestStore = normalizeStoreSlug(lowestOffer.shopName);
+        cutPercent =
+          typeof lowestOffer.cutPercent === 'number'
+            ? Math.max(0, Math.round(lowestOffer.cutPercent))
+            : 0;
+        isATL = Boolean(dealInfo.isAllTimeLow);
+        salePrice = typeof lowestOffer.salePrice === 'number' ? lowestOffer.salePrice : null;
+        regularPrice = typeof lowestOffer.regularPrice === 'number' ? lowestOffer.regularPrice : null;
+        dealUrl = lowestOffer.url || dealUrl;
+
+        if (currency === 'BRL') {
+          bestPriceBrl = salePrice;
+          bestPriceUsd = (candidate as TrendingGameSummary).bestPriceUsd ?? null;
+        } else {
+          bestPriceUsd = salePrice;
+          bestPriceBrl = (candidate as TrendingGameSummary).bestPriceBrl ?? null;
         }
 
-        return {
-          rank: idx + 1,
-          appId: candidate.appId,
-          name: candidate.name,
-          currentPlayers: candidate.currentPlayers ?? null,
-          priceText,
-          headerImage:
-            candidate.headerImage ||
-            dealInfo?.imageUrl ||
-            getCanonicalHeaderImageUrl(String(candidate.appId)),
-          bestStore,
-          bestPriceUsd,
-          bestPriceBrl,
-          cutPercent,
-          isATL,
-          dealUrl,
-          regularPrice,
-          salePrice,
-        };
-      }),
-    );
+        if (salePrice !== null) {
+          if (salePrice === 0) {
+            priceText = 'Free to Play';
+          } else {
+            const sym = currency === 'BRL' ? 'R$' : '$';
+            const cutStr = cutPercent > 0 ? ` (-${cutPercent}%)` : '';
+            priceText = `${sym} ${salePrice.toFixed(2)}${cutStr}`;
+          }
+        }
+      } else {
+        const existing = candidate as TrendingGameSummary;
+        if (existing.bestStore) {
+          bestStore = existing.bestStore as 'steam' | 'nuuvem' | 'epic' | 'gog';
+          bestPriceUsd = existing.bestPriceUsd ?? null;
+          bestPriceBrl = existing.bestPriceBrl ?? null;
+          cutPercent = existing.cutPercent ?? 0;
+          isATL = Boolean(existing.isATL);
+          salePrice = existing.salePrice ?? null;
+          regularPrice = existing.regularPrice ?? null;
+          dealUrl = existing.dealUrl ?? dealUrl;
+          priceText = existing.priceText;
+        } else {
+          const cutMatch = (candidate.priceText || '').match(/\(-(\d+)%\)/);
+          cutPercent = cutMatch ? parseInt(cutMatch[1], 10) : 0;
+          const priceMatch = (candidate.priceText || '').match(/(?:\$|R\$)\s*([\d,.]+)/);
+          const parsed = priceMatch ? parseFloat(priceMatch[1].replace(',', '.')) : null;
+          salePrice = parsed;
+          if (currency === 'BRL') {
+            bestPriceBrl = parsed;
+          } else {
+            bestPriceUsd = parsed;
+          }
+        }
+      }
+
+      return {
+        rank: idx + 1,
+        appId: candidate.appId,
+        name: candidate.name,
+        currentPlayers: candidate.currentPlayers ?? null,
+        priceText,
+        headerImage:
+          candidate.headerImage ||
+          dealInfo?.imageUrl ||
+          getCanonicalHeaderImageUrl(String(candidate.appId)),
+        bestStore,
+        bestPriceUsd,
+        bestPriceBrl,
+        cutPercent,
+        isATL,
+        dealUrl,
+        regularPrice,
+        salePrice,
+      };
+    });
 
     // 2. Persist to DynamoDB cache with 15-minute TTL
     if (tableName && ddbDocClient && enrichedList.length > 0) {

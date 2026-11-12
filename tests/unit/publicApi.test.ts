@@ -1209,6 +1209,77 @@ describe('Public Web API Handler', () => {
         warnSpy.mockRestore();
       }
     });
+
+    it('should preserve authoritative Steam price and avoid negative caching when ITAD returns degraded fallback', async () => {
+      vi.mocked(getGameDealInfo).mockResolvedValueOnce({
+        gameId: 'steam_489830',
+        title: 'The Elder Scrolls V: Skyrim Special Edition',
+        imageUrl: 'https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/489830/header.jpg',
+        reviewScore: 94,
+        steamAppId: '489830',
+        dealType: 'CURATED_DEAL',
+        isAllTimeLow: false,
+        allTimeLowPrice: null,
+        expiry: null,
+        primaryDeal: {
+          shopName: 'Steam',
+          salePrice: 13.19,
+          regularPrice: 39.99,
+          cutPercent: 67,
+          url: 'https://store.steampowered.com/app/489830/',
+          expiry: null,
+          currency: 'USD',
+          currencySymbol: '$',
+        },
+        cheaperAlternative: null,
+        storeBreakdown: {
+          Steam: {
+            shopName: 'Steam',
+            salePrice: 13.19,
+            regularPrice: 39.99,
+            cutPercent: 67,
+            url: 'https://store.steampowered.com/app/489830/',
+            expiry: null,
+            currency: 'USD',
+            currencySymbol: '$',
+          },
+        },
+        alternativeCheckStatus: 'degraded',
+        alternativeCheckDegraded: true,
+      });
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/market/{appId}',
+        rawPath: '/public/market/489830',
+        pathParameters: {
+          appId: '489830',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/market/489830',
+          },
+        },
+      };
+
+      const response = await handler(event);
+
+      expect(response.statusCode).toBe(200);
+      const data = JSON.parse(response.body);
+      expect(data.appId).toBe('489830');
+      expect(data.title).toBe('The Elder Scrolls V: Skyrim Special Edition');
+      expect(data.primaryDeal?.shopName).toBe('Steam');
+      expect(data.primaryDeal?.salePrice).toBe(13.19);
+      expect(data.primaryDeal?.regularPrice).toBe(39.99);
+      expect(data.primaryDeal?.cutPercent).toBe(67);
+      expect(data.storeBreakdown?.Steam?.salePrice).toBe(13.19);
+      expect(data.alternativeCheckDegraded).toBe(true);
+      expect(data.alternativeCheckStatus).toBe('degraded');
+
+      const putCalls = ddbMock.commandCalls(PutCommand);
+      const marketPut = putCalls.find((call) => call.args[0].input.Item?.PK === 'MARKET#v5#489830#USD');
+      expect(marketPut).toBeUndefined();
+    });
   });
 
   describe('Route: GET /public/market', () => {
@@ -2002,7 +2073,7 @@ describe('Public Web API Handler', () => {
         },
       ]);
 
-      vi.mocked(getGameDealInfo).mockImplementation(async (rawId) => {
+      vi.mocked(getGameDealInfo).mockImplementation(async (rawId): Promise<GameDealInfo | null> => {
         if (String(rawId).includes('999001')) {
           return mockNuuvemCheaperDeal;
         }
@@ -2036,6 +2107,516 @@ describe('Public Web API Handler', () => {
       expect(enrichedGame.priceText).toBe('$ 50.99 (-15%)');
       expect(enrichedGame.isATL).toBe(true);
       expect(enrichedGame.dealUrl).toBe('https://www.nuuvem.com/item/action-rpg-hit');
+    });
+
+    it('should pre-check MARKET#v5 per-game cache during trending resolution and skip live ITAD calls for cached titles', async () => {
+      const nowSec = Math.floor(Date.now() / 1000);
+      const cachedSkyrimTelemetry = {
+        PK: 'MARKET#v5#489830#USD',
+        SK: 'TELEMETRY',
+        appId: '489830',
+        gameId: 'steam_489830',
+        title: 'The Elder Scrolls V: Skyrim Special Edition',
+        imageUrl: 'https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/489830/header.jpg',
+        reviewScore: 94,
+        steamAppId: '489830',
+        dealType: 'CURATED_DEAL',
+        isAllTimeLow: true,
+        allTimeLowPrice: 9.99,
+        expiry: null,
+        primaryDeal: {
+          shopName: 'Steam',
+          salePrice: 13.19,
+          regularPrice: 39.99,
+          cutPercent: 67,
+          url: 'https://store.steampowered.com/app/489830/',
+          expiry: null,
+          currency: 'USD',
+          currencySymbol: '$',
+        },
+        cheaperAlternative: {
+          shopName: 'Nuuvem',
+          salePrice: 9.99,
+          regularPrice: 39.99,
+          cutPercent: 75,
+          url: 'https://www.nuuvem.com/item/the-elder-scrolls-v-skyrim-special-edition',
+          expiry: null,
+          currency: 'USD',
+          currencySymbol: '$',
+        },
+        storeBreakdown: {
+          Steam: {
+            shopName: 'Steam',
+            salePrice: 13.19,
+            regularPrice: 39.99,
+            cutPercent: 67,
+            url: 'https://store.steampowered.com/app/489830/',
+            expiry: null,
+            currency: 'USD',
+            currencySymbol: '$',
+          },
+          Nuuvem: {
+            shopName: 'Nuuvem',
+            salePrice: 9.99,
+            regularPrice: 39.99,
+            cutPercent: 75,
+            url: 'https://www.nuuvem.com/item/the-elder-scrolls-v-skyrim-special-edition',
+            expiry: null,
+            currency: 'USD',
+            currencySymbol: '$',
+          },
+          GOG: {
+            shopName: 'GOG',
+            salePrice: 11.99,
+            regularPrice: 39.99,
+            cutPercent: 70,
+            url: 'https://www.gog.com/game/the_elder_scrolls_v_skyrim_special_edition',
+            expiry: null,
+            currency: 'USD',
+            currencySymbol: '$',
+          },
+          'Epic Games Store': {
+            shopName: 'Epic Games Store',
+            salePrice: 13.19,
+            regularPrice: 39.99,
+            cutPercent: 67,
+            url: 'https://store.epicgames.com/p/skyrim-special-edition',
+            expiry: null,
+            currency: 'USD',
+            currencySymbol: '$',
+          },
+        },
+        alternativeCheckStatus: 'confirmed',
+        alternativeCheckDegraded: false,
+        ttl: nowSec + 86400,
+        updatedAt: new Date().toISOString(),
+      };
+
+      ddbMock.on(QueryCommand).callsFake((input) => {
+        const pk = input?.ExpressionAttributeValues?.[':pk'];
+        if (pk === 'MARKET#v5#489830#USD') {
+          return { Items: [cachedSkyrimTelemetry] };
+        }
+        return { Items: [] };
+      });
+
+      vi.mocked(getSteamTrendingGames).mockResolvedValueOnce([
+        {
+          rank: 1,
+          appId: 489830,
+          name: 'The Elder Scrolls V: Skyrim Special Edition',
+          currentPlayers: 28000,
+          priceText: '$ 13.19 (-67%)',
+          headerImage: 'https://example.com/skyrim.jpg',
+        },
+        {
+          rank: 2,
+          appId: 999002,
+          name: 'Cold Indie Hit',
+          currentPlayers: 19000,
+          priceText: '$ 19.99 (-50%)',
+          headerImage: 'https://example.com/cold-indie.jpg',
+        },
+      ]);
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/market/trending',
+        rawPath: '/public/market/trending',
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/market/trending',
+          },
+        },
+      };
+
+      const response = await handler(event);
+
+      expect(response.statusCode).toBe(200);
+      const data = JSON.parse(response.body);
+      expect(Array.isArray(data)).toBe(true);
+
+      const skyrimEntry = data.find((entry: { appId: number }) => entry.appId === 489830);
+      expect(skyrimEntry).toBeDefined();
+      expect(skyrimEntry.bestStore).toBe('nuuvem');
+      expect(skyrimEntry.bestPriceUsd).toBe(9.99);
+      expect(skyrimEntry.cutPercent).toBe(75);
+      expect(skyrimEntry.isATL).toBe(true);
+      expect(skyrimEntry.dealUrl).toBe('https://www.nuuvem.com/item/the-elder-scrolls-v-skyrim-special-edition');
+
+      // Warm per-game cache hit must consume 0 live ITAD calls for 489830, while resolving cold 999002
+      const dealCallAppIds = vi.mocked(getGameDealInfo).mock.calls.map((call) => String(call[0]));
+      expect(dealCallAppIds).not.toContain('489830');
+      expect(dealCallAppIds).toContain('999002');
+    });
+
+    it('should cross-hydrate MARKET#v5 per-game cache from trending so immediate /public/market/{appId} clicks serve all partner stores with zero extra ITAD calls', async () => {
+      const inMemoryStore = new Map<string, Record<string, unknown>>();
+
+      ddbMock.on(PutCommand).callsFake((input) => {
+        const item = input?.Item as Record<string, unknown> | undefined;
+        if (item?.PK && item?.SK) {
+          inMemoryStore.set(`${String(item.PK)}|${String(item.SK)}`, item);
+        }
+        return {};
+      });
+
+      ddbMock.on(QueryCommand).callsFake((input) => {
+        const pk = input?.ExpressionAttributeValues?.[':pk'];
+        const sk = input?.ExpressionAttributeValues?.[':sk'] || 'TELEMETRY';
+        const hit = pk ? inMemoryStore.get(`${String(pk)}|${String(sk)}`) : undefined;
+        return { Items: hit ? [hit] : [] };
+      });
+
+      const mockSkyrimFourStoreDeal: GameDealInfo = {
+        gameId: 'steam_489830',
+        title: 'The Elder Scrolls V: Skyrim Special Edition',
+        imageUrl: 'https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/489830/header.jpg',
+        reviewScore: 94,
+        steamAppId: '489830',
+        dealType: 'CURATED_DEAL',
+        isAllTimeLow: true,
+        allTimeLowPrice: 9.99,
+        expiry: null,
+        primaryDeal: {
+          shopName: 'Steam',
+          salePrice: 13.19,
+          regularPrice: 39.99,
+          cutPercent: 67,
+          url: 'https://store.steampowered.com/app/489830/',
+          expiry: null,
+          currency: 'USD',
+          currencySymbol: '$',
+        },
+        cheaperAlternative: {
+          shopName: 'Nuuvem',
+          salePrice: 9.99,
+          regularPrice: 39.99,
+          cutPercent: 75,
+          url: 'https://www.nuuvem.com/item/the-elder-scrolls-v-skyrim-special-edition',
+          expiry: null,
+          currency: 'USD',
+          currencySymbol: '$',
+        },
+        storeBreakdown: {
+          Steam: {
+            shopName: 'Steam',
+            salePrice: 13.19,
+            regularPrice: 39.99,
+            cutPercent: 67,
+            url: 'https://store.steampowered.com/app/489830/',
+            expiry: null,
+            currency: 'USD',
+            currencySymbol: '$',
+          },
+          Nuuvem: {
+            shopName: 'Nuuvem',
+            salePrice: 9.99,
+            regularPrice: 39.99,
+            cutPercent: 75,
+            url: 'https://www.nuuvem.com/item/the-elder-scrolls-v-skyrim-special-edition',
+            expiry: null,
+            currency: 'USD',
+            currencySymbol: '$',
+          },
+          GOG: {
+            shopName: 'GOG',
+            salePrice: 11.99,
+            regularPrice: 39.99,
+            cutPercent: 70,
+            url: 'https://www.gog.com/game/the_elder_scrolls_v_skyrim_special_edition',
+            expiry: null,
+            currency: 'USD',
+            currencySymbol: '$',
+          },
+          'Epic Games Store': {
+            shopName: 'Epic Games Store',
+            salePrice: 13.19,
+            regularPrice: 39.99,
+            cutPercent: 67,
+            url: 'https://store.epicgames.com/p/skyrim-special-edition',
+            expiry: null,
+            currency: 'USD',
+            currencySymbol: '$',
+          },
+        },
+        alternativeCheckStatus: 'confirmed',
+        alternativeCheckDegraded: false,
+      };
+
+      vi.mocked(getSteamTrendingGames).mockResolvedValueOnce([
+        {
+          rank: 1,
+          appId: 489830,
+          name: 'The Elder Scrolls V: Skyrim Special Edition',
+          currentPlayers: 31500,
+          priceText: '$ 13.19 (-67%)',
+          headerImage: 'https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/489830/header.jpg',
+        },
+      ]);
+
+      vi.mocked(getGameDealInfo).mockImplementation(async (rawId): Promise<GameDealInfo | null> => {
+        if (String(rawId) === '489830') {
+          return mockSkyrimFourStoreDeal;
+        }
+        return null;
+      });
+
+      const trendingEvent: HttpApiEvent = {
+        routeKey: 'GET /public/market/trending',
+        rawPath: '/public/market/trending',
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/market/trending',
+          },
+        },
+      };
+
+      const trendingResponse = await handler(trendingEvent);
+      expect(trendingResponse.statusCode).toBe(200);
+      const trendingData = JSON.parse(trendingResponse.body);
+      expect(trendingData[0].appId).toBe(489830);
+      expect(trendingData[0].bestStore).toBe('nuuvem');
+      expect(trendingData[0].bestPriceUsd).toBe(9.99);
+
+      // Verify MARKET#v5#489830#USD was cross-hydrated with 86400s TTL and all 4 stores
+      const hydratedRecord = inMemoryStore.get('MARKET#v5#489830#USD|TELEMETRY') as
+        | (Record<string, unknown> & { ttl?: number; storeBreakdown?: Record<string, unknown> })
+        | undefined;
+      expect(hydratedRecord).toBeDefined();
+      expect(hydratedRecord?.ttl).toBeGreaterThanOrEqual(Math.floor(Date.now() / 1000) + 86300);
+      expect(Object.keys(hydratedRecord?.storeBreakdown || {})).toEqual(
+        expect.arrayContaining(['Steam', 'Nuuvem', 'GOG', 'Epic Games Store']),
+      );
+
+      const callsAfterTrending = vi.mocked(getGameDealInfo).mock.calls.length;
+
+      // Immediately inspect /public/market/489830 after clicking the trending card
+      const singleGameEvent: HttpApiEvent = {
+        routeKey: 'GET /public/market/{appId}',
+        rawPath: '/public/market/489830',
+        pathParameters: {
+          appId: '489830',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/market/489830',
+          },
+        },
+      };
+
+      const detailResponse = await handler(singleGameEvent);
+      expect(detailResponse.statusCode).toBe(200);
+      const detailData = JSON.parse(detailResponse.body);
+
+      expect(detailData.appId).toBe('489830');
+      expect(detailData.title).toBe('The Elder Scrolls V: Skyrim Special Edition');
+      expect(detailData.primaryDeal?.shopName).toBe('Steam');
+      expect(detailData.primaryDeal?.salePrice).toBe(13.19);
+      expect(detailData.cheaperAlternative?.shopName).toBe('Nuuvem');
+      expect(detailData.cheaperAlternative?.salePrice).toBe(9.99);
+      expect(Object.keys(detailData.storeBreakdown || {})).toEqual(
+        expect.arrayContaining(['Steam', 'Nuuvem', 'GOG', 'Epic Games Store']),
+      );
+      expect(detailData.storeBreakdown.GOG.salePrice).toBe(11.99);
+      expect(detailData.storeBreakdown['Epic Games Store'].salePrice).toBe(13.19);
+      expect(vi.mocked(getGameDealInfo).mock.calls.length).toBe(callsAfterTrending);
+    });
+
+    it('should enforce bounded concurrency during trending resolution and avoid caching degraded or Steam-only titles', async () => {
+      const sixteenCandidates: SteamTrendingEntry[] = Array.from({ length: 16 }, (_, idx) => {
+        const appId = 880001 + idx;
+        return {
+          rank: idx + 1,
+          appId,
+          name: `Trending Title ${appId}`,
+          currentPlayers: 50000 - idx * 500,
+          priceText: '$ 29.99',
+          headerImage: `https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/${appId}/header.jpg`,
+        };
+      });
+
+      vi.mocked(getSteamTrendingGames).mockResolvedValueOnce(sixteenCandidates);
+
+      let inFlight = 0;
+      let maxInFlight = 0;
+
+      vi.mocked(getGameDealInfo).mockImplementation(async (rawId): Promise<GameDealInfo | null> => {
+        inFlight += 1;
+        if (inFlight > maxInFlight) {
+          maxInFlight = inFlight;
+        }
+        try {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          const cleanId = String(rawId);
+
+          if (cleanId === '880001') {
+            return {
+              gameId: 'steam_880001',
+              title: 'Trending Title 880001',
+              imageUrl: 'https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/880001/header.jpg',
+              reviewScore: 80,
+              steamAppId: '880001',
+              dealType: 'CURATED_DEAL',
+              isAllTimeLow: false,
+              allTimeLowPrice: null,
+              expiry: null,
+              primaryDeal: {
+                shopName: 'Steam',
+                salePrice: 29.99,
+                regularPrice: 29.99,
+                cutPercent: 0,
+                url: 'https://store.steampowered.com/app/880001/',
+                expiry: null,
+                currency: 'USD',
+                currencySymbol: '$',
+              },
+              cheaperAlternative: null,
+              storeBreakdown: {
+                Steam: {
+                  shopName: 'Steam',
+                  salePrice: 29.99,
+                  regularPrice: 29.99,
+                  cutPercent: 0,
+                  url: 'https://store.steampowered.com/app/880001/',
+                  expiry: null,
+                  currency: 'USD',
+                  currencySymbol: '$',
+                },
+              },
+              alternativeCheckStatus: 'degraded',
+              alternativeCheckDegraded: true,
+            };
+          }
+
+          if (cleanId === '880003') {
+            return {
+              gameId: 'steam_880003',
+              title: 'Trending Title 880003',
+              imageUrl: 'https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/880003/header.jpg',
+              reviewScore: 91,
+              steamAppId: '880003',
+              dealType: 'CURATED_DEAL',
+              isAllTimeLow: false,
+              allTimeLowPrice: 14.99,
+              expiry: null,
+              primaryDeal: {
+                shopName: 'Steam',
+                salePrice: 19.99,
+                regularPrice: 39.99,
+                cutPercent: 50,
+                url: 'https://store.steampowered.com/app/880003/',
+                expiry: null,
+                currency: 'USD',
+                currencySymbol: '$',
+              },
+              cheaperAlternative: {
+                shopName: 'GOG',
+                salePrice: 14.99,
+                regularPrice: 39.99,
+                cutPercent: 63,
+                url: 'https://www.gog.com/game/trending_title_880003',
+                expiry: null,
+                currency: 'USD',
+                currencySymbol: '$',
+              },
+              storeBreakdown: {
+                Steam: {
+                  shopName: 'Steam',
+                  salePrice: 19.99,
+                  regularPrice: 39.99,
+                  cutPercent: 50,
+                  url: 'https://store.steampowered.com/app/880003/',
+                  expiry: null,
+                  currency: 'USD',
+                  currencySymbol: '$',
+                },
+                GOG: {
+                  shopName: 'GOG',
+                  salePrice: 14.99,
+                  regularPrice: 39.99,
+                  cutPercent: 63,
+                  url: 'https://www.gog.com/game/trending_title_880003',
+                  expiry: null,
+                  currency: 'USD',
+                  currencySymbol: '$',
+                },
+              },
+              alternativeCheckStatus: 'confirmed',
+              alternativeCheckDegraded: false,
+            };
+          }
+
+          // Steam-only non-degraded response (0 partner deals) for 880002 and others
+          return {
+            gameId: `steam_${cleanId}`,
+            title: `Trending Title ${cleanId}`,
+            imageUrl: `https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/${cleanId}/header.jpg`,
+            reviewScore: 85,
+            steamAppId: cleanId,
+            dealType: 'CURATED_DEAL',
+            isAllTimeLow: false,
+            allTimeLowPrice: 29.99,
+            expiry: null,
+            primaryDeal: {
+              shopName: 'Steam',
+              salePrice: 29.99,
+              regularPrice: 29.99,
+              cutPercent: 0,
+              url: `https://store.steampowered.com/app/${cleanId}/`,
+              expiry: null,
+              currency: 'USD',
+              currencySymbol: '$',
+            },
+            cheaperAlternative: null,
+            storeBreakdown: {
+              Steam: {
+                shopName: 'Steam',
+                salePrice: 29.99,
+                regularPrice: 29.99,
+                cutPercent: 0,
+                url: `https://store.steampowered.com/app/${cleanId}/`,
+                expiry: null,
+                currency: 'USD',
+                currencySymbol: '$',
+              },
+            },
+            alternativeCheckStatus: 'confirmed',
+            alternativeCheckDegraded: false,
+          };
+        } finally {
+          inFlight -= 1;
+        }
+      });
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/market/trending',
+        rawPath: '/public/market/trending',
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/market/trending',
+          },
+        },
+      };
+
+      const response = await handler(event);
+      expect(response.statusCode).toBe(200);
+      const data = JSON.parse(response.body);
+      expect(data.length).toBe(16);
+
+      // Verify bounded worker concurrency (<= 4 simultaneous ITAD calls)
+      expect(maxInFlight).toBeLessThanOrEqual(4);
+      expect(maxInFlight).toBeGreaterThanOrEqual(2);
+
+      // Verify Zero Negative Caching on MARKET#v5 for degraded (880001) & Steam-only (880002),
+      // while healthy multi-store (880003) IS persisted
+      const putPks = ddbMock.commandCalls(PutCommand).map((call) => String(call.args[0].input.Item?.PK || ''));
+      expect(putPks).not.toContain('MARKET#v5#880001#USD');
+      expect(putPks).not.toContain('MARKET#v5#880002#USD');
+      expect(putPks).toContain('MARKET#v5#880003#USD');
     });
   });
 

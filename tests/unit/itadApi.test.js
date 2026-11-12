@@ -1115,6 +1115,70 @@ describe('ITAD API Utilities', () => {
         warnSpy.mockRestore();
       }
     });
+
+    it('should preserve all discovered stores when /games/historylow/v1 fails while /games/prices/v3 succeeds', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        globalThis.fetch = vi.fn(async (url) => {
+          const urlStr = String(url);
+          if (urlStr.includes('store.steampowered.com/api/appdetails')) {
+            return {
+              ok: true,
+              json: async () => ({
+                '489830': {
+                  success: true,
+                  data: {
+                    name: 'The Elder Scrolls V: Skyrim Special Edition',
+                    price_overview: { initial: 3999, final: 1319, discount_percent: 67 },
+                  },
+                },
+              }),
+            };
+          }
+          if (urlStr.includes('/games/lookup/v1')) {
+            return {
+              ok: true,
+              json: async () => ({ found: true, game: { id: 'uuid-skyrim-se' } }),
+            };
+          }
+          if (urlStr.includes('/games/prices/v3')) {
+            return {
+              ok: true,
+              json: async () => [
+                {
+                  id: 'uuid-skyrim-se',
+                  deals: [
+                    { shop: { name: 'Steam' }, price: { amount: 13.19 }, regular: { amount: 39.99 }, cut: 67, url: 'https://store.steampowered.com/app/489830/' },
+                    { shop: { name: 'Nuuvem' }, price: { amount: 9.99 }, regular: { amount: 39.99 }, cut: 75, url: 'https://www.nuuvem.com/item/skyrim-se' },
+                    { shop: { name: 'GOG' }, price: { amount: 11.99 }, regular: { amount: 39.99 }, cut: 70, url: 'https://www.gog.com/game/skyrim_se' },
+                    { shop: { name: 'Epic Game Store' }, price: { amount: 13.19 }, regular: { amount: 39.99 }, cut: 67, url: 'https://store.epicgames.com/p/skyrim-se' },
+                  ],
+                },
+              ],
+            };
+          }
+          if (urlStr.includes('/games/historylow/v1')) {
+            throw new Error('historylow timeout');
+          }
+          return { ok: false, status: 404 };
+        });
+
+        const deal = await getGameDealInfo('489830', 'USD', 'The Elder Scrolls V: Skyrim Special Edition');
+
+        expect(deal).toBeDefined();
+        expect(deal?.alternativeCheckDegraded).toBe(false);
+        expect(deal?.alternativeCheckStatus).toBe('confirmed');
+        expect(deal?.primaryDeal?.shopName).toBe('Steam');
+        expect(deal?.primaryDeal?.salePrice).toBe(13.19);
+        expect(deal?.cheaperAlternative?.shopName).toBe('Nuuvem');
+        expect(deal?.cheaperAlternative?.salePrice).toBe(9.99);
+        expect(Object.keys(deal?.storeBreakdown || {})).toEqual(
+          expect.arrayContaining(['Steam', 'Nuuvem', 'GOG', 'Epic Games Store']),
+        );
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
   });
   describe('fetchSteamStoreAppDetails', () => {
     let originalFetch;
@@ -1177,6 +1241,21 @@ describe('ITAD API Utilities', () => {
 
     it('should return null when appId is empty', async () => {
       const details = await fetchSteamStoreAppDetails('', 'us');
+      expect(details).toBeNull();
+    });
+
+    it('should return null when Valve responds with empty data array', async () => {
+      globalThis.fetch = vi.fn(async () => ({
+        ok: true,
+        json: async () => ({
+          '2999999': {
+            success: true,
+            data: [],
+          },
+        }),
+      }));
+
+      const details = await fetchSteamStoreAppDetails('2999999', 'us', undefined, 1500);
       expect(details).toBeNull();
     });
   });

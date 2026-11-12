@@ -492,7 +492,11 @@ export async function fetchSteamStoreAppDetails(
 
       if (steamRes.ok) {
         const steamData = (await steamRes.json()) as RawSteamAppDetailsMap;
-        return steamData?.[appId]?.data || null;
+        const rawData = steamData?.[appId]?.data;
+        if (!rawData || Array.isArray(rawData) || typeof rawData !== 'object') {
+          return null;
+        }
+        return rawData;
       }
     } catch (steamErr: unknown) {
       if (timeoutCtrl.signal.aborted) {
@@ -769,52 +773,67 @@ export async function getGameDealInfo(
 
       let primaryItadId = itadGameId || null;
 
-      // Step 2: Immediate query for primary ITAD ID
-      if (primaryItadId) {
-        try {
-          const priceUrl = `${ITAD_BASE_URL}/games/prices/v3?key=${itadKey}&country=${itadCountry}`;
-          const historyUrl = `${ITAD_BASE_URL}/games/historylow/v1?key=${itadKey}&country=${itadCountry}`;
+      const queryPricesAndHistory = async (targetItadId: string): Promise<boolean> => {
+        const priceUrl = `${ITAD_BASE_URL}/games/prices/v3?key=${itadKey}&country=${itadCountry}`;
+        const historyUrl = `${ITAD_BASE_URL}/games/historylow/v1?key=${itadKey}&country=${itadCountry}`;
+        const requestBody = JSON.stringify([targetItadId]);
 
-          const [priceRes, historyRes] = await Promise.all([
-            fetchItadWithRetry(
+        const priceTask = (async (): Promise<boolean> => {
+          try {
+            const priceRes = await fetchItadWithRetry(
               priceUrl,
               {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'User-Agent': USER_AGENT },
-                body: JSON.stringify([primaryItadId]),
+                body: requestBody,
               },
               activeItadSignal,
-            ),
-            fetchItadWithRetry(
+            );
+            if (priceRes.ok) {
+              primaryPricesSucceeded = true;
+              const priceData = (await priceRes.json()) as RawItadPriceOverviewItem[];
+              ingestDeals(priceData, false);
+              return true;
+            }
+            alternativeCheckDegraded = true;
+            alternativeCheckStatus = 'degraded';
+            return false;
+          } catch (primaryErr: unknown) {
+            alternativeCheckDegraded = true;
+            alternativeCheckStatus = 'degraded';
+            const msg = primaryErr instanceof Error ? primaryErr.message : String(primaryErr);
+            console.error('ITAD primary prices/history query error:', msg);
+            return false;
+          }
+        })();
+
+        const historyTask = (async (): Promise<void> => {
+          try {
+            const historyRes = await fetchItadWithRetry(
               historyUrl,
               {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'User-Agent': USER_AGENT },
-                body: JSON.stringify([primaryItadId]),
+                body: requestBody,
               },
               activeItadSignal,
-            ),
-          ]);
-
-          if (priceRes.ok) {
-            primaryPricesSucceeded = true;
-            const priceData = (await priceRes.json()) as RawItadPriceOverviewItem[];
-            ingestDeals(priceData, false);
-          } else {
-            alternativeCheckDegraded = true;
-            alternativeCheckStatus = 'degraded';
+            );
+            if (historyRes.ok) {
+              const historyData = (await historyRes.json()) as RawItadHistoryLowItem[];
+              historyLow = historyData?.[0]?.low?.price?.amount ?? null;
+            }
+          } catch {
+            // History low lookup is advisory; do not discard discovered store prices
           }
+        })();
 
-          if (historyRes.ok) {
-            const historyData = (await historyRes.json()) as RawItadHistoryLowItem[];
-            historyLow = historyData?.[0]?.low?.price?.amount ?? null;
-          }
-        } catch (primaryErr: unknown) {
-          alternativeCheckDegraded = true;
-          alternativeCheckStatus = 'degraded';
-          const msg = primaryErr instanceof Error ? primaryErr.message : String(primaryErr);
-          console.error('ITAD primary prices/history query error:', msg);
-        }
+        const [priceOutcome] = await Promise.allSettled([priceTask, historyTask]);
+        return priceOutcome.status === 'fulfilled' && priceOutcome.value;
+      };
+
+      // Step 2: Immediate query for primary ITAD ID
+      if (primaryItadId) {
+        await queryPricesAndHistory(primaryItadId);
       }
 
       // Step 3 (Conditional Secondary Edition Search):
@@ -878,47 +897,9 @@ export async function getGameDealInfo(
                 primaryItadId = secondaryEditionIds.shift()!;
                 itadGameId = primaryItadId;
 
-                try {
-                  const priceUrl = `${ITAD_BASE_URL}/games/prices/v3?key=${itadKey}&country=${itadCountry}`;
-                  const historyUrl = `${ITAD_BASE_URL}/games/historylow/v1?key=${itadKey}&country=${itadCountry}`;
-                  const [pRes, hRes] = await Promise.all([
-                    fetchItadWithRetry(
-                      priceUrl,
-                      {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json', 'User-Agent': USER_AGENT },
-                        body: JSON.stringify([primaryItadId]),
-                      },
-                      activeItadSignal,
-                    ),
-                    fetchItadWithRetry(
-                      historyUrl,
-                      {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json', 'User-Agent': USER_AGENT },
-                        body: JSON.stringify([primaryItadId]),
-                      },
-                      activeItadSignal,
-                    ),
-                  ]);
-
-                  if (pRes.ok) {
-                    primaryPricesSucceeded = true;
-                    const pData = (await pRes.json()) as RawItadPriceOverviewItem[];
-                    ingestDeals(pData, false);
-                  } else {
-                    secondaryCompletedCleanly = false;
-                    alternativeCheckDegraded = true;
-                    alternativeCheckStatus = 'degraded';
-                  }
-                  if (hRes.ok) {
-                    const hData = (await hRes.json()) as RawItadHistoryLowItem[];
-                    historyLow = hData?.[0]?.low?.price?.amount ?? null;
-                  }
-                } catch {
+                const primaryOk = await queryPricesAndHistory(primaryItadId);
+                if (!primaryOk) {
                   secondaryCompletedCleanly = false;
-                  alternativeCheckDegraded = true;
-                  alternativeCheckStatus = 'degraded';
                 }
               }
 
