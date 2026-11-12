@@ -45,6 +45,7 @@ import {
 
 import { getHowLongToBeatStats } from '../utils/hltbNative.js';
 import {
+  DEFAULT_AUTH_CALLBACK_URL,
   generateStateToken,
   validateAndConsumeStateToken,
   buildSteamLoginUrl,
@@ -85,7 +86,7 @@ const TABLE_NAME = process.env.TABLE_NAME || '';
 const PUBLIC_KEY = process.env.DISCORD_PUBLIC_KEY || '';
 const STEAM_API_KEY = process.env.STEAM_API_KEY || '';
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN || '';
-const AUTH_CALLBACK_URL = process.env.AUTH_CALLBACK_URL || '';
+const AUTH_CALLBACK_URL = (process.env.AUTH_CALLBACK_URL || '').trim() || DEFAULT_AUTH_CALLBACK_URL;
 const WEB_APP_URL = process.env.WEB_APP_URL || '';
 
 const RESPONSE_TYPES = {

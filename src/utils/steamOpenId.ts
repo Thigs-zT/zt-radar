@@ -24,6 +24,9 @@ const STEAM_CLAIMED_ID_PATTERN = /^https:\/\/steamcommunity\.com\/openid\/id\/(\
 // State token TTL: 10 minutes in seconds
 const STATE_TOKEN_TTL_SECONDS = 600;
 
+/** Default public Steam OpenID callback URL used when AUTH_CALLBACK_URL is empty or omitted. */
+export const DEFAULT_AUTH_CALLBACK_URL = 'https://ztradar.app/auth/steam/callback';
+
 const PALETTE_STEAM_ACCENT = 0x66c0f4;
 
 /**
@@ -112,6 +115,26 @@ export async function validateAndConsumeStateToken(
   return isValid;
 }
 
+function buildOpenIdSetupUrl(baseCallbackUrl: string | undefined, queryString: string): string {
+  const effectiveCallbackUrl = (baseCallbackUrl || '').trim() || DEFAULT_AUTH_CALLBACK_URL;
+  const returnTo = `${effectiveCallbackUrl}?${queryString}`;
+
+  // Derive realm from the callback base URL (scheme + host)
+  const callbackParsed = new URL(effectiveCallbackUrl);
+  const realm = `${callbackParsed.protocol}//${callbackParsed.host}/`;
+
+  const params = new URLSearchParams({
+    'openid.ns': 'http://specs.openid.net/auth/2.0',
+    'openid.mode': 'checkid_setup',
+    'openid.return_to': returnTo,
+    'openid.realm': realm,
+    'openid.identity': 'http://specs.openid.net/auth/2.0/identifier_select',
+    'openid.claimed_id': 'http://specs.openid.net/auth/2.0/identifier_select',
+  });
+
+  return `${STEAM_OPENID_ENDPOINT}?${params.toString()}`;
+}
+
 /**
  * Constructs the full Steam OpenID 2.0 login redirect URL.
  *
@@ -126,22 +149,10 @@ export function buildSteamLoginUrl(
   userId: string,
 ): string {
   // Embed both user_id and state into return_to so the callback handler can resolve the user
-  const returnTo = `${baseCallbackUrl}?user_id=${encodeURIComponent(userId)}&state=${encodeURIComponent(stateToken)}`;
-
-  // Derive realm from the callback base URL (scheme + host)
-  const callbackParsed = new URL(baseCallbackUrl);
-  const realm = `${callbackParsed.protocol}//${callbackParsed.host}/`;
-
-  const params = new URLSearchParams({
-    'openid.ns': 'http://specs.openid.net/auth/2.0',
-    'openid.mode': 'checkid_setup',
-    'openid.return_to': returnTo,
-    'openid.realm': realm,
-    'openid.identity': 'http://specs.openid.net/auth/2.0/identifier_select',
-    'openid.claimed_id': 'http://specs.openid.net/auth/2.0/identifier_select',
-  });
-
-  return `${STEAM_OPENID_ENDPOINT}?${params.toString()}`;
+  return buildOpenIdSetupUrl(
+    baseCallbackUrl,
+    `user_id=${encodeURIComponent(userId)}&state=${encodeURIComponent(stateToken)}`,
+  );
 }
 
 /**
@@ -340,7 +351,7 @@ export function validateWebRedirectUri(redirectUri: string | undefined | null, w
 
   const origin = parsed.origin;
   const isDevOrigin = WEB_ALLOWED_DEV_ORIGINS.includes(origin);
-  const isZtRadarDomain =
+  const isZtRadar =
     parsed.protocol === 'https:' &&
     (parsed.hostname === 'ztradar.app' ||
       (parsed.hostname.endsWith('.ztradar.app') && parsed.hostname.length > '.ztradar.app'.length));
@@ -348,7 +359,7 @@ export function validateWebRedirectUri(redirectUri: string | undefined | null, w
     parsed.protocol === 'https:' && parsed.hostname.endsWith('.pages.dev') && parsed.hostname.length > '.pages.dev'.length;
   const isConfigured = configuredOrigin !== '' && origin === configuredOrigin;
 
-  if (!isDevOrigin && !isZtRadarDomain && !isPagesDev && !isConfigured) return null;
+  if (!isDevOrigin && !isPagesDev && !isZtRadar && !isConfigured) return null;
 
   parsed.hash = '';
   return parsed.toString();
@@ -427,24 +438,17 @@ export async function consumeWebAuthState(
  * Constructs the Steam OpenID 2.0 login URL for the web flow, embedding mode=web and state in return_to.
  *
  * @param stateToken - CSRF state token.
- * @param baseCallbackUrl - Public HTTPS URL of the auth callback route.
+ * @param baseCallbackUrl - Public HTTPS URL of the auth callback route (defaults to ztradar.app).
  * @returns The fully encoded Steam OpenID redirect URL.
  */
-export function buildSteamWebLoginUrl(stateToken: string, baseCallbackUrl: string): string {
-  const returnTo = `${baseCallbackUrl}?mode=web&state=${encodeURIComponent(stateToken)}`;
-  const callbackParsed = new URL(baseCallbackUrl);
-  const realm = `${callbackParsed.protocol}//${callbackParsed.host}/`;
-
-  const params = new URLSearchParams({
-    'openid.ns': 'http://specs.openid.net/auth/2.0',
-    'openid.mode': 'checkid_setup',
-    'openid.return_to': returnTo,
-    'openid.realm': realm,
-    'openid.identity': 'http://specs.openid.net/auth/2.0/identifier_select',
-    'openid.claimed_id': 'http://specs.openid.net/auth/2.0/identifier_select',
-  });
-
-  return `${STEAM_OPENID_ENDPOINT}?${params.toString()}`;
+export function buildSteamWebLoginUrl(
+  stateToken: string,
+  baseCallbackUrl: string = DEFAULT_AUTH_CALLBACK_URL,
+): string {
+  return buildOpenIdSetupUrl(
+    baseCallbackUrl,
+    `mode=web&state=${encodeURIComponent(stateToken)}`,
+  );
 }
 
 /**
