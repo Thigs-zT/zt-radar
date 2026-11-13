@@ -1280,6 +1280,80 @@ describe('Public Web API Handler', () => {
       const marketPut = putCalls.find((call) => call.args[0].input.Item?.PK === 'MARKET#v5#489830#USD');
       expect(marketPut).toBeUndefined();
     });
+
+    it('should forward priceHistory and allTimeLowPrice into GET /public/market/{appId}, persist to DynamoDB, and restore from cache', async () => {
+      const sampleHistory = [
+        {
+          timestamp: '2024-05-01T12:00:00.000Z',
+          shopId: 'steam',
+          shopName: 'Steam',
+          priceUsd: 59.99,
+          priceBrl: null,
+          price: 59.99,
+          regularPrice: 59.99,
+          cutPercent: 0,
+          isAllTimeLow: false,
+        },
+        {
+          timestamp: '2024-11-28T12:00:00.000Z',
+          shopId: 'gog',
+          shopName: 'GOG',
+          priceUsd: 44.99,
+          priceBrl: null,
+          price: 44.99,
+          regularPrice: 59.99,
+          cutPercent: 25,
+          isAllTimeLow: true,
+        },
+      ];
+
+      vi.mocked(getGameDealInfo).mockResolvedValueOnce({
+        ...mockDealBaldursGate,
+        allTimeLowPrice: 44.99,
+        priceHistory: sampleHistory,
+      });
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/market/{appId}',
+        rawPath: '/public/market/1086940',
+        pathParameters: {
+          appId: '1086940',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/market/1086940',
+          },
+        },
+      };
+
+      const liveResponse = await handler(event);
+      expect(liveResponse.statusCode).toBe(200);
+
+      const liveData = JSON.parse(liveResponse.body);
+      expect(liveData.allTimeLowPrice).toBe(44.99);
+      expect(liveData.priceHistory).toEqual(sampleHistory);
+
+      // Verify DynamoDB PutCommand persisted priceHistory and allTimeLowPrice alongside storeBreakdown
+      const putCalls = ddbMock.commandCalls(PutCommand);
+      const marketPut = putCalls.find((call) => call.args[0].input.Item?.PK === 'MARKET#v5#1086940#USD');
+      expect(marketPut).toBeDefined();
+      expect(marketPut?.args[0].input.Item?.allTimeLowPrice).toBe(44.99);
+      expect(marketPut?.args[0].input.Item?.priceHistory).toEqual(sampleHistory);
+
+      // Verify subsequent cache hit restores priceHistory and allTimeLowPrice without calling getGameDealInfo
+      vi.mocked(getGameDealInfo).mockClear();
+      ddbMock.on(QueryCommand).resolves({
+        Items: marketPut?.args[0].input.Item ? [marketPut.args[0].input.Item] : [],
+      });
+
+      const cachedResponse = await handler(event);
+      expect(cachedResponse.statusCode).toBe(200);
+      const cachedData = JSON.parse(cachedResponse.body);
+      expect(cachedData.allTimeLowPrice).toBe(44.99);
+      expect(cachedData.priceHistory).toEqual(sampleHistory);
+      expect(getGameDealInfo).not.toHaveBeenCalled();
+    });
   });
 
   describe('Route: GET /public/market', () => {

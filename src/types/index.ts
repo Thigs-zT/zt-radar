@@ -118,6 +118,28 @@ export interface StoreDeal {
   currencySymbol: string;
 }
 
+/** A single chronological price checkpoint for historical price trendline charts. */
+export interface PricePoint {
+  /** ISO 8601 timestamp of the price checkpoint. */
+  timestamp: string;
+  /** Normalized storefront identifier ('steam' | 'nuuvem' | 'epic' | 'gog'). */
+  shopId: 'steam' | 'nuuvem' | 'epic' | 'gog' | string;
+  /** Display name of the storefront (Steam, Nuuvem, Epic Games Store, GOG). */
+  shopName?: string;
+  /** Recorded promotional price in USD (present when currency is USD, null when BRL). */
+  priceUsd: number | null;
+  /** Recorded promotional price in BRL (present when currency is BRL, null when USD). */
+  priceBrl: number | null;
+  /** Recorded promotional price in the active request currency. */
+  price?: number;
+  /** Full undiscounted retail price at the checkpoint, if available. */
+  regularPrice?: number;
+  /** Discount percentage (0–100) at the checkpoint, if available. */
+  cutPercent?: number;
+  /** Whether this price point matches or sets the all-time low record. */
+  isAllTimeLow: boolean;
+}
+
 /**
  * Fully resolved game deal info returned by getGameDealInfo().
  * Aggregates Steam Store data, ITAD multi-store comparison, and historical low.
@@ -139,6 +161,8 @@ export interface GameDealInfo {
   isAllTimeLow?: boolean;
   /** Historical all-time low price. Null if ITAD data is unavailable. */
   allTimeLowPrice?: number | null;
+  /** Chronological price history checkpoints for trendline visualization. */
+  priceHistory?: PricePoint[];
   /** Promotion expiry timestamp or null if perpetual. */
   expiry?: string | number | null;
   /** The primary monitored storefront offer (Steam by default). */
@@ -716,6 +740,7 @@ export interface PublicMarketTelemetry extends Omit<GameDealInfo, 'primaryDeal'>
   salePrice?: number | null;
   regularPrice?: number | null;
   primaryDeal?: StoreDeal | null;
+  priceHistory?: PricePoint[];
 }
 
 /** Public Duel payload response retrieved from DynamoDB. */

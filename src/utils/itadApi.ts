@@ -6,7 +6,7 @@
  * Supported stores: Steam, Epic Games Store, Nuuvem, GOG.
  */
 
-import type { StoreDeal, GameDealInfo, AutocompleteChoice } from '../types/index.js';
+import type { StoreDeal, GameDealInfo, AutocompleteChoice, PricePoint } from '../types/index.js';
 
 const ITAD_API_KEY = process.env.ITAD_API_KEY;
 const ITAD_BASE_URL = 'https://api.isthereanydeal.com';
@@ -395,6 +395,310 @@ interface RawItadHistoryLowItem {
   };
 }
 
+export interface RawItadHistoryLogEntry {
+  timestamp?: string | number;
+  date?: string | number;
+  shop?: {
+    id?: number | string;
+    name?: string;
+  };
+  shopId?: number | string;
+  deal?: {
+    price?: { amount?: number; currency?: string };
+    regular?: { amount?: number; currency?: string };
+    cut?: number;
+  };
+  price?: { amount?: number; currency?: string } | number;
+  regular?: { amount?: number; currency?: string } | number;
+  cut?: number;
+}
+
+/** Verified ITAD v2 shop IDs: 61 (Steam), 16 (Epic Games Store), 35 (GOG), 50 (Nuuvem). */
+export const ITAD_VERIFIED_SHOP_IDS = [61, 16, 35, 50] as const;
+export const MAX_PRICE_HISTORY_POINTS = 15;
+
+const ITAD_SHOP_ID_TO_STORE: Record<string, { shopId: 'steam' | 'nuuvem' | 'epic' | 'gog'; shopName: string }> = {
+  '61': { shopId: 'steam', shopName: 'Steam' },
+  '16': { shopId: 'epic', shopName: 'Epic Games Store' },
+  '35': { shopId: 'gog', shopName: 'GOG' },
+  '50': { shopId: 'nuuvem', shopName: 'Nuuvem' },
+};
+
+const STORE_NAME_TO_SHOP_ID: Record<string, 'steam' | 'nuuvem' | 'epic' | 'gog'> = {
+  Steam: 'steam',
+  'Epic Games Store': 'epic',
+  GOG: 'gog',
+  Nuuvem: 'nuuvem',
+};
+
+function resolveItadHistoryStore(
+  rawShop: { id?: number | string; name?: string } | string | number | undefined,
+): { shopId: 'steam' | 'nuuvem' | 'epic' | 'gog'; shopName: string } | null {
+  if (rawShop === undefined || rawShop === null) return null;
+
+  if (typeof rawShop === 'object') {
+    const rawName = typeof rawShop.name === 'string' ? rawShop.name.trim() : '';
+    if (rawName) {
+      const canonical = resolveStoreName(rawName);
+      if (!canonical) return null;
+      const shopId = STORE_NAME_TO_SHOP_ID[canonical];
+      return shopId ? { shopId, shopName: canonical } : null;
+    }
+    if (rawShop.id !== undefined && rawShop.id !== null) {
+      return ITAD_SHOP_ID_TO_STORE[String(rawShop.id).trim()] || null;
+    }
+    return null;
+  }
+
+  const key = String(rawShop).trim();
+  if (!key) return null;
+  if (ITAD_SHOP_ID_TO_STORE[key]) {
+    return ITAD_SHOP_ID_TO_STORE[key];
+  }
+
+  const canonical = resolveStoreName(key);
+  if (!canonical) return null;
+  const shopId = STORE_NAME_TO_SHOP_ID[canonical];
+  return shopId ? { shopId, shopName: canonical } : null;
+}
+
+function extractRawHistoryEntries(rawPayload: unknown): RawItadHistoryLogEntry[] {
+  if (Array.isArray(rawPayload)) {
+    if (
+      rawPayload.length > 0 &&
+      rawPayload[0] &&
+      typeof rawPayload[0] === 'object' &&
+      Array.isArray((rawPayload[0] as { history?: unknown }).history)
+    ) {
+      return rawPayload.flatMap((item) =>
+        Array.isArray((item as { history?: RawItadHistoryLogEntry[] }).history)
+          ? ((item as { history: RawItadHistoryLogEntry[] }).history)
+          : [],
+      );
+    }
+    return rawPayload as RawItadHistoryLogEntry[];
+  }
+
+  if (rawPayload && typeof rawPayload === 'object') {
+    const obj = rawPayload as { history?: unknown; list?: unknown };
+    if (Array.isArray(obj.history)) return obj.history as RawItadHistoryLogEntry[];
+    if (Array.isArray(obj.list)) return obj.list as RawItadHistoryLogEntry[];
+  }
+
+  return [];
+}
+
+/**
+ * Transforms raw ITAD /games/history/v2 log entries into sorted, deduplicated,
+ * and bounded chronological PricePoint checkpoints restricted to verified storefronts.
+ */
+export function transformItadPriceHistory(
+  rawEntries: unknown,
+  currency: string = 'USD',
+  allTimeLowPrice: number | null = null,
+  maxPoints: number = MAX_PRICE_HISTORY_POINTS,
+): PricePoint[] {
+  const entries = extractRawHistoryEntries(rawEntries);
+  if (entries.length === 0 || maxPoints <= 0) return [];
+
+  const isBrl = currency.toUpperCase().trim() === 'BRL';
+
+  interface ParsedCheckpoint {
+    epochMs: number;
+    timestamp: string;
+    shopId: 'steam' | 'nuuvem' | 'epic' | 'gog';
+    shopName: string;
+    price: number;
+    regularPrice: number;
+    cutPercent: number;
+  }
+
+  const parsed: ParsedCheckpoint[] = [];
+
+  for (const entry of entries) {
+    if (!entry || typeof entry !== 'object') continue;
+
+    const store = resolveItadHistoryStore(entry.shop ?? entry.shopId);
+    if (!store) continue;
+
+    const rawTimestamp = entry.timestamp ?? entry.date;
+    if (rawTimestamp === undefined || rawTimestamp === null || rawTimestamp === '') continue;
+    const dateObj =
+      typeof rawTimestamp === 'number'
+        ? new Date(rawTimestamp < 10000000000 ? rawTimestamp * 1000 : rawTimestamp)
+        : new Date(String(rawTimestamp));
+    const epochMs = dateObj.getTime();
+    if (Number.isNaN(epochMs)) continue;
+
+    const rawPriceVal =
+      entry.deal?.price?.amount ??
+      (typeof entry.price === 'object' && entry.price !== null ? entry.price.amount : entry.price);
+    const numPrice = Number(rawPriceVal);
+    if (!Number.isFinite(numPrice) || numPrice < 0) continue;
+    const price = Number(numPrice.toFixed(2));
+
+    const rawRegularVal =
+      entry.deal?.regular?.amount ??
+      (typeof entry.regular === 'object' && entry.regular !== null ? entry.regular.amount : entry.regular);
+    const numRegular = Number(rawRegularVal);
+    const regularPrice =
+      Number.isFinite(numRegular) && numRegular >= 0 ? Number(numRegular.toFixed(2)) : price;
+
+    const rawCut = entry.deal?.cut ?? entry.cut;
+    let cutPercent = 0;
+    if (typeof rawCut === 'number' && Number.isFinite(rawCut)) {
+      cutPercent = Math.max(0, Math.min(100, Math.round(rawCut)));
+    } else if (regularPrice > 0 && price < regularPrice) {
+      cutPercent = Math.max(0, Math.min(100, Math.round(((regularPrice - price) / regularPrice) * 100)));
+    }
+
+    parsed.push({
+      epochMs,
+      timestamp: dateObj.toISOString(),
+      shopId: store.shopId,
+      shopName: store.shopName,
+      price,
+      regularPrice,
+      cutPercent,
+    });
+  }
+
+  if (parsed.length === 0) return [];
+
+  parsed.sort((a, b) => a.epochMs - b.epochMs);
+
+  // Deduplicate exact consecutive duplicates (same timestamp, shopId, price)
+  const deduped: ParsedCheckpoint[] = [];
+  for (const item of parsed) {
+    const prev = deduped[deduped.length - 1];
+    if (prev && prev.timestamp === item.timestamp && prev.shopId === item.shopId && prev.price === item.price) {
+      continue;
+    }
+    deduped.push(item);
+  }
+
+  let effectiveAtl: number | null =
+    typeof allTimeLowPrice === 'number' && Number.isFinite(allTimeLowPrice) && allTimeLowPrice >= 0
+      ? Number(allTimeLowPrice.toFixed(2))
+      : null;
+
+  const positivePrices = deduped.map((p) => p.price).filter((p) => p > 0);
+  if (positivePrices.length > 0) {
+    const minPositive = Math.min(...positivePrices);
+    if (effectiveAtl === null || minPositive < effectiveAtl) {
+      effectiveAtl = minPositive;
+    }
+  } else if (effectiveAtl === null) {
+    effectiveAtl = Math.min(...deduped.map((p) => p.price));
+  }
+
+  const isAtlPoint = (pt: ParsedCheckpoint): boolean =>
+    effectiveAtl !== null && pt.price <= effectiveAtl + 0.001;
+
+  let compacted = deduped;
+  if (compacted.length > maxPoints) {
+    // Collapse consecutive redundant checkpoints with identical shopId and price,
+    // preserving first, last, and any ATL inflection points.
+    const reduced: ParsedCheckpoint[] = [];
+    for (let i = 0; i < compacted.length; i++) {
+      const curr = compacted[i];
+      const prev = reduced[reduced.length - 1];
+      const isEdge = i === 0 || i === compacted.length - 1;
+      if (!isEdge && !isAtlPoint(curr) && prev && prev.shopId === curr.shopId && prev.price === curr.price) {
+        continue;
+      }
+      reduced.push(curr);
+    }
+    compacted = reduced;
+  }
+
+  let sampled = compacted;
+  if (compacted.length > maxPoints) {
+    const total = compacted.length;
+    const selectedIndices = new Set<number>([0, total - 1]);
+
+    const atlIndices: number[] = [];
+    for (let i = 0; i < total; i++) {
+      if (isAtlPoint(compacted[i])) {
+        atlIndices.push(i);
+      }
+    }
+    if (atlIndices.length > 0) {
+      selectedIndices.add(atlIndices[0]);
+      selectedIndices.add(atlIndices[atlIndices.length - 1]);
+    }
+
+    if (selectedIndices.size < maxPoints && total > 2) {
+      const interiorSlots = maxPoints - selectedIndices.size;
+      for (let slot = 1; slot <= interiorSlots; slot++) {
+        const candidateIdx = Math.round((slot * (total - 1)) / (interiorSlots + 1));
+        if (!selectedIndices.has(candidateIdx)) {
+          selectedIndices.add(candidateIdx);
+        } else {
+          // Find nearest unselected interior index if collision occurred
+          for (let offset = 1; offset < total; offset++) {
+            if (candidateIdx + offset < total - 1 && !selectedIndices.has(candidateIdx + offset)) {
+              selectedIndices.add(candidateIdx + offset);
+              break;
+            }
+            if (candidateIdx - offset > 0 && !selectedIndices.has(candidateIdx - offset)) {
+              selectedIndices.add(candidateIdx - offset);
+              break;
+            }
+          }
+        }
+      }
+    }
+
+    sampled = Array.from(selectedIndices)
+      .sort((a, b) => a - b)
+      .slice(0, maxPoints)
+      .map((idx) => compacted[idx]);
+  }
+
+  return sampled.map((pt) => ({
+    timestamp: pt.timestamp,
+    shopId: pt.shopId,
+    shopName: pt.shopName,
+    priceUsd: isBrl ? null : pt.price,
+    priceBrl: isBrl ? pt.price : null,
+    price: pt.price,
+    regularPrice: pt.regularPrice,
+    cutPercent: pt.cutPercent,
+    isAllTimeLow: isAtlPoint(pt),
+  }));
+}
+
+/**
+ * Fetches chronological price history from ITAD /games/history/v2 for verified storefronts
+ * within the caller's bounded AbortSignal. Returns [] on failure so deal resolution stays resilient.
+ */
+export async function fetchItadPriceHistory(
+  itadGameId: string,
+  preferredCurrency: string,
+  itadKey: string,
+  signal: AbortSignal,
+): Promise<RawItadHistoryLogEntry[]> {
+  if (!itadGameId || !itadKey || signal.aborted) return [];
+
+  const itadCountry = preferredCurrency.toUpperCase().trim() === 'BRL' ? 'BR' : 'US';
+  const shopsParam = ITAD_VERIFIED_SHOP_IDS.join(',');
+  const historyLogUrl = `${ITAD_BASE_URL}/games/history/v2?key=${itadKey}&id=${encodeURIComponent(itadGameId)}&country=${itadCountry}&shops=${shopsParam}`;
+
+  try {
+    const res = await fetchItadWithRetry(
+      historyLogUrl,
+      { headers: { 'User-Agent': USER_AGENT } },
+      signal,
+    );
+    if (!res.ok) return [];
+    const payload = (await res.json()) as unknown;
+    return extractRawHistoryEntries(payload);
+  } catch {
+    return [];
+  }
+}
+
 const ITAD_TIMEOUT_MS = 1800;
 const STEAM_DETAILS_TIMEOUT_MS = 1500;
 const ITAD_MAX_ATTEMPTS = 2;
@@ -675,6 +979,7 @@ export async function getGameDealInfo(
       : Promise.resolve(null);
 
     let historyLow: number | null = null;
+    let rawHistoryEntries: RawItadHistoryLogEntry[] = [];
     const storeBreakdown: Record<string, StoreDeal> = {};
     let resolvedLookupTitle: string | null = null;
     let alternativeCheckStatus: 'confirmed' | 'degraded' | 'skipped' = itadKey ? 'confirmed' : 'skipped';
@@ -809,6 +1114,7 @@ export async function getGameDealInfo(
 
         const historyTask = (async (): Promise<void> => {
           try {
+            // Unbound by time windows (no `since` parameter) to guarantee true lifetime ATL since launch
             const historyRes = await fetchItadWithRetry(
               historyUrl,
               {
@@ -820,14 +1126,28 @@ export async function getGameDealInfo(
             );
             if (historyRes.ok) {
               const historyData = (await historyRes.json()) as RawItadHistoryLowItem[];
-              historyLow = historyData?.[0]?.low?.price?.amount ?? null;
+              const matchedItem =
+                (Array.isArray(historyData)
+                  ? historyData.find((item) => item.id === targetItadId) || historyData[0]
+                  : null) || null;
+              const rawLow = matchedItem?.low?.price?.amount;
+              if (typeof rawLow === 'number' && Number.isFinite(rawLow) && rawLow >= 0) {
+                historyLow = Number(rawLow.toFixed(2));
+              }
             }
           } catch {
             // History low lookup is advisory; do not discard discovered store prices
           }
         })();
 
-        const [priceOutcome] = await Promise.allSettled([priceTask, historyTask]);
+        const historyLogTask = (async (): Promise<void> => {
+          const entries = await fetchItadPriceHistory(targetItadId, currency, itadKey, activeItadSignal);
+          if (entries.length > 0) {
+            rawHistoryEntries = entries;
+          }
+        })();
+
+        const [priceOutcome] = await Promise.allSettled([priceTask, historyTask, historyLogTask]);
         return priceOutcome.status === 'fulfilled' && priceOutcome.value;
       };
 
@@ -1078,6 +1398,27 @@ export async function getGameDealInfo(
         }
       : null;
 
+    const priceHistory = transformItadPriceHistory(
+      rawHistoryEntries,
+      currency,
+      historyLow,
+      MAX_PRICE_HISTORY_POINTS,
+    );
+
+    const positiveHistoryPrices = priceHistory
+      .map((pt) => pt.price)
+      .filter((p): p is number => typeof p === 'number' && Number.isFinite(p) && p > 0);
+    if (positiveHistoryPrices.length > 0) {
+      const minHistoryPrice = Math.min(...positiveHistoryPrices);
+      if (historyLow === null || minHistoryPrice < historyLow) {
+        historyLow = minHistoryPrice;
+      }
+    }
+
+    if (historyLow !== null && absoluteCheapest.salePrice > 0 && absoluteCheapest.salePrice < historyLow) {
+      historyLow = Number(absoluteCheapest.salePrice.toFixed(2));
+    }
+
     const primaryIsAtl =
       primaryDeal.cutPercent > 0 &&
       primaryDeal.salePrice < primaryDeal.regularPrice &&
@@ -1109,6 +1450,7 @@ export async function getGameDealInfo(
       dealType: isFree ? 'FREE_TO_KEEP' : 'CURATED_DEAL',
       isAllTimeLow,
       allTimeLowPrice: historyLow,
+      priceHistory,
       expiry: primaryDeal.expiry || cheaperAlternative?.expiry || null,
       primaryDeal,
       cheaperAlternative,

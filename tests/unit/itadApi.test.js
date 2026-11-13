@@ -7,6 +7,10 @@ import {
   sanitizeTitleForItadLookup,
   isStrictEditionMatch,
   fetchSteamStoreAppDetails,
+  transformItadPriceHistory,
+  fetchItadPriceHistory,
+  ITAD_VERIFIED_SHOP_IDS,
+  MAX_PRICE_HISTORY_POINTS,
 } from '../../src/utils/itadApi.js';
 
 describe('ITAD API Utilities', () => {
@@ -1178,6 +1182,210 @@ describe('ITAD API Utilities', () => {
       } finally {
         warnSpy.mockRestore();
       }
+    });
+
+    it('should ingest chronological priceHistory from /games/history/v2, filter verified stores, and guarantee unbound lifetime ATL', async () => {
+      const capturedUrls = [];
+      globalThis.fetch = vi.fn(async (url) => {
+        const urlStr = String(url);
+        capturedUrls.push(urlStr);
+
+        if (urlStr.includes('store.steampowered.com/api/appdetails')) {
+          return {
+            ok: true,
+            json: async () => ({
+              '1091500': {
+                success: true,
+                data: {
+                  name: 'Cyberpunk 2077',
+                  header_image: 'https://example.com/cyberpunk.jpg',
+                  price_overview: { initial: 5999, final: 2999, discount_percent: 50 },
+                },
+              },
+            }),
+          };
+        }
+        if (urlStr.includes('/games/lookup/v1')) {
+          return { ok: true, json: async () => ({ found: true, game: { id: 'uuid-cp-2077' } }) };
+        }
+        if (urlStr.includes('/games/prices/v3')) {
+          return {
+            ok: true,
+            json: async () => [
+              {
+                id: 'uuid-cp-2077',
+                deals: [
+                  { shop: { name: 'Steam' }, price: { amount: 29.99 }, regular: { amount: 59.99 }, cut: 50, url: 'https://store.steampowered.com/app/1091500/' },
+                  { shop: { name: 'GOG' }, price: { amount: 29.99 }, regular: { amount: 59.99 }, cut: 50, url: 'https://gog.com/cyberpunk' },
+                ],
+              },
+            ],
+          };
+        }
+        if (urlStr.includes('/games/historylow/v1')) {
+          return {
+            ok: true,
+            json: async () => [
+              {
+                id: 'uuid-cp-2077',
+                low: { price: { amount: 19.99 } },
+              },
+            ],
+          };
+        }
+        if (urlStr.includes('/games/history/v2')) {
+          return {
+            ok: true,
+            json: async () => [
+              {
+                timestamp: '2025-11-28T10:00:00Z',
+                shop: { id: 35, name: 'GOG' },
+                deal: { price: { amount: 24.99 }, regular: { amount: 59.99 }, cut: 58 },
+              },
+              {
+                timestamp: '2024-06-27T17:00:00Z',
+                shop: { id: 61, name: 'Steam' },
+                deal: { price: { amount: 29.99 }, regular: { amount: 59.99 }, cut: 50 },
+              },
+              {
+                timestamp: '2024-12-19T18:00:00Z',
+                shop: { id: 16, name: 'Epic Games Store' },
+                deal: { price: { amount: 19.99 }, regular: { amount: 59.99 }, cut: 67 },
+              },
+              {
+                timestamp: '2025-03-14T15:00:00Z',
+                shop: { id: 50, name: 'Nuuvem' },
+                deal: { price: { amount: 22.5 }, regular: { amount: 59.99 }, cut: 62 },
+              },
+              {
+                timestamp: '2024-09-01T12:00:00Z',
+                shop: { id: 99, name: 'UnauthorizedKeyShop' },
+                deal: { price: { amount: 5.0 }, regular: { amount: 59.99 }, cut: 92 },
+              },
+            ],
+          };
+        }
+        return { ok: false, status: 404 };
+      });
+
+      const deal = await getGameDealInfo('1091500', 'USD', 'Cyberpunk 2077');
+
+      const historyLowUrl = capturedUrls.find((u) => u.includes('/games/historylow/v1'));
+      expect(historyLowUrl).toBeDefined();
+      expect(historyLowUrl).not.toContain('since=');
+
+      const historyLogUrl = capturedUrls.find((u) => u.includes('/games/history/v2'));
+      expect(historyLogUrl).toBeDefined();
+      expect(historyLogUrl).toContain('id=uuid-cp-2077');
+      expect(historyLogUrl).toContain('country=US');
+      expect(historyLogUrl).toContain(`shops=${ITAD_VERIFIED_SHOP_IDS.join(',')}`);
+      expect(historyLogUrl).not.toContain('since=');
+
+      expect(deal).toBeDefined();
+      expect(deal?.allTimeLowPrice).toBe(19.99);
+      expect(deal?.priceHistory).toBeDefined();
+      expect(deal?.priceHistory?.length).toBe(4);
+
+      // Verify strict chronological ascending sorting and unauthorized store exclusion
+      expect(deal?.priceHistory?.map((p) => p.shopId)).toEqual(['steam', 'epic', 'nuuvem', 'gog']);
+      expect(deal?.priceHistory?.[0].priceUsd).toBe(29.99);
+      expect(deal?.priceHistory?.[0].priceBrl).toBeNull();
+      expect(deal?.priceHistory?.[0].isAllTimeLow).toBe(false);
+
+      expect(deal?.priceHistory?.[1].priceUsd).toBe(19.99);
+      expect(deal?.priceHistory?.[1].isAllTimeLow).toBe(true);
+
+      expect(deal?.priceHistory?.[2].priceUsd).toBe(22.5);
+      expect(deal?.priceHistory?.[3].priceUsd).toBe(24.99);
+    });
+
+    it('should cap priceHistory to MAX_PRICE_HISTORY_POINTS while preserving start, end, and lifetime ATL inflection point', () => {
+      const rawEntries = [];
+      for (let i = 0; i < 30; i++) {
+        const day = String(i + 1).padStart(2, '0');
+        const isAtl = i === 12;
+        rawEntries.push({
+          timestamp: `2025-01-${day}T12:00:00Z`,
+          shop: { id: 61, name: 'Steam' },
+          deal: {
+            price: { amount: isAtl ? 24.9 : 100 + (i % 5) * 10 },
+            regular: { amount: 200 },
+            cut: isAtl ? 88 : 50 - (i % 5) * 5,
+          },
+        });
+      }
+
+      const points = transformItadPriceHistory(rawEntries, 'BRL', 24.9, MAX_PRICE_HISTORY_POINTS);
+
+      expect(points.length).toBe(MAX_PRICE_HISTORY_POINTS);
+      expect(points[0].timestamp).toBe('2025-01-01T12:00:00.000Z');
+      expect(points[points.length - 1].timestamp).toBe('2025-01-30T12:00:00.000Z');
+      expect(points.every((p) => p.priceUsd === null && typeof p.priceBrl === 'number')).toBe(true);
+
+      const atlPoints = points.filter((p) => p.isAllTimeLow);
+      expect(atlPoints.length).toBeGreaterThanOrEqual(1);
+      expect(atlPoints[0].priceBrl).toBe(24.9);
+
+      for (let i = 1; i < points.length; i++) {
+        expect(new Date(points[i].timestamp).getTime()).toBeGreaterThanOrEqual(
+          new Date(points[i - 1].timestamp).getTime(),
+        );
+      }
+    });
+
+    it('should gracefully keep store deals and confirmed status when /games/history/v2 fails', async () => {
+      globalThis.fetch = vi.fn(async (url) => {
+        const urlStr = String(url);
+        if (urlStr.includes('store.steampowered.com/api/appdetails')) {
+          return {
+            ok: true,
+            json: async () => ({
+              '1086940': {
+                success: true,
+                data: {
+                  name: "Baldur's Gate 3",
+                  price_overview: { initial: 5999, final: 4799, discount_percent: 20 },
+                },
+              },
+            }),
+          };
+        }
+        if (urlStr.includes('/games/lookup/v1')) {
+          return { ok: true, json: async () => ({ found: true, game: { id: 'uuid-bg3' } }) };
+        }
+        if (urlStr.includes('/games/prices/v3')) {
+          return {
+            ok: true,
+            json: async () => [
+              {
+                id: 'uuid-bg3',
+                deals: [
+                  { shop: { name: 'Steam' }, price: { amount: 47.99 }, regular: { amount: 59.99 }, cut: 20, url: 'https://steam.com' },
+                  { shop: { name: 'GOG' }, price: { amount: 44.99 }, regular: { amount: 59.99 }, cut: 25, url: 'https://gog.com' },
+                ],
+              },
+            ],
+          };
+        }
+        if (urlStr.includes('/games/historylow/v1')) {
+          return { ok: true, json: async () => [{ id: 'uuid-bg3', low: { price: { amount: 44.99 } } }] };
+        }
+        if (urlStr.includes('/games/history/v2')) {
+          return { ok: false, status: 500 };
+        }
+        return { ok: false, status: 404 };
+      });
+
+      const deal = await getGameDealInfo('1086940', 'USD');
+
+      expect(deal).toBeDefined();
+      expect(deal?.alternativeCheckDegraded).toBe(false);
+      expect(deal?.alternativeCheckStatus).toBe('confirmed');
+      expect(deal?.allTimeLowPrice).toBe(44.99);
+      expect(deal?.priceHistory).toEqual([]);
+
+      const directEntries = await fetchItadPriceHistory('uuid-bg3', 'USD', 'test_mock_itad_key', AbortSignal.timeout(500));
+      expect(directEntries).toEqual([]);
     });
   });
   describe('fetchSteamStoreAppDetails', () => {
