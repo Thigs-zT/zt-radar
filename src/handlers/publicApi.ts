@@ -19,6 +19,7 @@ import type {
   SteamTrendingEntry,
   TrendingGameSummary,
   StoreDeal,
+  PricePoint,
   PublicWishlistItem,
   PublicWishlistResponse,
   PublicBacklogItem,
@@ -40,7 +41,7 @@ import type {
   FriendsTelemetryApiResult,
 } from '../types/index.js';
 import { getHowLongToBeatStats } from '../utils/hltbNative.js';
-import { getGameDealInfo } from '../utils/itadApi.js';
+import { getGameDealInfo, synthesizeAnchorPriceHistory } from '../utils/itadApi.js';
 import { getSteamTrendingGames } from '../utils/platformStatus.js';
 import {
   resolveSteamId,
@@ -240,9 +241,10 @@ export function buildMarketTelemetryPlaceholder(
   };
 }
 
+export const MARKET_CACHE_VERSION = 'v6';
 const MARKET_CACHE_TTL_SECONDS = 86400;
 const MARKET_DEAL_LOOKUP_TIMEOUT_MS = 2500;
-const TRENDING_ENRICH_CONCURRENCY = 4;
+const TRENDING_ENRICH_CONCURRENCY = 2;
 
 /**
  * Ensures all discovered storefronts from storeBreakdown, primaryDeal, and cheaperAlternative
@@ -322,6 +324,18 @@ function buildPublicMarketTelemetry(
     primaryDeal,
     dealInfo.cheaperAlternative || null,
   );
+  let priceHistory: PricePoint[] = Array.isArray(dealInfo.priceHistory)
+    ? dealInfo.priceHistory
+    : [];
+  if (priceHistory.length < 2) {
+    priceHistory = synthesizeAnchorPriceHistory(
+      priceHistory,
+      primaryDeal,
+      dealInfo.cheaperAlternative || null,
+      dealInfo.allTimeLowPrice ?? null,
+      primaryDeal.currency,
+    );
+  }
 
   return {
     ...dealInfo,
@@ -333,7 +347,7 @@ function buildPublicMarketTelemetry(
     primaryDeal,
     cheaperAlternative: dealInfo.cheaperAlternative || null,
     storeBreakdown,
-    priceHistory: Array.isArray(dealInfo.priceHistory) ? dealInfo.priceHistory : [],
+    priceHistory,
     alternativeCheckStatus: dealInfo.alternativeCheckStatus || 'confirmed',
     alternativeCheckDegraded: dealInfo.alternativeCheckDegraded ?? false,
     isPlatformExclusive: dealInfo.isPlatformExclusive,
@@ -345,7 +359,7 @@ function buildPublicMarketTelemetry(
 }
 
 /**
- * Persists verified multi-store telemetry to DynamoDB (PK: MARKET#v5#${appId}#${currency}, SK: TELEMETRY)
+ * Persists verified multi-store telemetry to DynamoDB (PK: MARKET#v6#${appId}#${currency}, SK: TELEMETRY)
  * with 24h TTL. Never persists degraded or Steam-only (0 partner deals) records.
  */
 export async function persistMarketTelemetryCache(
@@ -368,7 +382,7 @@ export async function persistMarketTelemetryCache(
       new PutCommand({
         TableName: tableName,
         Item: {
-          PK: `MARKET#v5#${cleanAppId}#${normalizedCurrency}`,
+          PK: `MARKET#${MARKET_CACHE_VERSION}#${cleanAppId}#${normalizedCurrency}`,
           SK: 'TELEMETRY',
           ...telemetry,
           ttl: nowSec + MARKET_CACHE_TTL_SECONDS,
@@ -403,7 +417,7 @@ export async function getCachedMarketTelemetry(
         TableName: tableName,
         KeyConditionExpression: 'PK = :pk AND SK = :sk',
         ExpressionAttributeValues: {
-          ':pk': `MARKET#v5#${cleanAppId}#${currency}`,
+          ':pk': `MARKET#${MARKET_CACHE_VERSION}#${cleanAppId}#${currency}`,
           ':sk': 'TELEMETRY',
         },
         Limit: 1,
@@ -428,6 +442,19 @@ export async function getCachedMarketTelemetry(
         (partnerDealsCount > 0 || (storeCount === 0 && cached.isPlatformExclusive === true));
 
       if (isFresh && isHealthy) {
+        if (Array.isArray(cached.priceHistory) && cached.priceHistory.length < 2) {
+          return null;
+        }
+        const resolvedHistory: PricePoint[] = Array.isArray(cached.priceHistory)
+          ? cached.priceHistory
+          : synthesizeAnchorPriceHistory(
+              [],
+              cached.primaryDeal,
+              cached.cheaperAlternative ?? null,
+              cached.allTimeLowPrice ?? null,
+              currency,
+            );
+
         return {
           appId: cached.appId || cleanAppId,
           gameId: cached.gameId || `steam_${cleanAppId}`,
@@ -438,7 +465,7 @@ export async function getCachedMarketTelemetry(
           dealType: cached.dealType || 'CURATED_DEAL',
           isAllTimeLow: Boolean(cached.isAllTimeLow),
           allTimeLowPrice: cached.allTimeLowPrice ?? null,
-          priceHistory: Array.isArray(cached.priceHistory) ? cached.priceHistory : [],
+          priceHistory: resolvedHistory,
           expiry: cached.expiry ?? null,
           primaryDeal: cached.primaryDeal,
           cheaperAlternative: cached.cheaperAlternative ?? null,
@@ -464,7 +491,7 @@ export async function getCachedMarketTelemetry(
 
 /**
  * Resolves live market telemetry and multi-store deal intelligence for a specific Steam title.
- * Checks DynamoDB DealsTable (PK: MARKET#v5#${appId}#${currency}, SK: TELEMETRY) for cached un-degraded multi-store telemetry.
+ * Checks DynamoDB DealsTable (PK: MARKET#v6#${appId}#${currency}, SK: TELEMETRY) for cached un-degraded multi-store telemetry.
  * If cache miss or degraded, queries live intelligence and persists to cache for 24 hours (86400s) only when multi-store ITAD data is verified.
  * Bypasses DynamoDB caching entirely for degraded or Steam-only (0 partner deals) fallbacks to avoid negative caching.
  */
@@ -1020,7 +1047,7 @@ export async function resolveTrendingGames(
     }
 
     // 2. Resolve cache misses with bounded concurrency to prevent ITAD burst exhaustion
-    // and cross-hydrate per-game cache (PK: MARKET#v5#<appId>#<currency>) when partner deals exist
+    // and cross-hydrate per-game cache (PK: MARKET#v6#<appId>#<currency>) when partner deals exist
     let missCursor = 0;
     const enrichMissWorker = async (): Promise<void> => {
       while (missCursor < cacheMissEntries.length) {

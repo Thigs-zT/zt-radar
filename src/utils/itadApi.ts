@@ -51,9 +51,9 @@ const NON_GAME_PATTERNS: RegExp[] = [
 export function resolveStoreName(rawStore: unknown): string | null {
   if (!rawStore) return null;
   const key = String(rawStore).toLowerCase().trim();
-  if (key === '1' || key.includes('steam')) return 'Steam';
-  if (key === '25' || key.includes('epic')) return 'Epic Games Store';
-  if (key === '35' || key.includes('nuuvem')) return 'Nuuvem';
+  if (key === '1' || key === '61' || key.includes('steam')) return 'Steam';
+  if (key === '25' || key === '16' || key.includes('epic')) return 'Epic Games Store';
+  if (key === '35' || key === '50' || key.includes('nuuvem')) return 'Nuuvem';
   if (key === '7' || key.includes('gog')) return 'GOG';
   return null; // Ignore any store outside our 4 approved storefronts
 }
@@ -94,7 +94,8 @@ export function isCuratedGame(
 export function sanitizeTitleForItadLookup(rawTitle: string): string {
   if (!rawTitle) return '';
   return rawTitle
-    .replace(/[™®©]/g, '')
+    .replace(/[™®©℠]/g, '')
+    .replace(/\((?:tm|r|c)\)/gi, '')
     .replace(/\s*:\s*/g, ': ')
     .replace(
       /\s*([—–\-:]\s*)?(?:(?:the\s+)?telltale\s+)?(game of the year(\s+edition)?|goty(\s+edition)?|complete edition|enhanced edition|remastered|definitive (?:edition|series)|anniversary edition|director's cut|collector's edition|deluxe(\s+edition)?|standard edition|premium edition)\b.*$/i,
@@ -118,7 +119,8 @@ export function isStrictEditionMatch(baseTitle: string, candidateTitle: string):
 
   const normalize = (str: string): string =>
     str
-      .replace(/[™®©]/g, '')
+      .replace(/[™®©℠]/g, '')
+      .replace(/\((?:tm|r|c)\)/gi, '')
       .replace(/\s*([:\-–—])\s*/g, ' $1 ')
       .replace(/\s+/g, ' ')
       .trim()
@@ -375,23 +377,33 @@ interface RawItadLookupResponse {
 }
 
 interface RawItadDeal {
-  shop?: { name?: string };
+  shop?: { id?: number | string; name?: string };
   price: { amount: number };
   regular: { amount: number };
   cut: number;
   url: string;
   expiry?: string | number | null;
+  storeLow?: { amount?: number };
 }
 
 interface RawItadPriceOverviewItem {
   id?: string;
+  historyLow?: {
+    all?: { amount?: number };
+    y1?: { amount?: number };
+    m3?: { amount?: number };
+  };
   deals?: RawItadDeal[];
 }
 
 interface RawItadHistoryLowItem {
   id?: string;
   low?: {
+    shop?: { id?: number | string; name?: string };
     price?: { amount?: number };
+    regular?: { amount?: number };
+    cut?: number;
+    timestamp?: string | number;
   };
 }
 
@@ -416,6 +428,7 @@ export interface RawItadHistoryLogEntry {
 /** Verified ITAD v2 shop IDs: 61 (Steam), 16 (Epic Games Store), 35 (GOG), 50 (Nuuvem). */
 export const ITAD_VERIFIED_SHOP_IDS = [61, 16, 35, 50] as const;
 export const MAX_PRICE_HISTORY_POINTS = 15;
+export const ITAD_HISTORY_LOOKBACK_DAYS = 730;
 
 const ITAD_SHOP_ID_TO_STORE: Record<string, { shopId: 'steam' | 'nuuvem' | 'epic' | 'gog'; shopName: string }> = {
   '61': { shopId: 'steam', shopName: 'Steam' },
@@ -670,8 +683,157 @@ export function transformItadPriceHistory(
 }
 
 /**
+ * Synthesizes a truthful, deterministic multi-point chronological anchor timeline
+ * when ITAD /games/history/v2 yields fewer than 2 checkpoints, using verified regular,
+ * historical low, and current active deal prices.
+ */
+export function synthesizeAnchorPriceHistory(
+  existingHistory: PricePoint[],
+  primaryDeal: StoreDeal | null | undefined,
+  cheaperAlternative: StoreDeal | null | undefined,
+  allTimeLowPrice: number | null | undefined,
+  currency: string = 'USD',
+  atlMeta?: { timestamp?: string | number | null; shopName?: string | null; regularPrice?: number | null },
+): PricePoint[] {
+  if (Array.isArray(existingHistory) && existingHistory.length >= 2) {
+    return existingHistory;
+  }
+
+  if (
+    !primaryDeal ||
+    typeof primaryDeal.salePrice !== 'number' ||
+    !Number.isFinite(primaryDeal.salePrice) ||
+    primaryDeal.salePrice <= 0
+  ) {
+    return Array.isArray(existingHistory) ? existingHistory : [];
+  }
+
+  const isBrl = currency.toUpperCase().trim() === 'BRL';
+  const activeDeal =
+    cheaperAlternative &&
+    typeof cheaperAlternative.salePrice === 'number' &&
+    Number.isFinite(cheaperAlternative.salePrice) &&
+    cheaperAlternative.salePrice > 0 &&
+    cheaperAlternative.salePrice < primaryDeal.salePrice
+      ? cheaperAlternative
+      : primaryDeal;
+
+  const currentPrice = Number(activeDeal.salePrice.toFixed(2));
+  const regularBase =
+    typeof activeDeal.regularPrice === 'number' && Number.isFinite(activeDeal.regularPrice) && activeDeal.regularPrice > 0
+      ? Number(activeDeal.regularPrice.toFixed(2))
+      : typeof primaryDeal.regularPrice === 'number' && Number.isFinite(primaryDeal.regularPrice) && primaryDeal.regularPrice > 0
+        ? Number(primaryDeal.regularPrice.toFixed(2))
+        : currentPrice;
+  const regularPrice = Math.max(regularBase, currentPrice);
+
+  const hasValidAtl =
+    typeof allTimeLowPrice === 'number' && Number.isFinite(allTimeLowPrice) && allTimeLowPrice > 0;
+  const effectiveAtl = hasValidAtl ? Number(allTimeLowPrice.toFixed(2)) : null;
+
+  const activeShopCanonical = resolveStoreName(activeDeal.shopName) || 'Steam';
+  const activeShopId = STORE_NAME_TO_SHOP_ID[activeShopCanonical] || 'steam';
+
+  const toPoint = (
+    epochMs: number,
+    shopId: 'steam' | 'nuuvem' | 'epic' | 'gog',
+    shopName: string,
+    price: number,
+    regPrice: number,
+    isAtl: boolean,
+  ): PricePoint => {
+    const roundedPrice = Number(price.toFixed(2));
+    const roundedReg = Number(Math.max(regPrice, roundedPrice).toFixed(2));
+    const cut =
+      roundedReg > 0 && roundedPrice < roundedReg
+        ? Math.max(0, Math.min(100, Math.round(((roundedReg - roundedPrice) / roundedReg) * 100)))
+        : 0;
+    return {
+      timestamp: new Date(epochMs).toISOString(),
+      shopId,
+      shopName,
+      priceUsd: isBrl ? null : roundedPrice,
+      priceBrl: isBrl ? roundedPrice : null,
+      price: roundedPrice,
+      regularPrice: roundedReg,
+      cutPercent: cut,
+      isAllTimeLow: isAtl,
+    };
+  };
+
+  const nowMs = Date.now();
+
+  if (Array.isArray(existingHistory) && existingHistory.length === 1) {
+    const single = existingHistory[0];
+    const singleMs = new Date(single.timestamp).getTime();
+    const validSingleMs = Number.isFinite(singleMs) ? singleMs : nowMs - 30 * 86400 * 1000;
+    const points: PricePoint[] = [];
+
+    const singlePrice =
+      typeof single.price === 'number' && Number.isFinite(single.price)
+        ? single.price
+        : isBrl
+          ? (single.priceBrl ?? currentPrice)
+          : (single.priceUsd ?? currentPrice);
+
+    const baselineMs = Math.min(validSingleMs, nowMs - 60000) - 90 * 86400 * 1000;
+    if (effectiveAtl !== null && singlePrice > effectiveAtl + 0.001) {
+      const atlShopCanonical = resolveStoreName(atlMeta?.shopName) || activeShopCanonical;
+      const atlShopId = STORE_NAME_TO_SHOP_ID[atlShopCanonical] || activeShopId;
+      const parsedAtlMs = atlMeta?.timestamp ? new Date(atlMeta.timestamp).getTime() : NaN;
+      const atlMs =
+        Number.isFinite(parsedAtlMs) && parsedAtlMs < nowMs - 60000 && parsedAtlMs !== validSingleMs
+          ? parsedAtlMs
+          : baselineMs;
+      points.push(toPoint(atlMs, atlShopId, atlShopCanonical, effectiveAtl, regularPrice, true));
+    } else if (regularPrice > singlePrice) {
+      points.push(toPoint(baselineMs, activeShopId, activeShopCanonical, regularPrice, regularPrice, false));
+    }
+
+    points.push(single);
+
+    if (validSingleMs < nowMs - 60000) {
+      const currentIsAtl = effectiveAtl !== null && currentPrice <= effectiveAtl + 0.001;
+      points.push(toPoint(nowMs, activeShopId, activeShopCanonical, currentPrice, regularPrice, currentIsAtl));
+    }
+
+    points.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+    return points.slice(-MAX_PRICE_HISTORY_POINTS);
+  }
+
+  if (effectiveAtl === null) {
+    return [];
+  }
+
+  const parsedAtlMs = atlMeta?.timestamp ? new Date(atlMeta.timestamp).getTime() : NaN;
+  const atlMs =
+    Number.isFinite(parsedAtlMs) && parsedAtlMs < nowMs - 60000
+      ? parsedAtlMs
+      : nowMs - 90 * 86400 * 1000;
+  const baselineMs = Math.min(atlMs, nowMs) - 180 * 86400 * 1000;
+
+  const atlShopCanonical = resolveStoreName(atlMeta?.shopName) || activeShopCanonical;
+  const atlShopId = STORE_NAME_TO_SHOP_ID[atlShopCanonical] || activeShopId;
+  const atlRegular =
+    typeof atlMeta?.regularPrice === 'number' && Number.isFinite(atlMeta.regularPrice) && atlMeta.regularPrice > 0
+      ? Math.max(atlMeta.regularPrice, regularPrice)
+      : regularPrice;
+
+  const currentIsAtl = currentPrice <= effectiveAtl + 0.001;
+  const points: PricePoint[] = [
+    toPoint(baselineMs, activeShopId, activeShopCanonical, atlRegular, atlRegular, false),
+    toPoint(atlMs, atlShopId, atlShopCanonical, effectiveAtl, atlRegular, true),
+    toPoint(nowMs, activeShopId, activeShopCanonical, currentPrice, regularPrice, currentIsAtl),
+  ];
+
+  points.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+  return points;
+}
+
+/**
  * Fetches chronological price history from ITAD /games/history/v2 for verified storefronts
- * within the caller's bounded AbortSignal. Returns [] on failure so deal resolution stays resilient.
+ * within the caller's bounded AbortSignal. Passes an explicit 24-month RFC3339 `since`
+ * timestamp without milliseconds. Returns [] on failure so deal resolution stays resilient.
  */
 export async function fetchItadPriceHistory(
   itadGameId: string,
@@ -683,7 +845,10 @@ export async function fetchItadPriceHistory(
 
   const itadCountry = preferredCurrency.toUpperCase().trim() === 'BRL' ? 'BR' : 'US';
   const shopsParam = ITAD_VERIFIED_SHOP_IDS.join(',');
-  const historyLogUrl = `${ITAD_BASE_URL}/games/history/v2?key=${itadKey}&id=${encodeURIComponent(itadGameId)}&country=${itadCountry}&shops=${shopsParam}`;
+  const sinceIso = new Date(Date.now() - ITAD_HISTORY_LOOKBACK_DAYS * 86400 * 1000)
+    .toISOString()
+    .replace(/\.\d{3}Z$/, 'Z');
+  const historyLogUrl = `${ITAD_BASE_URL}/games/history/v2?key=${itadKey}&id=${encodeURIComponent(itadGameId)}&country=${itadCountry}&shops=${shopsParam}&since=${encodeURIComponent(sinceIso)}`;
 
   try {
     const res = await fetchItadWithRetry(
@@ -700,6 +865,8 @@ export async function fetchItadPriceHistory(
 }
 
 const ITAD_TIMEOUT_MS = 1800;
+const ITAD_PRICES_TIMEOUT_MS = 3200;
+const ITAD_HISTORY_TIMEOUT_MS = 2200;
 const STEAM_DETAILS_TIMEOUT_MS = 1500;
 const ITAD_MAX_ATTEMPTS = 2;
 const ITAD_RETRY_BASE_DELAY_MS = 200;
@@ -739,15 +906,17 @@ async function fetchItadWithRetry(url: string, init: RequestInit, signal: AbortS
         return res;
       }
       const retryAfterSec = Number(res.headers?.get?.('retry-after'));
+      const jitterMs = Math.floor(Math.random() * 100);
       const delayMs =
         Number.isFinite(retryAfterSec) && retryAfterSec > 0
-          ? Math.min(retryAfterSec * 1000, 400)
-          : ITAD_RETRY_BASE_DELAY_MS * attempt;
+          ? Math.min(retryAfterSec * 1000, 400) + jitterMs
+          : ITAD_RETRY_BASE_DELAY_MS * attempt + jitterMs;
       await abortableDelay(delayMs, signal);
     } catch (err: unknown) {
       lastError = err;
       if (signal.aborted || attempt === ITAD_MAX_ATTEMPTS) break;
-      await abortableDelay(ITAD_RETRY_BASE_DELAY_MS * attempt, signal);
+      const jitterMs = Math.floor(Math.random() * 100);
+      await abortableDelay(ITAD_RETRY_BASE_DELAY_MS * attempt + jitterMs, signal);
     }
   }
   throw lastError instanceof Error ? lastError : new Error('ITAD request failed or was aborted');
@@ -921,25 +1090,28 @@ export async function getGameDealInfo(
     }
   }
 
-  const itadController = new AbortController();
-  let itadTimedOut = false;
-  let itadTimer: ReturnType<typeof setTimeout> | undefined;
+  const lookupController = new AbortController();
+  const pricesController = new AbortController();
+  let lookupTimedOut = false;
+  let pricesTimedOut = false;
+  let lookupTimer: ReturnType<typeof setTimeout> | undefined;
+  let pricesTimer: ReturnType<typeof setTimeout> | undefined;
 
-  const onExternalAbort = () => itadController.abort();
+  const onExternalAbort = () => {
+    lookupController.abort();
+    pricesController.abort();
+  };
   if (externalSignal) {
     if (externalSignal.aborted) {
-      itadController.abort();
+      lookupController.abort();
+      pricesController.abort();
     } else {
       externalSignal.addEventListener('abort', onExternalAbort, { once: true });
     }
   }
 
-  const itadTimeoutSignal =
-    typeof AbortSignal.timeout === 'function' ? AbortSignal.timeout(ITAD_TIMEOUT_MS) : null;
-  const activeItadSignal =
-    itadTimeoutSignal && typeof AbortSignal.any === 'function'
-      ? AbortSignal.any([itadController.signal, itadTimeoutSignal])
-      : itadController.signal;
+  const activeLookupSignal = lookupController.signal;
+  const activePricesSignal = pricesController.signal;
 
   const isBrl = preferredCurrency === 'BRL';
   const country = isBrl ? 'br' : 'us';
@@ -973,12 +1145,17 @@ export async function getGameDealInfo(
     let officialSteamTitle: string | null = null;
     const itadKey = process.env.ITAD_API_KEY || ITAD_API_KEY;
 
-    // 1. Concurrently kick off bounded Steam Store details (1500ms) and ITAD resolution (1800ms)
+    // 1. Concurrently kick off bounded Steam Store details (1500ms) and ITAD resolution
     const steamPromise = steamAppId
       ? fetchSteamStoreAppDetails(steamAppId, country, externalSignal, STEAM_DETAILS_TIMEOUT_MS)
       : Promise.resolve(null);
 
     let historyLow: number | null = null;
+    let historyLowMeta: {
+      timestamp?: string | number | null;
+      shopName?: string | null;
+      regularPrice?: number | null;
+    } = {};
     let rawHistoryEntries: RawItadHistoryLogEntry[] = [];
     const storeBreakdown: Record<string, StoreDeal> = {};
     let resolvedLookupTitle: string | null = null;
@@ -988,11 +1165,34 @@ export async function getGameDealInfo(
     let primaryPricesSucceeded = false;
     let lookupTransientError = false;
 
+    const recordCandidateHistoryLow = (val: unknown) => {
+      if (typeof val === 'number' && Number.isFinite(val) && val > 0) {
+        const normalized = Number(val.toFixed(2));
+        if (historyLow === null || normalized < historyLow) {
+          historyLow = normalized;
+        }
+      }
+    };
+
     const ingestDeals = (items: RawItadPriceOverviewItem[], isSecondary: boolean) => {
       for (const item of items || []) {
+        if (!isSecondary && item.historyLow) {
+          recordCandidateHistoryLow(item.historyLow.all?.amount);
+          recordCandidateHistoryLow(item.historyLow.y1?.amount);
+          recordCandidateHistoryLow(item.historyLow.m3?.amount);
+        }
+
         for (const d of item.deals || []) {
-          const shopName = resolveStoreName(d.shop?.name);
+          const shopName =
+            resolveStoreName(d.shop?.name) ||
+            (d.shop?.id !== undefined && d.shop?.id !== null
+              ? ITAD_SHOP_ID_TO_STORE[String(d.shop.id).trim()]?.shopName ?? null
+              : null);
           if (!shopName) continue; // STRICTLY IGNORE outside our 4 approved stores
+
+          if (!isSecondary) {
+            recordCandidateHistoryLow(d.storeLow?.amount);
+          }
 
           if (isSecondary) {
             // Secondary edition UUIDs: ONLY merge non-Steam storefronts (GOG, Epic Games Store, Nuuvem)
@@ -1031,35 +1231,58 @@ export async function getGameDealInfo(
         return 'ITAD_DONE';
       }
 
-      // Step 1: Direct Steam AppID mapping first (or title lookup when no Steam AppID)
+      // Stage 1: Direct Steam AppID mapping first (bounded by ITAD_TIMEOUT_MS = 1800ms)
       if (!itadGameId) {
-        if (steamAppId) {
-          const direct = await resolveItadIdBySteamAppId(steamAppId, itadKey, activeItadSignal);
-          if (direct.id) itadGameId = direct.id;
-          if (direct.title) resolvedLookupTitle = direct.title;
-          if (direct.transientError) lookupTransientError = true;
-        } else if (title && title !== 'Monitored Title') {
-          try {
-            const lookupUrl = `${ITAD_BASE_URL}/games/lookup/v1?key=${itadKey}&title=${encodeURIComponent(title)}`;
-            const lookupRes = await fetchItadWithRetry(
-              lookupUrl,
-              { headers: { 'User-Agent': USER_AGENT } },
-              activeItadSignal,
-            );
-            if (lookupRes.ok) {
-              const lookupData = (await lookupRes.json()) as RawItadLookupResponse;
-              if (lookupData?.game?.id) {
-                itadGameId = lookupData.game.id;
-                resolvedLookupTitle = lookupData.game.title || null;
+        const lookupDeadlinePromise = new Promise<'LOOKUP_TIMEOUT'>((resolve) => {
+          lookupTimer = setTimeout(() => {
+            lookupTimedOut = true;
+            lookupController.abort(new DOMException(`ITAD lookup exceeded ${ITAD_TIMEOUT_MS}ms timeout`, 'TimeoutError'));
+            resolve('LOOKUP_TIMEOUT');
+          }, ITAD_TIMEOUT_MS);
+        });
+
+        const executeLookup = async (): Promise<'LOOKUP_DONE'> => {
+          if (steamAppId) {
+            const direct = await resolveItadIdBySteamAppId(steamAppId, itadKey, activeLookupSignal);
+            if (direct.id) itadGameId = direct.id;
+            if (direct.title) resolvedLookupTitle = direct.title;
+            if (direct.transientError) lookupTransientError = true;
+          } else if (title && title !== 'Monitored Title') {
+            try {
+              const sanitizedLookupTitle = sanitizeTitleForItadLookup(title) || title;
+              const lookupUrl = `${ITAD_BASE_URL}/games/lookup/v1?key=${itadKey}&title=${encodeURIComponent(sanitizedLookupTitle)}`;
+              const lookupRes = await fetchItadWithRetry(
+                lookupUrl,
+                { headers: { 'User-Agent': USER_AGENT } },
+                activeLookupSignal,
+              );
+              if (lookupRes.ok) {
+                const lookupData = (await lookupRes.json()) as RawItadLookupResponse;
+                if (lookupData?.game?.id) {
+                  itadGameId = lookupData.game.id;
+                  resolvedLookupTitle = lookupData.game.title || null;
+                }
+              } else if (lookupRes.status === 429 || lookupRes.status >= 500) {
+                lookupTransientError = true;
               }
-            } else if (lookupRes.status === 429 || lookupRes.status >= 500) {
+            } catch (lookupErr: unknown) {
               lookupTransientError = true;
+              const msg = lookupErr instanceof Error ? lookupErr.message : String(lookupErr);
+              console.warn('ITAD initial lookup error:', msg);
             }
-          } catch (lookupErr: unknown) {
-            lookupTransientError = true;
-            const msg = lookupErr instanceof Error ? lookupErr.message : String(lookupErr);
-            console.warn('ITAD initial lookup error:', msg);
           }
+          return 'LOOKUP_DONE';
+        };
+
+        const lookupOutcome = await Promise.race([executeLookup(), lookupDeadlinePromise]);
+        if (lookupTimer) clearTimeout(lookupTimer);
+
+        if (lookupOutcome === 'LOOKUP_TIMEOUT' || lookupTimedOut || activeLookupSignal.aborted) {
+          alternativeCheckDegraded = true;
+          alternativeCheckStatus = 'degraded';
+          secondarySearchExecuted = false;
+          console.warn(`[ITAD] Lookup exceeded ${ITAD_TIMEOUT_MS}ms timeout for ${rawGameIdentifier}; returning fast fallback.`);
+          return 'ITAD_DONE';
         }
       }
 
@@ -1070,48 +1293,55 @@ export async function getGameDealInfo(
         title = titleFallback;
       }
 
-      if (activeItadSignal.aborted) {
-        alternativeCheckDegraded = true;
-        alternativeCheckStatus = 'degraded';
-        return 'ITAD_DONE';
-      }
-
+      // Stage 2: Multi-store prices, historical low, and history log (bounded by ITAD_PRICES_TIMEOUT_MS = 3200ms)
       let primaryItadId = itadGameId || null;
+
+      const pricesDeadlinePromise = new Promise<'PRICES_TIMEOUT'>((resolve) => {
+        pricesTimer = setTimeout(() => {
+          pricesTimedOut = true;
+          pricesController.abort(new DOMException(`ITAD prices exceeded ${ITAD_PRICES_TIMEOUT_MS}ms timeout`, 'TimeoutError'));
+          resolve('PRICES_TIMEOUT');
+        }, ITAD_PRICES_TIMEOUT_MS);
+      });
 
       const queryPricesAndHistory = async (targetItadId: string): Promise<boolean> => {
         const priceUrl = `${ITAD_BASE_URL}/games/prices/v3?key=${itadKey}&country=${itadCountry}`;
         const historyUrl = `${ITAD_BASE_URL}/games/historylow/v1?key=${itadKey}&country=${itadCountry}`;
         const requestBody = JSON.stringify([targetItadId]);
 
-        const priceTask = (async (): Promise<boolean> => {
-          try {
-            const priceRes = await fetchItadWithRetry(
-              priceUrl,
-              {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'User-Agent': USER_AGENT },
-                body: requestBody,
-              },
-              activeItadSignal,
-            );
-            if (priceRes.ok) {
-              primaryPricesSucceeded = true;
-              const priceData = (await priceRes.json()) as RawItadPriceOverviewItem[];
-              ingestDeals(priceData, false);
-              return true;
-            }
+        // Execute /games/prices/v3 FIRST so concurrent advisory calls never burst-starve primary storefront pricing
+        let priceOk = false;
+        try {
+          const priceRes = await fetchItadWithRetry(
+            priceUrl,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'User-Agent': USER_AGENT },
+              body: requestBody,
+            },
+            activePricesSignal,
+          );
+          if (priceRes.ok) {
+            primaryPricesSucceeded = true;
+            const priceData = (await priceRes.json()) as RawItadPriceOverviewItem[];
+            ingestDeals(priceData, false);
+            priceOk = true;
+          } else {
             alternativeCheckDegraded = true;
             alternativeCheckStatus = 'degraded';
-            return false;
-          } catch (primaryErr: unknown) {
-            alternativeCheckDegraded = true;
-            alternativeCheckStatus = 'degraded';
-            const msg = primaryErr instanceof Error ? primaryErr.message : String(primaryErr);
-            console.error('ITAD primary prices/history query error:', msg);
-            return false;
           }
-        })();
+        } catch (primaryErr: unknown) {
+          alternativeCheckDegraded = true;
+          alternativeCheckStatus = 'degraded';
+          const msg = primaryErr instanceof Error ? primaryErr.message : String(primaryErr);
+          console.error('ITAD primary prices/history query error:', msg);
+        }
 
+        if (activePricesSignal.aborted) {
+          return priceOk;
+        }
+
+        // Stage 3 advisory tasks run in parallel AFTER prices/v3 completes, with isolated history timeout
         const historyTask = (async (): Promise<void> => {
           try {
             // Unbound by time windows (no `since` parameter) to guarantee true lifetime ATL since launch
@@ -1122,7 +1352,7 @@ export async function getGameDealInfo(
                 headers: { 'Content-Type': 'application/json', 'User-Agent': USER_AGENT },
                 body: requestBody,
               },
-              activeItadSignal,
+              activePricesSignal,
             );
             if (historyRes.ok) {
               const historyData = (await historyRes.json()) as RawItadHistoryLowItem[];
@@ -1132,7 +1362,25 @@ export async function getGameDealInfo(
                   : null) || null;
               const rawLow = matchedItem?.low?.price?.amount;
               if (typeof rawLow === 'number' && Number.isFinite(rawLow) && rawLow >= 0) {
-                historyLow = Number(rawLow.toFixed(2));
+                const normalizedLow = Number(rawLow.toFixed(2));
+                if (historyLow === null || normalizedLow < historyLow) {
+                  historyLow = normalizedLow;
+                }
+                historyLowMeta = {
+                  timestamp: matchedItem?.low?.timestamp ?? null,
+                  shopName:
+                    resolveStoreName(matchedItem?.low?.shop?.name) ||
+                    (matchedItem?.low?.shop?.id !== undefined && matchedItem?.low?.shop?.id !== null
+                      ? ITAD_SHOP_ID_TO_STORE[String(matchedItem.low.shop.id).trim()]?.shopName ?? null
+                      : null) ||
+                    matchedItem?.low?.shop?.name ||
+                    null,
+                  regularPrice:
+                    typeof matchedItem?.low?.regular?.amount === 'number' &&
+                    Number.isFinite(matchedItem.low.regular.amount)
+                      ? Number(matchedItem.low.regular.amount.toFixed(2))
+                      : null,
+                };
               }
             }
           } catch {
@@ -1141,136 +1389,175 @@ export async function getGameDealInfo(
         })();
 
         const historyLogTask = (async (): Promise<void> => {
-          const entries = await fetchItadPriceHistory(targetItadId, currency, itadKey, activeItadSignal);
-          if (entries.length > 0) {
-            rawHistoryEntries = entries;
+          const historyCtrl = new AbortController();
+          const onPricesAbort = () => historyCtrl.abort();
+          if (activePricesSignal.aborted) {
+            historyCtrl.abort();
+          } else {
+            activePricesSignal.addEventListener('abort', onPricesAbort, { once: true });
+          }
+          const historyLogTimer = setTimeout(() => {
+            historyCtrl.abort(new DOMException(`ITAD history exceeded ${ITAD_HISTORY_TIMEOUT_MS}ms timeout`, 'TimeoutError'));
+          }, ITAD_HISTORY_TIMEOUT_MS);
+
+          try {
+            const entries = await fetchItadPriceHistory(targetItadId, currency, itadKey, historyCtrl.signal);
+            if (entries.length > 0) {
+              rawHistoryEntries = entries;
+            }
+          } finally {
+            clearTimeout(historyLogTimer);
+            activePricesSignal.removeEventListener('abort', onPricesAbort);
           }
         })();
 
-        const [priceOutcome] = await Promise.allSettled([priceTask, historyTask, historyLogTask]);
-        return priceOutcome.status === 'fulfilled' && priceOutcome.value;
+        await Promise.allSettled([historyTask, historyLogTask]);
+        return priceOk;
       };
 
-      // Step 2: Immediate query for primary ITAD ID
-      if (primaryItadId) {
-        await queryPricesAndHistory(primaryItadId);
-      }
-
-      // Step 3 (Conditional Secondary Edition Search):
-      // Runs ONLY if Step 2 did not already degrade and returned 0 non-Steam partner deals.
-      const hasPartnerStore = Object.keys(storeBreakdown).some((k) => k !== 'Steam');
-      if (!hasPartnerStore && !lookupTransientError && !alternativeCheckDegraded && !activeItadSignal.aborted) {
-        const appDetailsForTitle = await steamPromise;
-        if (appDetailsForTitle?.name) {
-          officialSteamTitle = appDetailsForTitle.name;
-          title = appDetailsForTitle.name;
+      const executeStage2 = async (): Promise<'PRICES_DONE'> => {
+        if (primaryItadId) {
+          await queryPricesAndHistory(primaryItadId);
         }
 
-        const rawSearchTitle = officialSteamTitle || resolvedLookupTitle || titleFallback || title;
-        const baseTitle = sanitizeTitleForItadLookup(rawSearchTitle);
+        // Step 3 (Conditional Secondary Edition Search):
+        // Runs ONLY if Step 2 did not already degrade and returned 0 non-Steam partner deals.
+        const hasPartnerStore = Object.keys(storeBreakdown).some((k) => k !== 'Steam');
+        if (!hasPartnerStore && !lookupTransientError && !alternativeCheckDegraded && !activePricesSignal.aborted) {
+          const appDetailsForTitle = await steamPromise;
+          if (appDetailsForTitle?.name) {
+            officialSteamTitle = appDetailsForTitle.name;
+            title = appDetailsForTitle.name;
+          }
 
-        if (baseTitle && baseTitle !== 'Monitored Title' && baseTitle.length > 1 && !activeItadSignal.aborted) {
-          try {
-            const secSearchUrl = `${ITAD_BASE_URL}/games/search/v1?key=${itadKey}&title=${encodeURIComponent(baseTitle)}&results=5`;
-            const secSearchRes = await fetchItadWithRetry(
-              secSearchUrl,
-              { headers: { 'User-Agent': USER_AGENT } },
-              activeItadSignal,
-            );
+          const rawSearchTitle = officialSteamTitle || resolvedLookupTitle || titleFallback || title;
+          const baseTitle = sanitizeTitleForItadLookup(rawSearchTitle);
 
-            if (secSearchRes.ok) {
-              const searchItems = (await secSearchRes.json()) as RawItadSearchItem[];
-              const exactIds: string[] = [];
-              const editionIds: string[] = [];
+          if (baseTitle && baseTitle !== 'Monitored Title' && baseTitle.length > 1 && !activePricesSignal.aborted) {
+            try {
+              const secSearchUrl = `${ITAD_BASE_URL}/games/search/v1?key=${itadKey}&title=${encodeURIComponent(baseTitle)}&results=5`;
+              const secSearchRes = await fetchItadWithRetry(
+                secSearchUrl,
+                { headers: { 'User-Agent': USER_AGENT } },
+                activePricesSignal,
+              );
 
-              if (Array.isArray(searchItems)) {
-                const baseLower = baseTitle.toLowerCase().trim();
-                for (const sItem of searchItems) {
-                  if (!sItem.id || !sItem.title) continue;
-                  if (sItem.type === 'dlc') continue;
-                  if (sItem.id === primaryItadId) continue;
+              if (secSearchRes.ok) {
+                const searchItems = (await secSearchRes.json()) as RawItadSearchItem[];
+                const exactIds: string[] = [];
+                const editionIds: string[] = [];
 
-                  let isNonGame = false;
-                  for (const pattern of NON_GAME_PATTERNS) {
-                    if (pattern.test(sItem.title)) {
-                      isNonGame = true;
-                      break;
+                if (Array.isArray(searchItems)) {
+                  const normalizeExact = (str: string): string =>
+                    str
+                      .replace(/[™®©℠]/g, '')
+                      .replace(/\((?:tm|r|c)\)/gi, '')
+                      .replace(/\s+/g, ' ')
+                      .trim()
+                      .toLowerCase();
+                  const baseLower = normalizeExact(baseTitle);
+
+                  for (const sItem of searchItems) {
+                    if (!sItem.id || !sItem.title) continue;
+                    if (sItem.type === 'dlc') continue;
+                    if (sItem.id === primaryItadId) continue;
+
+                    let isNonGame = false;
+                    for (const pattern of NON_GAME_PATTERNS) {
+                      if (pattern.test(sItem.title)) {
+                        isNonGame = true;
+                        break;
+                      }
+                    }
+                    if (isNonGame) continue;
+
+                    if (isStrictEditionMatch(baseTitle, sItem.title)) {
+                      if (normalizeExact(sItem.title) === baseLower) {
+                        exactIds.push(sItem.id);
+                      } else {
+                        editionIds.push(sItem.id);
+                      }
                     }
                   }
-                  if (isNonGame) continue;
+                }
 
-                  if (isStrictEditionMatch(baseTitle, sItem.title)) {
-                    if (sItem.title.toLowerCase().trim() === baseLower) {
-                      exactIds.push(sItem.id);
+                const secondaryEditionIds = [...exactIds, ...editionIds].slice(0, 3);
+                let secondaryCompletedCleanly = true;
+
+                // If direct AppID lookup didn't find an ID, promote the best title match as primary
+                if (!primaryItadId && secondaryEditionIds.length > 0) {
+                  primaryItadId = secondaryEditionIds.shift()!;
+                  itadGameId = primaryItadId;
+
+                  const primaryOk = await queryPricesAndHistory(primaryItadId);
+                  if (!primaryOk) {
+                    secondaryCompletedCleanly = false;
+                  }
+                }
+
+                // Fetch secondary edition prices and merge non-Steam stores
+                if (secondaryEditionIds.length > 0 && !activePricesSignal.aborted) {
+                  try {
+                    const secPriceUrl = `${ITAD_BASE_URL}/games/prices/v3?key=${itadKey}&country=${itadCountry}`;
+                    const secPriceRes = await fetchItadWithRetry(
+                      secPriceUrl,
+                      {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', 'User-Agent': USER_AGENT },
+                        body: JSON.stringify(secondaryEditionIds),
+                      },
+                      activePricesSignal,
+                    );
+
+                    if (secPriceRes.ok) {
+                      const secPriceData = (await secPriceRes.json()) as RawItadPriceOverviewItem[];
+                      ingestDeals(secPriceData, true);
                     } else {
-                      editionIds.push(sItem.id);
+                      secondaryCompletedCleanly = false;
+                      alternativeCheckDegraded = true;
+                      alternativeCheckStatus = 'degraded';
                     }
-                  }
-                }
-              }
-
-              const secondaryEditionIds = [...exactIds, ...editionIds].slice(0, 3);
-              let secondaryCompletedCleanly = true;
-
-              // If direct AppID lookup didn't find an ID, promote the best title match as primary
-              if (!primaryItadId && secondaryEditionIds.length > 0) {
-                primaryItadId = secondaryEditionIds.shift()!;
-                itadGameId = primaryItadId;
-
-                const primaryOk = await queryPricesAndHistory(primaryItadId);
-                if (!primaryOk) {
-                  secondaryCompletedCleanly = false;
-                }
-              }
-
-              // Fetch secondary edition prices and merge non-Steam stores
-              if (secondaryEditionIds.length > 0 && !activeItadSignal.aborted) {
-                try {
-                  const secPriceUrl = `${ITAD_BASE_URL}/games/prices/v3?key=${itadKey}&country=${itadCountry}`;
-                  const secPriceRes = await fetchItadWithRetry(
-                    secPriceUrl,
-                    {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json', 'User-Agent': USER_AGENT },
-                      body: JSON.stringify(secondaryEditionIds),
-                    },
-                    activeItadSignal,
-                  );
-
-                  if (secPriceRes.ok) {
-                    const secPriceData = (await secPriceRes.json()) as RawItadPriceOverviewItem[];
-                    ingestDeals(secPriceData, true);
-                  } else {
+                  } catch (secPriceErr: unknown) {
                     secondaryCompletedCleanly = false;
                     alternativeCheckDegraded = true;
                     alternativeCheckStatus = 'degraded';
+                    console.warn(
+                      'ITAD secondary prices query error:',
+                      secPriceErr instanceof Error ? secPriceErr.message : String(secPriceErr),
+                    );
                   }
-                } catch (secPriceErr: unknown) {
-                  secondaryCompletedCleanly = false;
-                  alternativeCheckDegraded = true;
-                  alternativeCheckStatus = 'degraded';
-                  console.warn(
-                    'ITAD secondary prices query error:',
-                    secPriceErr instanceof Error ? secPriceErr.message : String(secPriceErr),
-                  );
                 }
-              }
 
-              if (secondaryCompletedCleanly) {
-                secondarySearchExecuted = true;
+                if (secondaryCompletedCleanly) {
+                  secondarySearchExecuted = true;
+                }
+              } else {
+                alternativeCheckDegraded = true;
+                alternativeCheckStatus = 'degraded';
               }
-            } else {
+            } catch (secSearchErr: unknown) {
               alternativeCheckDegraded = true;
               alternativeCheckStatus = 'degraded';
+              console.warn(
+                'ITAD secondary search error:',
+                secSearchErr instanceof Error ? secSearchErr.message : String(secSearchErr),
+              );
             }
-          } catch (secSearchErr: unknown) {
-            alternativeCheckDegraded = true;
-            alternativeCheckStatus = 'degraded';
-            console.warn(
-              'ITAD secondary search error:',
-              secSearchErr instanceof Error ? secSearchErr.message : String(secSearchErr),
-            );
           }
+        }
+
+        return 'PRICES_DONE';
+      };
+
+      const stage2Outcome = await Promise.race([executeStage2(), pricesDeadlinePromise]);
+      if (pricesTimer) clearTimeout(pricesTimer);
+
+      if (stage2Outcome === 'PRICES_TIMEOUT' || pricesTimedOut) {
+        if (!primaryPricesSucceeded) {
+          alternativeCheckDegraded = true;
+          alternativeCheckStatus = 'degraded';
+          secondarySearchExecuted = false;
+          console.warn(`[ITAD] Prices lookup exceeded ${ITAD_PRICES_TIMEOUT_MS}ms timeout for ${rawGameIdentifier}; returning fast fallback.`);
         }
       }
 
@@ -1285,27 +1572,13 @@ export async function getGameDealInfo(
       return 'ITAD_DONE';
     };
 
-    const itadDeadlinePromise = new Promise<'ITAD_TIMEOUT'>((resolve) => {
-      itadTimer = setTimeout(() => {
-        itadTimedOut = true;
-        itadController.abort(new DOMException(`ITAD lookup exceeded ${ITAD_TIMEOUT_MS}ms timeout`, 'TimeoutError'));
-        resolve('ITAD_TIMEOUT');
-      }, ITAD_TIMEOUT_MS);
-    });
-
-    const itadRaceResult = itadKey
-      ? await Promise.race([runItadPipeline(), itadDeadlinePromise])
-      : 'ITAD_DONE';
-
-    if (itadTimer) clearTimeout(itadTimer);
-    if (externalSignal) externalSignal.removeEventListener('abort', onExternalAbort);
-
-    if (itadRaceResult === 'ITAD_TIMEOUT' || itadTimedOut || activeItadSignal.aborted) {
-      alternativeCheckDegraded = true;
-      alternativeCheckStatus = 'degraded';
-      secondarySearchExecuted = false;
-      console.warn(`[ITAD] Lookup exceeded ${ITAD_TIMEOUT_MS}ms timeout for ${rawGameIdentifier}; returning fast fallback.`);
+    if (itadKey) {
+      await runItadPipeline();
     }
+
+    if (lookupTimer) clearTimeout(lookupTimer);
+    if (pricesTimer) clearTimeout(pricesTimer);
+    if (externalSignal) externalSignal.removeEventListener('abort', onExternalAbort);
 
     // Apply authoritative Valve Steam Store details overlay (already awaited or finishes within 1500ms)
     const appDetails = await steamPromise;
@@ -1398,7 +1671,7 @@ export async function getGameDealInfo(
         }
       : null;
 
-    const priceHistory = transformItadPriceHistory(
+    let priceHistory = transformItadPriceHistory(
       rawHistoryEntries,
       currency,
       historyLow,
@@ -1417,6 +1690,17 @@ export async function getGameDealInfo(
 
     if (historyLow !== null && absoluteCheapest.salePrice > 0 && absoluteCheapest.salePrice < historyLow) {
       historyLow = Number(absoluteCheapest.salePrice.toFixed(2));
+    }
+
+    if (priceHistory.length < 2 && historyLow !== null) {
+      priceHistory = synthesizeAnchorPriceHistory(
+        priceHistory,
+        primaryDeal,
+        cheaperAlternative,
+        historyLow,
+        currency,
+        historyLowMeta,
+      );
     }
 
     const primaryIsAtl =
@@ -1460,7 +1744,8 @@ export async function getGameDealInfo(
       isPlatformExclusive,
     };
   } catch (error: unknown) {
-    if (itadTimer) clearTimeout(itadTimer);
+    if (lookupTimer) clearTimeout(lookupTimer);
+    if (pricesTimer) clearTimeout(pricesTimer);
     if (externalSignal) externalSignal.removeEventListener('abort', onExternalAbort);
     const msg = error instanceof Error ? error.message : String(error);
     console.error(`Error resolving deal info for ${rawGameIdentifier}:`, msg);

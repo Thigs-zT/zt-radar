@@ -728,7 +728,7 @@ describe('Public Web API Handler', () => {
     it('should return cached multi-store telemetry immediately from DynamoDB when fresh cache exists', async () => {
       const nowSec = Math.floor(Date.now() / 1000);
       const cachedTelemetry = {
-        PK: 'MARKET#v5#1086940#USD',
+        PK: 'MARKET#v6#1086940#USD',
         SK: 'TELEMETRY',
         appId: '1086940',
         gameId: 'steam_1086940',
@@ -823,7 +823,7 @@ describe('Public Web API Handler', () => {
     it('should bypass cache and fetch live data when cached record is degraded', async () => {
       const nowSec = Math.floor(Date.now() / 1000);
       const degradedCached = {
-        PK: 'MARKET#v5#1086940#USD',
+        PK: 'MARKET#v6#1086940#USD',
         SK: 'TELEMETRY',
         appId: '1086940',
         title: "Baldur's Gate 3 (Degraded)",
@@ -863,7 +863,7 @@ describe('Public Web API Handler', () => {
     it('should bypass cache and fetch live data when cached record has only 1 store and is not platform exclusive', async () => {
       const nowSec = Math.floor(Date.now() / 1000);
       const singleStoreCached = {
-        PK: 'MARKET#v5#1086940#USD',
+        PK: 'MARKET#v6#1086940#USD',
         SK: 'TELEMETRY',
         appId: '1086940',
         title: "Baldur's Gate 3 (Single Store Poisoned)",
@@ -922,7 +922,7 @@ describe('Public Web API Handler', () => {
       const putCalls = ddbMock.commandCalls(PutCommand);
       expect(putCalls.length).toBeGreaterThanOrEqual(1);
 
-      const marketPut = putCalls.find((call) => call.args[0].input.Item?.PK === 'MARKET#v5#1086940#USD');
+      const marketPut = putCalls.find((call) => call.args[0].input.Item?.PK === 'MARKET#v6#1086940#USD');
       expect(marketPut).toBeDefined();
       expect(marketPut?.args[0].input.Item?.SK).toBe('TELEMETRY');
       expect(marketPut?.args[0].input.Item?.alternativeCheckDegraded).toBe(false);
@@ -985,7 +985,7 @@ describe('Public Web API Handler', () => {
 
       expect(response.statusCode).toBe(200);
       const putCalls = ddbMock.commandCalls(PutCommand);
-      const marketPut = putCalls.find((call) => call.args[0].input.Item?.PK === 'MARKET#v5#1086940#USD');
+      const marketPut = putCalls.find((call) => call.args[0].input.Item?.PK === 'MARKET#v6#1086940#USD');
       expect(marketPut).toBeUndefined();
     });
 
@@ -1051,14 +1051,14 @@ describe('Public Web API Handler', () => {
       expect(data.primaryDeal.salePrice).toBe(49.99);
 
       const putCalls = ddbMock.commandCalls(PutCommand);
-      const marketPut = putCalls.find((call) => call.args[0].input.Item?.PK === 'MARKET#v5#1029690#USD');
+      const marketPut = putCalls.find((call) => call.args[0].input.Item?.PK === 'MARKET#v6#1029690#USD');
       expect(marketPut).toBeUndefined();
     });
 
     it('should bypass stale Steam-only cache record even if marked isPlatformExclusive and heal via live lookup', async () => {
       const nowSec = Math.floor(Date.now() / 1000);
       const poisonedSteamOnlyCached = {
-        PK: 'MARKET#v5#1029690#USD',
+        PK: 'MARKET#v6#1029690#USD',
         SK: 'TELEMETRY',
         appId: '1029690',
         title: 'Sniper Elite 5',
@@ -1163,9 +1163,149 @@ describe('Public Web API Handler', () => {
       expect(getGameDealInfo).toHaveBeenCalledWith('1029690', 'USD', null);
 
       const putCalls = ddbMock.commandCalls(PutCommand);
-      const healedPut = putCalls.find((call) => call.args[0].input.Item?.PK === 'MARKET#v5#1029690#USD');
+      const healedPut = putCalls.find((call) => call.args[0].input.Item?.PK === 'MARKET#v6#1029690#USD');
       expect(healedPut).toBeDefined();
       expect(healedPut?.args[0].input.Item?.ttl).toBeGreaterThanOrEqual(nowSec + 86300);
+    });
+
+    it('should treat MARKET#v6 cached record with empty priceHistory as stale and heal via getGameDealInfo', async () => {
+      const nowSec = Math.floor(Date.now() / 1000);
+      const staleEmptyHistoryCached = {
+        PK: 'MARKET#v6#1029690#USD',
+        SK: 'TELEMETRY',
+        appId: '1029690',
+        title: 'Sniper Elite 5',
+        storeBreakdown: {
+          Steam: {
+            shopName: 'Steam',
+            salePrice: 49.99,
+            regularPrice: 49.99,
+            cutPercent: 0,
+            url: 'https://store.steampowered.com/app/1029690/',
+            expiry: null,
+            currency: 'USD',
+            currencySymbol: '$',
+          },
+          'Epic Games Store': {
+            shopName: 'Epic Games Store',
+            salePrice: 12.49,
+            regularPrice: 49.99,
+            cutPercent: 75,
+            url: 'https://store.epicgames.com/p/sniper-elite-5',
+            expiry: null,
+            currency: 'USD',
+            currencySymbol: '$',
+          },
+        },
+        primaryDeal: {
+          shopName: 'Epic Games Store',
+          salePrice: 12.49,
+          regularPrice: 49.99,
+          cutPercent: 75,
+          url: 'https://store.epicgames.com/p/sniper-elite-5',
+          expiry: null,
+          currency: 'USD',
+          currencySymbol: '$',
+        },
+        allTimeLowPrice: 8.46,
+        priceHistory: [],
+        alternativeCheckStatus: 'confirmed',
+        alternativeCheckDegraded: false,
+        ttl: nowSec + 72000,
+      };
+
+      ddbMock.on(QueryCommand).resolvesOnce({ Items: [staleEmptyHistoryCached] });
+
+      vi.mocked(getGameDealInfo).mockResolvedValueOnce({
+        gameId: 'steam_1029690',
+        title: 'Sniper Elite 5',
+        imageUrl: 'https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/1029690/header.jpg',
+        reviewScore: 81,
+        steamAppId: '1029690',
+        dealType: 'CURATED_DEAL',
+        isAllTimeLow: false,
+        allTimeLowPrice: 8.46,
+        priceHistory: [
+          {
+            timestamp: '2025-11-01T12:00:00Z',
+            priceUsd: 8.46,
+            priceBrl: null,
+            shopId: 'epic',
+            isAllTimeLow: true,
+          },
+          {
+            timestamp: '2026-11-13T12:00:00Z',
+            priceUsd: 12.49,
+            priceBrl: null,
+            shopId: 'epic',
+            isAllTimeLow: false,
+          },
+        ],
+        expiry: null,
+        primaryDeal: {
+          shopName: 'Epic Games Store',
+          salePrice: 12.49,
+          regularPrice: 49.99,
+          cutPercent: 75,
+          url: 'https://store.epicgames.com/p/sniper-elite-5',
+          expiry: null,
+          currency: 'USD',
+          currencySymbol: '$',
+        },
+        cheaperAlternative: {
+          shopName: 'Epic Games Store',
+          salePrice: 12.49,
+          regularPrice: 49.99,
+          cutPercent: 75,
+          url: 'https://store.epicgames.com/p/sniper-elite-5',
+          expiry: null,
+          currency: 'USD',
+          currencySymbol: '$',
+        },
+        storeBreakdown: {
+          Steam: {
+            shopName: 'Steam',
+            salePrice: 49.99,
+            regularPrice: 49.99,
+            cutPercent: 0,
+            url: 'https://store.steampowered.com/app/1029690/',
+            expiry: null,
+            currency: 'USD',
+            currencySymbol: '$',
+          },
+          'Epic Games Store': {
+            shopName: 'Epic Games Store',
+            salePrice: 12.49,
+            regularPrice: 49.99,
+            cutPercent: 75,
+            url: 'https://store.epicgames.com/p/sniper-elite-5',
+            expiry: null,
+            currency: 'USD',
+            currencySymbol: '$',
+          },
+        },
+        alternativeCheckStatus: 'confirmed',
+        alternativeCheckDegraded: false,
+      });
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/market/{appId}',
+        rawPath: '/public/market/1029690',
+        pathParameters: { appId: '1029690' },
+        requestContext: {
+          http: { method: 'GET', path: '/public/market/1029690' },
+        },
+      };
+
+      const response = await handler(event);
+
+      expect(response.statusCode).toBe(200);
+      const data = JSON.parse(response.body);
+      expect(getGameDealInfo).toHaveBeenCalledWith('1029690', 'USD', null);
+      expect(data.priceHistory.length).toBeGreaterThanOrEqual(2);
+      const putCalls = ddbMock.commandCalls(PutCommand);
+      const healedPut = putCalls.find((call) => call.args[0].input.Item?.PK === 'MARKET#v6#1029690#USD');
+      expect(healedPut).toBeDefined();
     });
 
     it('should trigger fast graceful fallback without caching when deal lookup stalls beyond timeout', async () => {
@@ -1202,7 +1342,7 @@ describe('Public Web API Handler', () => {
         expect(data.primaryDeal?.shopName).toBe('Steam');
 
         const putCalls = ddbMock.commandCalls(PutCommand);
-        const marketPut = putCalls.find((call) => call.args[0].input.Item?.PK === 'MARKET#v5#1029690#USD');
+        const marketPut = putCalls.find((call) => call.args[0].input.Item?.PK === 'MARKET#v6#1029690#USD');
         expect(marketPut).toBeUndefined();
       } finally {
         vi.useRealTimers();
@@ -1277,7 +1417,7 @@ describe('Public Web API Handler', () => {
       expect(data.alternativeCheckStatus).toBe('degraded');
 
       const putCalls = ddbMock.commandCalls(PutCommand);
-      const marketPut = putCalls.find((call) => call.args[0].input.Item?.PK === 'MARKET#v5#489830#USD');
+      const marketPut = putCalls.find((call) => call.args[0].input.Item?.PK === 'MARKET#v6#489830#USD');
       expect(marketPut).toBeUndefined();
     });
 
@@ -1336,7 +1476,7 @@ describe('Public Web API Handler', () => {
 
       // Verify DynamoDB PutCommand persisted priceHistory and allTimeLowPrice alongside storeBreakdown
       const putCalls = ddbMock.commandCalls(PutCommand);
-      const marketPut = putCalls.find((call) => call.args[0].input.Item?.PK === 'MARKET#v5#1086940#USD');
+      const marketPut = putCalls.find((call) => call.args[0].input.Item?.PK === 'MARKET#v6#1086940#USD');
       expect(marketPut).toBeDefined();
       expect(marketPut?.args[0].input.Item?.allTimeLowPrice).toBe(44.99);
       expect(marketPut?.args[0].input.Item?.priceHistory).toEqual(sampleHistory);
@@ -2183,10 +2323,10 @@ describe('Public Web API Handler', () => {
       expect(enrichedGame.dealUrl).toBe('https://www.nuuvem.com/item/action-rpg-hit');
     });
 
-    it('should pre-check MARKET#v5 per-game cache during trending resolution and skip live ITAD calls for cached titles', async () => {
+    it('should pre-check MARKET#v6 per-game cache during trending resolution and skip live ITAD calls for cached titles', async () => {
       const nowSec = Math.floor(Date.now() / 1000);
       const cachedSkyrimTelemetry = {
-        PK: 'MARKET#v5#489830#USD',
+        PK: 'MARKET#v6#489830#USD',
         SK: 'TELEMETRY',
         appId: '489830',
         gameId: 'steam_489830',
@@ -2268,7 +2408,7 @@ describe('Public Web API Handler', () => {
 
       ddbMock.on(QueryCommand).callsFake((input) => {
         const pk = input?.ExpressionAttributeValues?.[':pk'];
-        if (pk === 'MARKET#v5#489830#USD') {
+        if (pk === 'MARKET#v6#489830#USD') {
           return { Items: [cachedSkyrimTelemetry] };
         }
         return { Items: [] };
@@ -2324,7 +2464,7 @@ describe('Public Web API Handler', () => {
       expect(dealCallAppIds).toContain('999002');
     });
 
-    it('should cross-hydrate MARKET#v5 per-game cache from trending so immediate /public/market/{appId} clicks serve all partner stores with zero extra ITAD calls', async () => {
+    it('should cross-hydrate MARKET#v6 per-game cache from trending so immediate /public/market/{appId} clicks serve all partner stores with zero extra ITAD calls', async () => {
       const inMemoryStore = new Map<string, Record<string, unknown>>();
 
       ddbMock.on(PutCommand).callsFake((input) => {
@@ -2454,8 +2594,8 @@ describe('Public Web API Handler', () => {
       expect(trendingData[0].bestStore).toBe('nuuvem');
       expect(trendingData[0].bestPriceUsd).toBe(9.99);
 
-      // Verify MARKET#v5#489830#USD was cross-hydrated with 86400s TTL and all 4 stores
-      const hydratedRecord = inMemoryStore.get('MARKET#v5#489830#USD|TELEMETRY') as
+      // Verify MARKET#v6#489830#USD was cross-hydrated with 86400s TTL and all 4 stores
+      const hydratedRecord = inMemoryStore.get('MARKET#v6#489830#USD|TELEMETRY') as
         | (Record<string, unknown> & { ttl?: number; storeBreakdown?: Record<string, unknown> })
         | undefined;
       expect(hydratedRecord).toBeDefined();
@@ -2685,12 +2825,12 @@ describe('Public Web API Handler', () => {
       expect(maxInFlight).toBeLessThanOrEqual(4);
       expect(maxInFlight).toBeGreaterThanOrEqual(2);
 
-      // Verify Zero Negative Caching on MARKET#v5 for degraded (880001) & Steam-only (880002),
+      // Verify Zero Negative Caching on MARKET#v6 for degraded (880001) & Steam-only (880002),
       // while healthy multi-store (880003) IS persisted
       const putPks = ddbMock.commandCalls(PutCommand).map((call) => String(call.args[0].input.Item?.PK || ''));
-      expect(putPks).not.toContain('MARKET#v5#880001#USD');
-      expect(putPks).not.toContain('MARKET#v5#880002#USD');
-      expect(putPks).toContain('MARKET#v5#880003#USD');
+      expect(putPks).not.toContain('MARKET#v6#880001#USD');
+      expect(putPks).not.toContain('MARKET#v6#880002#USD');
+      expect(putPks).toContain('MARKET#v6#880003#USD');
     });
   });
 
@@ -3005,7 +3145,7 @@ describe('Public Web API Handler', () => {
       ddbMock.on(QueryCommand).resolvesOnce({
         Items: [
           {
-            PK: 'MARKET#v5#1086940#USD',
+            PK: 'MARKET#v6#1086940#USD',
             SK: 'TELEMETRY',
             ...mockDealBaldursGate,
             appId: '1086940',
@@ -3415,7 +3555,7 @@ describe('Public Web API Handler', () => {
       ddbMock.on(QueryCommand).resolvesOnce({
         Items: [
           {
-            PK: 'MARKET#v5#1086940#USD',
+            PK: 'MARKET#v6#1086940#USD',
             SK: 'TELEMETRY',
             appId: '1086940',
             imageUrl: cachedMarketHeader,
@@ -3589,7 +3729,7 @@ describe('Public Web API Handler', () => {
       ddbMock.on(QueryCommand).resolvesOnce({
         Items: [
           {
-            PK: 'MARKET#v5#1086940#USD',
+            PK: 'MARKET#v6#1086940#USD',
             SK: 'TELEMETRY',
             ...mockDealBaldursGate,
             appId: '1086940',
@@ -3737,7 +3877,7 @@ describe('Public Web API Handler', () => {
       ddbMock.on(QueryCommand).resolvesOnce({
         Items: [
           {
-            PK: 'MARKET#v5#1086940#USD',
+            PK: 'MARKET#v6#1086940#USD',
             SK: 'TELEMETRY',
             appId: '1086940',
             title: "Baldur's Gate 3",

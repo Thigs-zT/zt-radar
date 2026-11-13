@@ -1279,7 +1279,8 @@ describe('ITAD API Utilities', () => {
       expect(historyLogUrl).toContain('id=uuid-cp-2077');
       expect(historyLogUrl).toContain('country=US');
       expect(historyLogUrl).toContain(`shops=${ITAD_VERIFIED_SHOP_IDS.join(',')}`);
-      expect(historyLogUrl).not.toContain('since=');
+      expect(historyLogUrl).toContain('since=');
+      expect(decodeURIComponent(historyLogUrl)).toMatch(/since=\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z/);
 
       expect(deal).toBeDefined();
       expect(deal?.allTimeLowPrice).toBe(19.99);
@@ -1382,10 +1383,218 @@ describe('ITAD API Utilities', () => {
       expect(deal?.alternativeCheckDegraded).toBe(false);
       expect(deal?.alternativeCheckStatus).toBe('confirmed');
       expect(deal?.allTimeLowPrice).toBe(44.99);
-      expect(deal?.priceHistory).toEqual([]);
+      expect(Array.isArray(deal?.priceHistory)).toBe(true);
+      expect(deal?.priceHistory?.length).toBeGreaterThanOrEqual(2);
+      expect(deal?.priceHistory?.some((p) => p.priceUsd === 44.99 && p.isAllTimeLow === true)).toBe(true);
 
       const directEntries = await fetchItadPriceHistory('uuid-bg3', 'USD', 'test_mock_itad_key', AbortSignal.timeout(500));
       expect(directEntries).toEqual([]);
+    });
+
+    it('should extract historyLow from /games/prices/v3 when current discount is 0% and /games/historylow/v1 fails', async () => {
+      process.env.ITAD_API_KEY = 'test_mock_itad_key';
+
+      globalThis.fetch = vi.fn(async (url) => {
+        const strUrl = String(url);
+        if (strUrl.includes('/lookup/id/shop/61/v1')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({ 'app/2807960': 'uuid-bf6' }),
+          };
+        }
+        if (strUrl.includes('/games/prices/v3')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ([
+              {
+                id: 'uuid-bf6',
+                historyLow: {
+                  all: { amount: 119.6, currency: 'BRL' },
+                  y1: { amount: 119.6, currency: 'BRL' },
+                  m3: { amount: 149.5, currency: 'BRL' },
+                },
+                deals: [
+                  {
+                    shop: { id: 61, name: 'Steam' },
+                    price: { amount: 299.0, currency: 'BRL' },
+                    regular: { amount: 299.0, currency: 'BRL' },
+                    cut: 0,
+                    url: 'https://store.steampowered.com/app/2807960/',
+                  },
+                  {
+                    shop: { id: 16, name: 'Epic Games Store' },
+                    price: { amount: 299.0, currency: 'BRL' },
+                    regular: { amount: 299.0, currency: 'BRL' },
+                    cut: 0,
+                    url: 'https://store.epicgames.com/en-US/p/battlefield-6',
+                  },
+                ],
+              },
+            ]),
+          };
+        }
+        if (strUrl.includes('/games/historylow/v1') || strUrl.includes('/games/history/v2')) {
+          return { ok: false, status: 500 };
+        }
+        return { ok: false, status: 404 };
+      });
+
+      const deal = await getGameDealInfo('2807960', 'BRL', 'Battlefield™ 6');
+
+      expect(deal).toBeDefined();
+      expect(deal?.alternativeCheckDegraded).toBe(false);
+      expect(deal?.alternativeCheckStatus).toBe('confirmed');
+      expect(deal?.primaryDeal.salePrice).toBe(299.0);
+      expect(deal?.allTimeLowPrice).toBe(119.6);
+      expect(deal?.isAllTimeLow).toBe(false);
+      expect(deal?.priceHistory?.length).toBeGreaterThanOrEqual(2);
+      expect(deal?.priceHistory?.some((p) => p.priceBrl === 119.6 && p.isAllTimeLow === true)).toBe(true);
+    });
+
+    it('should strip trademark symbols in sanitizeTitleForItadLookup, isStrictEditionMatch, and secondary search', async () => {
+      process.env.ITAD_API_KEY = 'test_mock_itad_key';
+
+      expect(sanitizeTitleForItadLookup('Battlefield™ 6')).toBe('Battlefield 6');
+      expect(sanitizeTitleForItadLookup('Dying Light®: The Beast (TM)')).toBe('Dying Light: The Beast');
+      expect(isStrictEditionMatch('Battlefield™ 6', 'Battlefield 6')).toBe(true);
+
+      globalThis.fetch = vi.fn(async (url, options) => {
+        const strUrl = String(url);
+        if (strUrl.includes('/lookup/id/shop/61/v1')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({ 'app/2807960': 'uuid-bf6' }),
+          };
+        }
+        if (strUrl.includes('/games/prices/v3')) {
+          const reqBody = options?.body ? JSON.parse(String(options.body)) : [];
+          if (Array.isArray(reqBody) && reqBody.includes('uuid-bf6-alt')) {
+            return {
+              ok: true,
+              status: 200,
+              json: async () => ([
+                {
+                  id: 'uuid-bf6-alt',
+                  deals: [
+                    {
+                      shop: { id: 16, name: 'Epic Games Store' },
+                      price: { amount: 249.0, currency: 'BRL' },
+                      regular: { amount: 299.0, currency: 'BRL' },
+                      cut: 17,
+                      url: 'https://store.epicgames.com/p/battlefield-6',
+                    },
+                  ],
+                },
+              ]),
+            };
+          }
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ([
+              {
+                id: 'uuid-bf6',
+                deals: [
+                  {
+                    shop: { id: 61, name: 'Steam' },
+                    price: { amount: 299.0, currency: 'BRL' },
+                    regular: { amount: 299.0, currency: 'BRL' },
+                    cut: 0,
+                    url: 'https://store.steampowered.com/app/2807960/',
+                  },
+                ],
+              },
+            ]),
+          };
+        }
+        if (strUrl.includes('/games/search/v1')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ([
+              { id: 'uuid-bf6-alt', title: 'Battlefield 6' },
+            ]),
+          };
+        }
+        return { ok: true, status: 200, json: async () => [] };
+      });
+
+      const deal = await getGameDealInfo('2807960', 'BRL', 'Battlefield™ 6');
+
+      expect(deal).toBeDefined();
+      expect(deal?.alternativeCheckDegraded).toBe(false);
+      expect(deal?.storeBreakdown?.['Epic Games Store']).toBeDefined();
+      expect(deal?.cheaperAlternative?.shopName).toBe('Epic Games Store');
+      expect(deal?.cheaperAlternative?.salePrice).toBe(249.0);
+    });
+
+    it('should isolate /games/history/v2 aborts so prices/v3 deals never degrade to Steam-only', async () => {
+      process.env.ITAD_API_KEY = 'test_mock_itad_key';
+
+      globalThis.fetch = vi.fn(async (url) => {
+        const strUrl = String(url);
+        if (strUrl.includes('/lookup/id/shop/61/v1')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({ 'app/3008130': 'uuid-dltb' }),
+          };
+        }
+        if (strUrl.includes('/games/prices/v3')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ([
+              {
+                id: 'uuid-dltb',
+                historyLow: { all: { amount: 113.81, currency: 'BRL' } },
+                deals: [
+                  {
+                    shop: { id: 61, name: 'Steam' },
+                    price: { amount: 249.0, currency: 'BRL' },
+                    regular: { amount: 249.0, currency: 'BRL' },
+                    cut: 0,
+                    url: 'https://store.steampowered.com/app/3008130/',
+                  },
+                  {
+                    shop: { id: 16, name: 'Epic Games Store' },
+                    price: { amount: 249.0, currency: 'BRL' },
+                    regular: { amount: 249.0, currency: 'BRL' },
+                    cut: 0,
+                    url: 'https://store.epicgames.com/p/dying-light-the-beast',
+                  },
+                ],
+              },
+            ]),
+          };
+        }
+        if (strUrl.includes('/games/historylow/v1')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ([
+              { id: 'uuid-dltb', low: { amount: 113.81, currency: 'BRL' } },
+            ]),
+          };
+        }
+        if (strUrl.includes('/games/history/v2')) {
+          throw new DOMException('The operation was aborted', 'AbortError');
+        }
+        return { ok: false, status: 404 };
+      });
+
+      const deal = await getGameDealInfo('3008130', 'BRL', 'Dying Light: The Beast');
+
+      expect(deal).toBeDefined();
+      expect(deal?.alternativeCheckDegraded).toBe(false);
+      expect(deal?.alternativeCheckStatus).toBe('confirmed');
+      expect(deal?.storeBreakdown?.Steam).toBeDefined();
+      expect(deal?.storeBreakdown?.['Epic Games Store']).toBeDefined();
+      expect(deal?.allTimeLowPrice).toBe(113.81);
+      expect(deal?.priceHistory?.length).toBeGreaterThanOrEqual(2);
     });
   });
   describe('fetchSteamStoreAppDetails', () => {
