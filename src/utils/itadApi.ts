@@ -428,7 +428,44 @@ export interface RawItadHistoryLogEntry {
 /** Verified ITAD v2 shop IDs: 61 (Steam), 16 (Epic Games Store), 35 (GOG), 50 (Nuuvem). */
 export const ITAD_VERIFIED_SHOP_IDS = [61, 16, 35, 50] as const;
 export const MAX_PRICE_HISTORY_POINTS = 15;
-export const ITAD_HISTORY_LOOKBACK_DAYS = 730;
+export const ITAD_HISTORY_LOOKBACK_DAYS = 1825;
+
+interface HistoryLowMeta {
+  timestamp?: string | number | null;
+  shopName?: string | null;
+  regularPrice?: number | null;
+}
+
+interface CachedItadUuidEntry {
+  id: string;
+  title: string | null;
+}
+
+interface CachedItadBulkPriceEntry {
+  items: RawItadPriceOverviewItem[];
+  historyLow: number | null;
+  historyLowMeta: HistoryLowMeta;
+  expiresAt: number;
+}
+
+const ITAD_BULK_PRICE_CACHE_TTL_MS = 300_000;
+const ITAD_BULK_BATCH_CHUNK_SIZE = 100;
+const steamAppIdToItadUuidCache = new Map<string, CachedItadUuidEntry>();
+const itadBulkPriceCache = new Map<string, CachedItadBulkPriceEntry>();
+let lastTrackedFetch: typeof fetch | null = null;
+
+function syncItadRuntimeCaches(): void {
+  if (typeof globalThis.fetch !== 'undefined' && globalThis.fetch !== lastTrackedFetch) {
+    steamAppIdToItadUuidCache.clear();
+    itadBulkPriceCache.clear();
+    lastTrackedFetch = globalThis.fetch;
+  }
+}
+
+export function clearItadRuntimeCaches(): void {
+  steamAppIdToItadUuidCache.clear();
+  itadBulkPriceCache.clear();
+}
 
 const ITAD_SHOP_ID_TO_STORE: Record<string, { shopId: 'steam' | 'nuuvem' | 'epic' | 'gog'; shopName: string }> = {
   '61': { shopId: 'steam', shopName: 'Steam' },
@@ -731,6 +768,10 @@ export function synthesizeAnchorPriceHistory(
     typeof allTimeLowPrice === 'number' && Number.isFinite(allTimeLowPrice) && allTimeLowPrice > 0;
   const effectiveAtl = hasValidAtl ? Number(allTimeLowPrice.toFixed(2)) : null;
 
+  if (effectiveAtl === null) {
+    return [];
+  }
+
   const activeShopCanonical = resolveStoreName(activeDeal.shopName) || 'Steam';
   const activeShopId = STORE_NAME_TO_SHOP_ID[activeShopCanonical] || 'steam';
 
@@ -777,7 +818,7 @@ export function synthesizeAnchorPriceHistory(
           : (single.priceUsd ?? currentPrice);
 
     const baselineMs = Math.min(validSingleMs, nowMs - 60000) - 90 * 86400 * 1000;
-    if (effectiveAtl !== null && singlePrice > effectiveAtl + 0.001) {
+    if (singlePrice > effectiveAtl + 0.001) {
       const atlShopCanonical = resolveStoreName(atlMeta?.shopName) || activeShopCanonical;
       const atlShopId = STORE_NAME_TO_SHOP_ID[atlShopCanonical] || activeShopId;
       const parsedAtlMs = atlMeta?.timestamp ? new Date(atlMeta.timestamp).getTime() : NaN;
@@ -793,16 +834,12 @@ export function synthesizeAnchorPriceHistory(
     points.push(single);
 
     if (validSingleMs < nowMs - 60000) {
-      const currentIsAtl = effectiveAtl !== null && currentPrice <= effectiveAtl + 0.001;
+      const currentIsAtl = currentPrice <= effectiveAtl + 0.001;
       points.push(toPoint(nowMs, activeShopId, activeShopCanonical, currentPrice, regularPrice, currentIsAtl));
     }
 
     points.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
     return points.slice(-MAX_PRICE_HISTORY_POINTS);
-  }
-
-  if (effectiveAtl === null) {
-    return [];
   }
 
   const parsedAtlMs = atlMeta?.timestamp ? new Date(atlMeta.timestamp).getTime() : NaN;
@@ -989,6 +1026,184 @@ export async function fetchSteamStoreAppDetails(
   }
 }
 
+function extractHistoryLowMeta(matchedItem: RawItadHistoryLowItem | null): {
+  low: number | null;
+  meta: HistoryLowMeta;
+} {
+  const rawLow = matchedItem?.low?.price?.amount;
+  if (typeof rawLow !== 'number' || !Number.isFinite(rawLow) || rawLow < 0) {
+    return { low: null, meta: {} };
+  }
+  const shopName =
+    resolveStoreName(matchedItem?.low?.shop?.name) ||
+    (matchedItem?.low?.shop?.id !== undefined && matchedItem?.low?.shop?.id !== null
+      ? ITAD_SHOP_ID_TO_STORE[String(matchedItem.low.shop.id).trim()]?.shopName ?? null
+      : null) ||
+    matchedItem?.low?.shop?.name ||
+    null;
+
+  return {
+    low: Number(rawLow.toFixed(2)),
+    meta: {
+      timestamp: matchedItem?.low?.timestamp ?? null,
+      shopName,
+      regularPrice:
+        typeof matchedItem?.low?.regular?.amount === 'number' &&
+        Number.isFinite(matchedItem.low.regular.amount)
+          ? Number(matchedItem.low.regular.amount.toFixed(2))
+          : null,
+    },
+  };
+}
+
+function ingestItadDealsIntoBreakdown(
+  items: RawItadPriceOverviewItem[],
+  options: {
+    currency: string;
+    currencySymbol: string;
+    steamAppId: string | null;
+    storeBreakdown: Record<string, StoreDeal>;
+    isSecondary: boolean;
+    onHistoryLowCandidate?: (val: unknown) => void;
+  },
+): void {
+  const { currency, currencySymbol, steamAppId, storeBreakdown, isSecondary, onHistoryLowCandidate } = options;
+  for (const item of items || []) {
+    if (!isSecondary && item.historyLow && onHistoryLowCandidate) {
+      onHistoryLowCandidate(item.historyLow.all?.amount);
+      onHistoryLowCandidate(item.historyLow.y1?.amount);
+      onHistoryLowCandidate(item.historyLow.m3?.amount);
+    }
+
+    for (const d of item.deals || []) {
+      const shopName =
+        resolveStoreName(d.shop?.name) ||
+        (d.shop?.id !== undefined && d.shop?.id !== null
+          ? ITAD_SHOP_ID_TO_STORE[String(d.shop.id).trim()]?.shopName ?? null
+          : null);
+      if (!shopName) continue; // STRICTLY IGNORE outside our 4 approved stores
+
+      if (!isSecondary && onHistoryLowCandidate) {
+        onHistoryLowCandidate(d.storeLow?.amount);
+      }
+
+      if (isSecondary && (shopName === 'Steam' || storeBreakdown[shopName])) {
+        continue;
+      }
+
+      const dealSale = Number(d.price?.amount ?? 0);
+      const dealRegular = Number(d.regular?.amount ?? dealSale);
+      const dealCut = Number(d.cut ?? 0);
+      const dealUrl =
+        shopName === 'Steam' && steamAppId
+          ? `https://store.steampowered.com/app/${steamAppId}/`
+          : d.url || '';
+
+      if (!storeBreakdown[shopName] || dealSale < storeBreakdown[shopName].salePrice) {
+        storeBreakdown[shopName] = {
+          shopName,
+          salePrice: dealSale,
+          regularPrice: dealRegular,
+          cutPercent: dealCut,
+          url: dealUrl,
+          expiry: d.expiry || null,
+          currency,
+          currencySymbol,
+        };
+      }
+    }
+  }
+}
+
+function buildStoreDealSummary(
+  storeBreakdown: Record<string, StoreDeal>,
+  currency: string,
+  currencySymbol: string,
+): {
+  primaryDeal: StoreDeal;
+  cheaperAlternative: StoreDeal | null;
+  absoluteCheapest: StoreDeal;
+} {
+  const availableDeals = Object.values(storeBreakdown);
+  const sortedByPrice = [...availableDeals].sort((a, b) => a.salePrice - b.salePrice);
+  const absoluteCheapest = sortedByPrice[0];
+  const primaryRaw = storeBreakdown['Steam'] || absoluteCheapest;
+  const secondaryRaw = absoluteCheapest.salePrice < primaryRaw.salePrice ? absoluteCheapest : null;
+
+  const toStoreDeal = (raw: StoreDeal): StoreDeal => ({
+    shopName: raw.shopName,
+    salePrice: raw.salePrice,
+    regularPrice: raw.regularPrice,
+    cutPercent: raw.cutPercent,
+    url: raw.url,
+    expiry: raw.expiry || null,
+    currency,
+    currencySymbol,
+  });
+
+  return {
+    primaryDeal: toStoreDeal(primaryRaw),
+    cheaperAlternative: secondaryRaw ? toStoreDeal(secondaryRaw) : null,
+    absoluteCheapest,
+  };
+}
+
+function ensureAtlInPriceHistory(
+  priceHistory: PricePoint[],
+  historyLow: number,
+  historyLowMeta: HistoryLowMeta,
+  primaryDeal: StoreDeal,
+  currency: string,
+): PricePoint[] {
+  if (priceHistory.length === 0 || priceHistory.some((pt) => pt.isAllTimeLow)) {
+    return priceHistory;
+  }
+
+  const isBrl = currency.toUpperCase().trim() === 'BRL';
+  const roundedAtl = Number(historyLow.toFixed(2));
+  const firstMs = new Date(priceHistory[0].timestamp).getTime();
+  const parsedMetaMs = historyLowMeta.timestamp ? new Date(historyLowMeta.timestamp).getTime() : NaN;
+  const atlEpochMs = Number.isFinite(parsedMetaMs)
+    ? parsedMetaMs
+    : (Number.isFinite(firstMs) ? firstMs : Date.now()) - 90 * 86400 * 1000;
+
+  const atlShopCanonical =
+    resolveStoreName(historyLowMeta.shopName) || resolveStoreName(primaryDeal.shopName) || 'Steam';
+  const atlShopId = STORE_NAME_TO_SHOP_ID[atlShopCanonical] || 'steam';
+  const atlReg =
+    typeof historyLowMeta.regularPrice === 'number' &&
+    Number.isFinite(historyLowMeta.regularPrice) &&
+    historyLowMeta.regularPrice > 0
+      ? Number(Math.max(historyLowMeta.regularPrice, roundedAtl).toFixed(2))
+      : Number(Math.max(primaryDeal.regularPrice || roundedAtl, roundedAtl).toFixed(2));
+  const cutPercent =
+    atlReg > 0 && roundedAtl < atlReg
+      ? Math.max(0, Math.min(100, Math.round(((atlReg - roundedAtl) / atlReg) * 100)))
+      : 0;
+
+  const atlPoint: PricePoint = {
+    timestamp: new Date(atlEpochMs).toISOString(),
+    shopId: atlShopId,
+    shopName: atlShopCanonical,
+    priceUsd: isBrl ? null : roundedAtl,
+    priceBrl: isBrl ? roundedAtl : null,
+    price: roundedAtl,
+    regularPrice: atlReg,
+    cutPercent,
+    isAllTimeLow: true,
+  };
+
+  const next = [...priceHistory];
+  if (next.length >= MAX_PRICE_HISTORY_POINTS) {
+    // Drop an interior checkpoint so first/last timeline bounds remain anchored
+    const removeIdx = next.length > 2 ? 1 : 0;
+    next.splice(removeIdx, 1);
+  }
+  next.push(atlPoint);
+  next.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+  return next.slice(0, MAX_PRICE_HISTORY_POINTS);
+}
+
 /**
  * Resolves an ITAD UUID directly by Steam AppID using /games/lookup/v1?appid=... first,
  * falling back to direct Steam shop ID (shop: 61) mapping via /lookup/id/shop/61/v1.
@@ -998,6 +1213,12 @@ async function resolveItadIdBySteamAppId(
   itadKey: string,
   signal: AbortSignal,
 ): Promise<{ id: string | null; title: string | null; transientError: boolean }> {
+  syncItadRuntimeCaches();
+  const cached = steamAppIdToItadUuidCache.get(steamAppId);
+  if (cached) {
+    return { id: cached.id, title: cached.title, transientError: false };
+  }
+
   let transientError = false;
 
   try {
@@ -1011,9 +1232,13 @@ async function resolveItadIdBySteamAppId(
     if (lookupRes.ok) {
       const lookupData = (await lookupRes.json()) as RawItadLookupResponse;
       if (lookupData?.game?.id) {
-        return {
+        const entry = {
           id: lookupData.game.id,
           title: lookupData.game.title || null,
+        };
+        steamAppIdToItadUuidCache.set(steamAppId, entry);
+        return {
+          ...entry,
           transientError: false,
         };
       }
@@ -1048,7 +1273,9 @@ async function resolveItadIdBySteamAppId(
       const shopMap = (await shopRes.json()) as Record<string, string | null>;
       const mappedUuid = shopMap?.[shopKey];
       if (typeof mappedUuid === 'string' && mappedUuid.trim().length > 0) {
-        return { id: mappedUuid.trim(), title: null, transientError: false };
+        const cleanUuid = mappedUuid.trim();
+        steamAppIdToItadUuidCache.set(steamAppId, { id: cleanUuid, title: null });
+        return { id: cleanUuid, title: null, transientError: false };
       }
     } else if (shopRes.status === 429 || shopRes.status >= 500) {
       transientError = true;
@@ -1073,6 +1300,7 @@ export async function getGameDealInfo(
   titleFallbackOrCurrency: string | null = null,
   externalSignal?: AbortSignal,
 ): Promise<GameDealInfo | null> {
+  syncItadRuntimeCaches();
   let preferredCurrency = 'USD';
   let titleFallback: string | null = null;
 
@@ -1175,55 +1403,14 @@ export async function getGameDealInfo(
     };
 
     const ingestDeals = (items: RawItadPriceOverviewItem[], isSecondary: boolean) => {
-      for (const item of items || []) {
-        if (!isSecondary && item.historyLow) {
-          recordCandidateHistoryLow(item.historyLow.all?.amount);
-          recordCandidateHistoryLow(item.historyLow.y1?.amount);
-          recordCandidateHistoryLow(item.historyLow.m3?.amount);
-        }
-
-        for (const d of item.deals || []) {
-          const shopName =
-            resolveStoreName(d.shop?.name) ||
-            (d.shop?.id !== undefined && d.shop?.id !== null
-              ? ITAD_SHOP_ID_TO_STORE[String(d.shop.id).trim()]?.shopName ?? null
-              : null);
-          if (!shopName) continue; // STRICTLY IGNORE outside our 4 approved stores
-
-          if (!isSecondary) {
-            recordCandidateHistoryLow(d.storeLow?.amount);
-          }
-
-          if (isSecondary) {
-            // Secondary edition UUIDs: ONLY merge non-Steam storefronts (GOG, Epic Games Store, Nuuvem)
-            // that are not already present from the primary itadLookup UUID.
-            if (shopName === 'Steam' || storeBreakdown[shopName]) {
-              continue;
-            }
-          }
-
-          const dealSale = Number(d.price?.amount ?? 0);
-          const dealRegular = Number(d.regular?.amount ?? dealSale);
-          const dealCut = Number(d.cut ?? 0);
-          const dealUrl =
-            shopName === 'Steam' && steamAppId
-              ? `https://store.steampowered.com/app/${steamAppId}/`
-              : d.url || '';
-
-          if (!storeBreakdown[shopName] || dealSale < storeBreakdown[shopName].salePrice) {
-            storeBreakdown[shopName] = {
-              shopName,
-              salePrice: dealSale,
-              regularPrice: dealRegular,
-              cutPercent: dealCut,
-              url: dealUrl,
-              expiry: d.expiry || null,
-              currency,
-              currencySymbol,
-            };
-          }
-        }
-      }
+      ingestItadDealsIntoBreakdown(items, {
+        currency,
+        currencySymbol,
+        steamAppId,
+        storeBreakdown,
+        isSecondary,
+        onHistoryLowCandidate: isSecondary ? undefined : recordCandidateHistoryLow,
+      });
     };
 
     const runItadPipeline = async (): Promise<'ITAD_DONE'> => {
@@ -1305,90 +1492,13 @@ export async function getGameDealInfo(
       });
 
       const queryPricesAndHistory = async (targetItadId: string): Promise<boolean> => {
-        const priceUrl = `${ITAD_BASE_URL}/games/prices/v3?key=${itadKey}&country=${itadCountry}`;
-        const historyUrl = `${ITAD_BASE_URL}/games/historylow/v1?key=${itadKey}&country=${itadCountry}`;
+        const shopsParam = ITAD_VERIFIED_SHOP_IDS.join(',');
+        const priceUrl = `${ITAD_BASE_URL}/games/prices/v3?key=${itadKey}&country=${itadCountry}&shops=${shopsParam}`;
+        const historyUrl = `${ITAD_BASE_URL}/games/historylow/v1?key=${itadKey}&country=${itadCountry}&shops=${shopsParam}`;
         const requestBody = JSON.stringify([targetItadId]);
+        const cacheKey = `${targetItadId}:${currency}`;
 
-        // Execute /games/prices/v3 FIRST so concurrent advisory calls never burst-starve primary storefront pricing
-        let priceOk = false;
-        try {
-          const priceRes = await fetchItadWithRetry(
-            priceUrl,
-            {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json', 'User-Agent': USER_AGENT },
-              body: requestBody,
-            },
-            activePricesSignal,
-          );
-          if (priceRes.ok) {
-            primaryPricesSucceeded = true;
-            const priceData = (await priceRes.json()) as RawItadPriceOverviewItem[];
-            ingestDeals(priceData, false);
-            priceOk = true;
-          } else {
-            alternativeCheckDegraded = true;
-            alternativeCheckStatus = 'degraded';
-          }
-        } catch (primaryErr: unknown) {
-          alternativeCheckDegraded = true;
-          alternativeCheckStatus = 'degraded';
-          const msg = primaryErr instanceof Error ? primaryErr.message : String(primaryErr);
-          console.error('ITAD primary prices/history query error:', msg);
-        }
-
-        if (activePricesSignal.aborted) {
-          return priceOk;
-        }
-
-        // Stage 3 advisory tasks run in parallel AFTER prices/v3 completes, with isolated history timeout
-        const historyTask = (async (): Promise<void> => {
-          try {
-            // Unbound by time windows (no `since` parameter) to guarantee true lifetime ATL since launch
-            const historyRes = await fetchItadWithRetry(
-              historyUrl,
-              {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'User-Agent': USER_AGENT },
-                body: requestBody,
-              },
-              activePricesSignal,
-            );
-            if (historyRes.ok) {
-              const historyData = (await historyRes.json()) as RawItadHistoryLowItem[];
-              const matchedItem =
-                (Array.isArray(historyData)
-                  ? historyData.find((item) => item.id === targetItadId) || historyData[0]
-                  : null) || null;
-              const rawLow = matchedItem?.low?.price?.amount;
-              if (typeof rawLow === 'number' && Number.isFinite(rawLow) && rawLow >= 0) {
-                const normalizedLow = Number(rawLow.toFixed(2));
-                if (historyLow === null || normalizedLow < historyLow) {
-                  historyLow = normalizedLow;
-                }
-                historyLowMeta = {
-                  timestamp: matchedItem?.low?.timestamp ?? null,
-                  shopName:
-                    resolveStoreName(matchedItem?.low?.shop?.name) ||
-                    (matchedItem?.low?.shop?.id !== undefined && matchedItem?.low?.shop?.id !== null
-                      ? ITAD_SHOP_ID_TO_STORE[String(matchedItem.low.shop.id).trim()]?.shopName ?? null
-                      : null) ||
-                    matchedItem?.low?.shop?.name ||
-                    null,
-                  regularPrice:
-                    typeof matchedItem?.low?.regular?.amount === 'number' &&
-                    Number.isFinite(matchedItem.low.regular.amount)
-                      ? Number(matchedItem.low.regular.amount.toFixed(2))
-                      : null,
-                };
-              }
-            }
-          } catch {
-            // History low lookup is advisory; do not discard discovered store prices
-          }
-        })();
-
-        const historyLogTask = (async (): Promise<void> => {
+        const runHistoryLogTask = async (): Promise<void> => {
           const historyCtrl = new AbortController();
           const onPricesAbort = () => historyCtrl.abort();
           if (activePricesSignal.aborted) {
@@ -1409,9 +1519,99 @@ export async function getGameDealInfo(
             clearTimeout(historyLogTimer);
             activePricesSignal.removeEventListener('abort', onPricesAbort);
           }
-        })();
+        };
 
-        await Promise.allSettled([historyTask, historyLogTask]);
+        // Check in-memory bulk price cache warmed by batchResolveItadDeals or recent modal clicks
+        const cachedBulk = itadBulkPriceCache.get(cacheKey);
+        if (cachedBulk && cachedBulk.expiresAt > Date.now()) {
+          ingestDeals(cachedBulk.items, false);
+          if (cachedBulk.historyLow !== null) {
+            recordCandidateHistoryLow(cachedBulk.historyLow);
+            historyLowMeta = { ...cachedBulk.historyLowMeta };
+          }
+          primaryPricesSucceeded = true;
+          if (!activePricesSignal.aborted) {
+            await runHistoryLogTask();
+          }
+          return true;
+        }
+
+        // Execute /games/prices/v3 FIRST so concurrent advisory calls never burst-starve primary storefront pricing
+        let priceOk = false;
+        let resolvedPriceData: RawItadPriceOverviewItem[] = [];
+        try {
+          const priceRes = await fetchItadWithRetry(
+            priceUrl,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'User-Agent': USER_AGENT },
+              body: requestBody,
+            },
+            activePricesSignal,
+          );
+          if (priceRes.ok) {
+            primaryPricesSucceeded = true;
+            resolvedPriceData = (await priceRes.json()) as RawItadPriceOverviewItem[];
+            ingestDeals(resolvedPriceData, false);
+            priceOk = true;
+          } else {
+            alternativeCheckDegraded = true;
+            alternativeCheckStatus = 'degraded';
+          }
+        } catch (primaryErr: unknown) {
+          alternativeCheckDegraded = true;
+          alternativeCheckStatus = 'degraded';
+          const msg = primaryErr instanceof Error ? primaryErr.message : String(primaryErr);
+          console.error('ITAD primary prices/history query error:', msg);
+        }
+
+        if (!priceOk || activePricesSignal.aborted) {
+          return priceOk;
+        }
+
+        // Skip redundant /games/historylow/v1 call if /games/prices/v3 already delivered historyLow
+        const historyTask: Promise<void> =
+          historyLow !== null
+            ? Promise.resolve()
+            : (async (): Promise<void> => {
+                try {
+                  const historyRes = await fetchItadWithRetry(
+                    historyUrl,
+                    {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json', 'User-Agent': USER_AGENT },
+                      body: requestBody,
+                    },
+                    activePricesSignal,
+                  );
+                  if (historyRes.ok) {
+                    const historyData = (await historyRes.json()) as RawItadHistoryLowItem[];
+                    const matchedItem =
+                      (Array.isArray(historyData)
+                        ? historyData.find((item) => item.id === targetItadId) || historyData[0]
+                        : null) || null;
+                    const extracted = extractHistoryLowMeta(matchedItem);
+                    if (extracted.low !== null) {
+                      recordCandidateHistoryLow(extracted.low);
+                      historyLowMeta = extracted.meta;
+                    }
+                  }
+                } catch {
+                  // History low lookup is advisory; do not discard discovered store prices
+                }
+              })();
+
+        await Promise.allSettled([historyTask, runHistoryLogTask()]);
+
+        if (Array.isArray(resolvedPriceData) && resolvedPriceData.length > 0) {
+          itadBulkPriceCache.set(cacheKey, {
+            items: resolvedPriceData,
+            historyLow,
+            historyLowMeta: { ...historyLowMeta },
+            expiresAt: Date.now() + ITAD_BULK_PRICE_CACHE_TTL_MS,
+          });
+        }
+
         return priceOk;
       };
 
@@ -1635,88 +1835,78 @@ export async function getGameDealInfo(
       return null;
     }
 
-    // Determine primary offer (Steam by default, or the cheapest deal)
-    const sortedByPrice = [...availableDeals].sort((a, b) => a.salePrice - b.salePrice);
-    const absoluteCheapest = sortedByPrice[0];
-    const defaultSteam = storeBreakdown['Steam'] || absoluteCheapest;
-
-    const primaryRaw = defaultSteam;
-    let secondaryRaw: StoreDeal | null = null;
-
-    if (absoluteCheapest.salePrice < primaryRaw.salePrice) {
-      secondaryRaw = absoluteCheapest;
-    }
-
-    const primaryDeal: StoreDeal = {
-      shopName: primaryRaw.shopName,
-      salePrice: primaryRaw.salePrice,
-      regularPrice: primaryRaw.regularPrice,
-      cutPercent: primaryRaw.cutPercent,
-      url: primaryRaw.url,
-      expiry: primaryRaw.expiry || null,
+    const { primaryDeal, cheaperAlternative, absoluteCheapest } = buildStoreDealSummary(
+      storeBreakdown,
       currency,
       currencySymbol,
-    };
-
-    const cheaperAlternative: StoreDeal | null = secondaryRaw
-      ? {
-          shopName: secondaryRaw.shopName,
-          salePrice: secondaryRaw.salePrice,
-          regularPrice: secondaryRaw.regularPrice,
-          cutPercent: secondaryRaw.cutPercent,
-          url: secondaryRaw.url,
-          expiry: secondaryRaw.expiry || null,
-          currency,
-          currencySymbol,
-        }
-      : null;
-
-    let priceHistory = transformItadPriceHistory(
-      rawHistoryEntries,
-      currency,
-      historyLow,
-      MAX_PRICE_HISTORY_POINTS,
     );
 
-    const positiveHistoryPrices = priceHistory
-      .map((pt) => pt.price)
-      .filter((p): p is number => typeof p === 'number' && Number.isFinite(p) && p > 0);
-    if (positiveHistoryPrices.length > 0) {
-      const minHistoryPrice = Math.min(...positiveHistoryPrices);
-      if (historyLow === null || minHistoryPrice < historyLow) {
-        historyLow = minHistoryPrice;
+    const isDegradedState =
+      Boolean(alternativeCheckDegraded) || String(alternativeCheckStatus) === 'degraded';
+    let priceHistory: PricePoint[] = [];
+
+    if (isDegradedState) {
+      // Never fabricate an All-Time Low or synthetic chart from degraded Steam-only fallbacks
+      historyLow = null;
+      priceHistory = [];
+    } else {
+      priceHistory = transformItadPriceHistory(
+        rawHistoryEntries,
+        currency,
+        historyLow,
+        MAX_PRICE_HISTORY_POINTS,
+      );
+
+      const positiveHistoryPrices = priceHistory
+        .map((pt) => pt.price)
+        .filter((p): p is number => typeof p === 'number' && Number.isFinite(p) && p > 0);
+      if (positiveHistoryPrices.length > 0) {
+        const minHistoryPrice = Math.min(...positiveHistoryPrices);
+        if (historyLow === null || minHistoryPrice < historyLow) {
+          historyLow = minHistoryPrice;
+        }
+      }
+
+      if (historyLow !== null && absoluteCheapest.salePrice > 0 && absoluteCheapest.salePrice < historyLow) {
+        historyLow = Number(absoluteCheapest.salePrice.toFixed(2));
+      }
+
+      if (priceHistory.length < 2 && historyLow !== null) {
+        priceHistory = synthesizeAnchorPriceHistory(
+          priceHistory,
+          primaryDeal,
+          cheaperAlternative,
+          historyLow,
+          currency,
+          historyLowMeta,
+        );
+      } else if (priceHistory.length > 0 && historyLow !== null && !priceHistory.some((pt) => pt.isAllTimeLow)) {
+        priceHistory = ensureAtlInPriceHistory(
+          priceHistory,
+          historyLow,
+          historyLowMeta,
+          primaryDeal,
+          currency,
+        );
       }
     }
 
-    if (historyLow !== null && absoluteCheapest.salePrice > 0 && absoluteCheapest.salePrice < historyLow) {
-      historyLow = Number(absoluteCheapest.salePrice.toFixed(2));
-    }
-
-    if (priceHistory.length < 2 && historyLow !== null) {
-      priceHistory = synthesizeAnchorPriceHistory(
-        priceHistory,
-        primaryDeal,
-        cheaperAlternative,
-        historyLow,
-        currency,
-        historyLowMeta,
-      );
-    }
-
     const primaryIsAtl =
+      !isDegradedState &&
       primaryDeal.cutPercent > 0 &&
       primaryDeal.salePrice < primaryDeal.regularPrice &&
       historyLow !== null &&
       primaryDeal.salePrice <= historyLow;
 
     const cheaperIsAtl =
+      !isDegradedState &&
       Boolean(cheaperAlternative) &&
       (cheaperAlternative?.cutPercent ?? 0) > 0 &&
       (cheaperAlternative?.salePrice ?? 0) < (cheaperAlternative?.regularPrice ?? 0) &&
       historyLow !== null &&
       (cheaperAlternative?.salePrice ?? 0) <= historyLow;
 
-    const isAllTimeLow = historyLow !== null && (primaryIsAtl || cheaperIsAtl);
+    const isAllTimeLow = !isDegradedState && historyLow !== null && (primaryIsAtl || cheaperIsAtl);
 
     const isFree = primaryDeal.salePrice === 0 || (cheaperAlternative && cheaperAlternative.salePrice === 0);
 
@@ -1751,6 +1941,313 @@ export async function getGameDealInfo(
     console.error(`Error resolving deal info for ${rawGameIdentifier}:`, msg);
     return null;
   }
+}
+
+/**
+ * Bulk-resolves multi-store prices and historical lows for a page of Steam AppIDs
+ * using at most 3 ITAD HTTP requests (shop-61 lookup, prices/v3, and historylow/v1)
+ * and warms the in-memory UUID + bulk price caches for subsequent modal inspections.
+ */
+export async function batchResolveItadDeals(
+  appIds: Array<number | string>,
+  currency: 'USD' | 'BRL' = 'USD',
+  externalSignal?: AbortSignal,
+): Promise<Map<string, GameDealInfo>> {
+  syncItadRuntimeCaches();
+  const results = new Map<string, GameDealInfo>();
+
+  const itadKey = process.env.ITAD_API_KEY || ITAD_API_KEY;
+  if (!itadKey || !Array.isArray(appIds) || appIds.length === 0) {
+    return results;
+  }
+
+  const isBrl = String(currency || 'USD').toUpperCase().trim() === 'BRL';
+  const normalizedCurrency: 'USD' | 'BRL' = isBrl ? 'BRL' : 'USD';
+  const currencySymbol = isBrl ? 'R$' : '$';
+  const itadCountry = isBrl ? 'BR' : 'US';
+  const shopsParam = ITAD_VERIFIED_SHOP_IDS.join(',');
+
+  const cleanAppIds: string[] = [];
+  const seenAppIds = new Set<string>();
+  for (const raw of appIds) {
+    const clean = String(raw ?? '').trim();
+    if (!clean || !/^\d+$/.test(clean) || seenAppIds.has(clean)) continue;
+    seenAppIds.add(clean);
+    cleanAppIds.push(clean);
+  }
+  if (cleanAppIds.length === 0) {
+    return results;
+  }
+
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const onExternalAbort = () => controller.abort();
+
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      controller.abort();
+      return results;
+    }
+    externalSignal.addEventListener('abort', onExternalAbort, { once: true });
+  }
+
+  const timeoutPromise = new Promise<'BATCH_TIMEOUT'>((resolve) => {
+    timer = setTimeout(() => {
+      controller.abort(new DOMException(`ITAD batch exceeded ${ITAD_PRICES_TIMEOUT_MS}ms timeout`, 'TimeoutError'));
+      resolve('BATCH_TIMEOUT');
+    }, ITAD_PRICES_TIMEOUT_MS);
+  });
+
+  const buildDealFromOverviewItem = (
+    appId: string,
+    uuid: string,
+    item: RawItadPriceOverviewItem,
+    cachedLow: number | null,
+    cachedMeta: HistoryLowMeta,
+    titleHint: string | null,
+  ): GameDealInfo | null => {
+    const storeBreakdown: Record<string, StoreDeal> = {};
+    let itemHistoryLow = cachedLow;
+    const recordLow = (val: unknown) => {
+      if (typeof val === 'number' && Number.isFinite(val) && val > 0) {
+        const normalized = Number(val.toFixed(2));
+        if (itemHistoryLow === null || normalized < itemHistoryLow) {
+          itemHistoryLow = normalized;
+        }
+      }
+    };
+
+    ingestItadDealsIntoBreakdown([item], {
+      currency: normalizedCurrency,
+      currencySymbol,
+      steamAppId: appId,
+      storeBreakdown,
+      isSecondary: false,
+      onHistoryLowCandidate: recordLow,
+    });
+
+    if (Object.keys(storeBreakdown).length === 0) {
+      return null;
+    }
+
+    const { primaryDeal, cheaperAlternative, absoluteCheapest } = buildStoreDealSummary(
+      storeBreakdown,
+      normalizedCurrency,
+      currencySymbol,
+    );
+
+    if (itemHistoryLow !== null && absoluteCheapest.salePrice > 0 && absoluteCheapest.salePrice < itemHistoryLow) {
+      itemHistoryLow = Number(absoluteCheapest.salePrice.toFixed(2));
+    }
+
+    const priceHistory =
+      itemHistoryLow !== null
+        ? synthesizeAnchorPriceHistory(
+            [],
+            primaryDeal,
+            cheaperAlternative,
+            itemHistoryLow,
+            normalizedCurrency,
+            cachedMeta,
+          )
+        : [];
+
+    const primaryIsAtl =
+      primaryDeal.cutPercent > 0 &&
+      primaryDeal.salePrice < primaryDeal.regularPrice &&
+      itemHistoryLow !== null &&
+      primaryDeal.salePrice <= itemHistoryLow;
+    const cheaperIsAtl =
+      Boolean(cheaperAlternative) &&
+      (cheaperAlternative?.cutPercent ?? 0) > 0 &&
+      (cheaperAlternative?.salePrice ?? 0) < (cheaperAlternative?.regularPrice ?? 0) &&
+      itemHistoryLow !== null &&
+      (cheaperAlternative?.salePrice ?? 0) <= itemHistoryLow;
+
+    const isFree = primaryDeal.salePrice === 0 || Boolean(cheaperAlternative && cheaperAlternative.salePrice === 0);
+    const partnerCount = Object.keys(storeBreakdown).filter((k) => k !== 'Steam').length;
+
+    return {
+      gameId: `steam_${appId}`,
+      title: titleHint || 'Monitored Title',
+      imageUrl: `https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/${appId}/header.jpg`,
+      reviewScore: null,
+      steamAppId: appId,
+      dealType: isFree ? 'FREE_TO_KEEP' : 'CURATED_DEAL',
+      isAllTimeLow: itemHistoryLow !== null && (primaryIsAtl || cheaperIsAtl),
+      allTimeLowPrice: itemHistoryLow,
+      priceHistory,
+      expiry: primaryDeal.expiry || cheaperAlternative?.expiry || null,
+      primaryDeal,
+      cheaperAlternative,
+      storeBreakdown,
+      alternativeCheckStatus: 'confirmed',
+      alternativeCheckDegraded: false,
+      isPlatformExclusive: partnerCount === 0 && Boolean(uuid),
+    };
+  };
+
+  const executeBatch = async (): Promise<'BATCH_DONE'> => {
+    try {
+      for (let offset = 0; offset < cleanAppIds.length; offset += ITAD_BULK_BATCH_CHUNK_SIZE) {
+        if (controller.signal.aborted) break;
+        const chunkAppIds = cleanAppIds.slice(offset, offset + ITAD_BULK_BATCH_CHUNK_SIZE);
+
+        // Step 1: 1 bulk POST /lookup/id/shop/61/v1 for uncached Steam AppIDs
+        const missingAppIds = chunkAppIds.filter((id) => !steamAppIdToItadUuidCache.has(id));
+        if (missingAppIds.length > 0 && !controller.signal.aborted) {
+          try {
+            const shopLookupUrl = `${ITAD_BASE_URL}/lookup/id/shop/61/v1?key=${itadKey}`;
+            const shopRes = await fetchItadWithRetry(
+              shopLookupUrl,
+              {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'User-Agent': USER_AGENT },
+                body: JSON.stringify(missingAppIds.map((id) => `app/${id}`)),
+              },
+              controller.signal,
+            );
+            if (shopRes.ok) {
+              const shopMap = (await shopRes.json()) as Record<string, string | null>;
+              for (const appId of missingAppIds) {
+                const mappedUuid = shopMap?.[`app/${appId}`];
+                if (typeof mappedUuid === 'string' && mappedUuid.trim().length > 0) {
+                  steamAppIdToItadUuidCache.set(appId, { id: mappedUuid.trim(), title: null });
+                }
+              }
+            }
+          } catch (lookupErr: unknown) {
+            const msg = lookupErr instanceof Error ? lookupErr.message : String(lookupErr);
+            console.warn('[ITAD Bulk] Shop 61 batch lookup error:', msg);
+          }
+        }
+
+        if (controller.signal.aborted) break;
+
+        // Collect cached price hits first and determine which UUIDs require live batch fetch
+        const appUuidPairs: Array<{ appId: string; uuid: string; title: string | null }> = [];
+        const uuidsToFetch: string[] = [];
+        const seenUuidsToFetch = new Set<string>();
+        const nowMs = Date.now();
+
+        for (const appId of chunkAppIds) {
+          const uuidEntry = steamAppIdToItadUuidCache.get(appId);
+          if (!uuidEntry?.id) continue;
+          appUuidPairs.push({ appId, uuid: uuidEntry.id, title: uuidEntry.title });
+
+          const cacheKey = `${uuidEntry.id}:${normalizedCurrency}`;
+          const cachedPrice = itadBulkPriceCache.get(cacheKey);
+          if (cachedPrice && cachedPrice.expiresAt > nowMs && cachedPrice.items.length > 0) {
+            const built = buildDealFromOverviewItem(
+              appId,
+              uuidEntry.id,
+              cachedPrice.items[0],
+              cachedPrice.historyLow,
+              cachedPrice.historyLowMeta,
+              uuidEntry.title,
+            );
+            if (built) results.set(appId, built);
+          } else if (!seenUuidsToFetch.has(uuidEntry.id)) {
+            seenUuidsToFetch.add(uuidEntry.id);
+            uuidsToFetch.push(uuidEntry.id);
+          }
+        }
+
+        if (uuidsToFetch.length === 0 || controller.signal.aborted) {
+          continue;
+        }
+
+        // Steps 2 & 3: Bulk POST /games/prices/v3 + POST /games/historylow/v1 in 1 parallel pair
+        const pricesUrl = `${ITAD_BASE_URL}/games/prices/v3?key=${itadKey}&country=${itadCountry}&shops=${shopsParam}`;
+        const historyUrl = `${ITAD_BASE_URL}/games/historylow/v1?key=${itadKey}&country=${itadCountry}&shops=${shopsParam}`;
+        const uuidBody = JSON.stringify(uuidsToFetch);
+
+        const [pricesSettled, historySettled] = await Promise.allSettled([
+          fetchItadWithRetry(
+            pricesUrl,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'User-Agent': USER_AGENT },
+              body: uuidBody,
+            },
+            controller.signal,
+          ).then(async (res) => (res.ok ? ((await res.json()) as RawItadPriceOverviewItem[]) : null)),
+          fetchItadWithRetry(
+            historyUrl,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'User-Agent': USER_AGENT },
+              body: uuidBody,
+            },
+            controller.signal,
+          ).then(async (res) => (res.ok ? ((await res.json()) as RawItadHistoryLowItem[]) : null)),
+        ]);
+
+        const priceItems = pricesSettled.status === 'fulfilled' && Array.isArray(pricesSettled.value)
+          ? pricesSettled.value
+          : null;
+        if (!priceItems) {
+          continue;
+        }
+
+        const priceItemByUuid = new Map<string, RawItadPriceOverviewItem>();
+        for (const item of priceItems) {
+          if (item?.id) {
+            priceItemByUuid.set(item.id, item);
+          }
+        }
+
+        const historyLowByUuid = new Map<string, { low: number | null; meta: HistoryLowMeta }>();
+        if (historySettled.status === 'fulfilled' && Array.isArray(historySettled.value)) {
+          for (const hItem of historySettled.value) {
+            if (hItem?.id) {
+              historyLowByUuid.set(hItem.id, extractHistoryLowMeta(hItem));
+            }
+          }
+        }
+
+        const writeNowMs = Date.now();
+        for (const pair of appUuidPairs) {
+          if (results.has(pair.appId)) continue;
+          const pItem = priceItemByUuid.get(pair.uuid);
+          if (!pItem) continue;
+
+          const hEntry = historyLowByUuid.get(pair.uuid) || { low: null, meta: {} };
+          const built = buildDealFromOverviewItem(
+            pair.appId,
+            pair.uuid,
+            pItem,
+            hEntry.low,
+            hEntry.meta,
+            pair.title,
+          );
+
+          if (built) {
+            itadBulkPriceCache.set(`${pair.uuid}:${normalizedCurrency}`, {
+              items: [pItem],
+              historyLow: built.allTimeLowPrice ?? null,
+              historyLowMeta: hEntry.meta,
+              expiresAt: writeNowMs + ITAD_BULK_PRICE_CACHE_TTL_MS,
+            });
+            results.set(pair.appId, built);
+          }
+        }
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn('[ITAD Bulk] Batch resolution error:', msg);
+    }
+    return 'BATCH_DONE';
+  };
+
+  try {
+    await Promise.race([executeBatch(), timeoutPromise]);
+  } finally {
+    if (timer) clearTimeout(timer);
+    if (externalSignal) externalSignal.removeEventListener('abort', onExternalAbort);
+  }
+
+  return results;
 }
 
 interface RawSteamCategoryItem {

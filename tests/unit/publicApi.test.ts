@@ -10,6 +10,7 @@ vi.mock('../../src/utils/itadApi.js', async (importOriginal) => {
   return {
     ...actual,
     getGameDealInfo: vi.fn(),
+    batchResolveItadDeals: vi.fn(async () => new Map()),
   };
 });
 
@@ -61,7 +62,7 @@ import {
   CURATED_MARKET_APP_IDS,
 } from '../../src/handlers/publicApi.js';
 import { getHowLongToBeatStats } from '../../src/utils/hltbNative.js';
-import { getGameDealInfo } from '../../src/utils/itadApi.js';
+import { getGameDealInfo, batchResolveItadDeals } from '../../src/utils/itadApi.js';
 import { getSteamTrendingGames } from '../../src/utils/platformStatus.js';
 import {
   resolveSteamId,
@@ -230,6 +231,7 @@ describe('Public Web API Handler', () => {
     ddbMock.reset();
     vi.clearAllMocks();
     process.env.TABLE_NAME = MOCK_TABLE;
+    vi.mocked(batchResolveItadDeals).mockResolvedValue(new Map());
 
     // Default mock implementation for getGameDealInfo
     vi.mocked(getGameDealInfo).mockImplementation(async (rawId, currency = 'USD') => {
@@ -1348,6 +1350,72 @@ describe('Public Web API Handler', () => {
         vi.useRealTimers();
         warnSpy.mockRestore();
       }
+    });
+
+    it('should return allTimeLowPrice: null, isAllTimeLow: false, and priceHistory: [] when alternativeCheckDegraded is true', async () => {
+      vi.mocked(getGameDealInfo).mockResolvedValueOnce({
+        gameId: 'steam_939960',
+        title: 'Far Cry New Dawn',
+        imageUrl: 'https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/939960/header.jpg',
+        reviewScore: 71,
+        steamAppId: '939960',
+        dealType: 'CURATED_DEAL',
+        isAllTimeLow: true,
+        allTimeLowPrice: 23.99,
+        priceHistory: [
+          {
+            timestamp: '2026-11-13T12:00:00Z',
+            shopId: 'steam',
+            priceUsd: null,
+            priceBrl: 23.99,
+            isAllTimeLow: true,
+          },
+        ],
+        expiry: null,
+        primaryDeal: {
+          shopName: 'Steam',
+          salePrice: 23.99,
+          regularPrice: 119.99,
+          cutPercent: 80,
+          url: 'https://store.steampowered.com/app/939960/',
+          expiry: null,
+          currency: 'BRL',
+          currencySymbol: 'R$',
+        },
+        cheaperAlternative: null,
+        storeBreakdown: {
+          Steam: {
+            shopName: 'Steam',
+            salePrice: 23.99,
+            regularPrice: 119.99,
+            cutPercent: 80,
+            url: 'https://store.steampowered.com/app/939960/',
+            expiry: null,
+            currency: 'BRL',
+            currencySymbol: 'R$',
+          },
+        },
+        alternativeCheckStatus: 'degraded',
+        alternativeCheckDegraded: true,
+      });
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/market/{appId}',
+        rawPath: '/public/market/939960',
+        pathParameters: { appId: '939960' },
+        queryStringParameters: { currency: 'BRL' },
+        requestContext: {
+          http: { method: 'GET', path: '/public/market/939960' },
+        },
+      };
+
+      const response = await handler(event);
+      expect(response.statusCode).toBe(200);
+      const data = JSON.parse(response.body);
+      expect(data.alternativeCheckDegraded).toBe(true);
+      expect(data.allTimeLowPrice).toBeNull();
+      expect(data.isAllTimeLow).toBe(false);
+      expect(data.priceHistory).toEqual([]);
     });
 
     it('should preserve authoritative Steam price and avoid negative caching when ITAD returns degraded fallback', async () => {
@@ -3967,6 +4035,105 @@ describe('Public Web API Handler', () => {
       expect(response.statusCode).toBe(200);
 
       expect(getGameDealInfo).not.toHaveBeenCalled();
+    });
+
+    it('should enrich uncached wishlist items in 1 bulk batchResolveItadDeals call without per-item getGameDealInfo loops', async () => {
+      const wishlistItems = [
+        { appId: '939960', priority: 1, dateAdded: 500 },
+        { appId: '1029690', priority: 2, dateAdded: 400 },
+      ];
+
+      vi.mocked(fetchSteamWishlist).mockResolvedValueOnce({
+        success: true,
+        items: wishlistItems,
+      });
+
+      ddbMock.on(QueryCommand).resolves({ Items: [] });
+
+      vi.mocked(batchResolveItadDeals).mockResolvedValueOnce(
+        new Map([
+          [
+            '939960',
+            {
+              gameId: 'steam_939960',
+              title: 'Far Cry New Dawn',
+              imageUrl: 'https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/939960/header.jpg',
+              reviewScore: null,
+              steamAppId: '939960',
+              dealType: 'CURATED_DEAL',
+              isAllTimeLow: false,
+              allTimeLowPrice: 11.99,
+              priceHistory: [],
+              expiry: null,
+              primaryDeal: {
+                shopName: 'Steam',
+                salePrice: 23.99,
+                regularPrice: 119.99,
+                cutPercent: 80,
+                url: 'https://store.steampowered.com/app/939960/',
+                expiry: null,
+                currency: 'BRL',
+                currencySymbol: 'R$',
+              },
+              cheaperAlternative: {
+                shopName: 'Nuuvem',
+                salePrice: 19.99,
+                regularPrice: 119.99,
+                cutPercent: 83,
+                url: 'https://www.nuuvem.com/item/far-cry-new-dawn',
+                expiry: null,
+                currency: 'BRL',
+                currencySymbol: 'R$',
+              },
+              storeBreakdown: {
+                Steam: {
+                  shopName: 'Steam',
+                  salePrice: 23.99,
+                  regularPrice: 119.99,
+                  cutPercent: 80,
+                  url: 'https://store.steampowered.com/app/939960/',
+                  expiry: null,
+                  currency: 'BRL',
+                  currencySymbol: 'R$',
+                },
+                Nuuvem: {
+                  shopName: 'Nuuvem',
+                  salePrice: 19.99,
+                  regularPrice: 119.99,
+                  cutPercent: 83,
+                  url: 'https://www.nuuvem.com/item/far-cry-new-dawn',
+                  expiry: null,
+                  currency: 'BRL',
+                  currencySymbol: 'R$',
+                },
+              },
+              alternativeCheckStatus: 'confirmed',
+              alternativeCheckDegraded: false,
+            },
+          ],
+        ]),
+      );
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/wishlist/{target}',
+        rawPath: '/public/wishlist/76561198327022168',
+        pathParameters: { target: '76561198327022168' },
+        queryStringParameters: { currency: 'BRL', limit: '10' },
+        requestContext: {
+          http: { method: 'GET', path: '/public/wishlist/76561198327022168' },
+        },
+      };
+
+      const response = await handler(event);
+      expect(response.statusCode).toBe(200);
+      expect(batchResolveItadDeals).toHaveBeenCalledTimes(1);
+      expect(batchResolveItadDeals).toHaveBeenCalledWith(['939960', '1029690'], 'BRL');
+      expect(getGameDealInfo).not.toHaveBeenCalled();
+
+      const data = JSON.parse(response.body);
+      const fcnd = data.items.find((item: { appId: string }) => item.appId === '939960');
+      expect(fcnd?.cheaperAlternative?.shopName).toBe('Nuuvem');
+      expect(fcnd?.cheaperAlternative?.salePrice).toBe(19.99);
     });
   });
 

@@ -9,6 +9,9 @@ import {
   fetchSteamStoreAppDetails,
   transformItadPriceHistory,
   fetchItadPriceHistory,
+  synthesizeAnchorPriceHistory,
+  batchResolveItadDeals,
+  clearItadRuntimeCaches,
   ITAD_VERIFIED_SHOP_IDS,
   MAX_PRICE_HISTORY_POINTS,
 } from '../../src/utils/itadApi.js';
@@ -1595,6 +1598,245 @@ describe('ITAD API Utilities', () => {
       expect(deal?.storeBreakdown?.['Epic Games Store']).toBeDefined();
       expect(deal?.allTimeLowPrice).toBe(113.81);
       expect(deal?.priceHistory?.length).toBeGreaterThanOrEqual(2);
+    });
+
+    it('should resolve bulk appIds via batchResolveItadDeals in 3 HTTP calls and warm caches for subsequent getGameDealInfo', async () => {
+      process.env.ITAD_API_KEY = 'test_mock_itad_key';
+      const itadCalls = [];
+
+      globalThis.fetch = vi.fn(async (url) => {
+        const strUrl = String(url);
+        if (strUrl.includes('api.isthereanydeal.com')) {
+          itadCalls.push(strUrl);
+        }
+        if (strUrl.includes('store.steampowered.com/api/appdetails')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              '939960': {
+                success: true,
+                data: {
+                  name: 'Far Cry® New Dawn',
+                  price_overview: { initial: 11999, final: 2399, discount_percent: 80 },
+                },
+              },
+            }),
+          };
+        }
+        if (strUrl.includes('/lookup/id/shop/61/v1')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              'app/939960': 'uuid-fcnd',
+              'app/1029690': 'uuid-se5',
+              'app/3008130': 'uuid-dltb',
+              'app/2807960': 'uuid-bf6',
+            }),
+          };
+        }
+        if (strUrl.includes('/games/prices/v3')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => [
+              {
+                id: 'uuid-fcnd',
+                historyLow: { all: { amount: 11.99 } },
+                deals: [
+                  { shop: { id: 61, name: 'Steam' }, price: { amount: 23.99 }, regular: { amount: 119.99 }, cut: 80, url: 'https://store.steampowered.com/app/939960/' },
+                  { shop: { id: 16, name: 'Epic Games Store' }, price: { amount: 119.99 }, regular: { amount: 119.99 }, cut: 0, url: 'https://store.epicgames.com/p/far-cry-new-dawn' },
+                  { shop: { id: 50, name: 'Nuuvem' }, price: { amount: 129.99 }, regular: { amount: 129.99 }, cut: 0, url: 'https://www.nuuvem.com/item/far-cry-new-dawn' },
+                ],
+              },
+              {
+                id: 'uuid-se5',
+                historyLow: { all: { amount: 8.46 } },
+                deals: [
+                  { shop: { id: 61, name: 'Steam' }, price: { amount: 9.39 }, regular: { amount: 93.99 }, cut: 90, url: 'https://store.steampowered.com/app/1029690/' },
+                ],
+              },
+              {
+                id: 'uuid-dltb',
+                historyLow: { all: { amount: 113.81 } },
+                deals: [
+                  { shop: { id: 61, name: 'Steam' }, price: { amount: 249 }, regular: { amount: 249 }, cut: 0, url: 'https://store.steampowered.com/app/3008130/' },
+                ],
+              },
+              {
+                id: 'uuid-bf6',
+                historyLow: { all: { amount: 119.6 } },
+                deals: [
+                  { shop: { id: 16, name: 'Epic Games Store' }, price: { amount: 299 }, regular: { amount: 299 }, cut: 0, url: 'https://store.epicgames.com/p/battlefield-6' },
+                ],
+              },
+            ],
+          };
+        }
+        if (strUrl.includes('/games/historylow/v1')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => [
+              { id: 'uuid-fcnd', low: { shop: { id: 61, name: 'Steam' }, price: { amount: 11.99 }, regular: { amount: 119.99 }, cut: 90, timestamp: '2024-06-27T20:18:35+02:00' } },
+              { id: 'uuid-se5', low: { shop: { id: 16, name: 'Epic Games Store' }, price: { amount: 8.46 }, regular: { amount: 94.99 }, cut: 91, timestamp: '2025-11-01T12:00:00Z' } },
+            ],
+          };
+        }
+        if (strUrl.includes('/games/history/v2')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => [
+              {
+                timestamp: '2025-05-01T12:00:00Z',
+                shop: { id: 61, name: 'Steam' },
+                deal: { price: { amount: 29.99 }, regular: { amount: 119.99 }, cut: 75 },
+              },
+              {
+                timestamp: '2026-11-01T12:00:00Z',
+                shop: { id: 61, name: 'Steam' },
+                deal: { price: { amount: 23.99 }, regular: { amount: 119.99 }, cut: 80 },
+              },
+            ],
+          };
+        }
+        return { ok: false, status: 404 };
+      });
+
+      const batchMap = await batchResolveItadDeals(['939960', '1029690', '3008130', '2807960'], 'BRL');
+      expect(batchMap.size).toBe(4);
+      expect(batchMap.get('939960')?.allTimeLowPrice).toBe(11.99);
+      expect(batchMap.get('939960')?.storeBreakdown?.['Epic Games Store']).toBeDefined();
+      expect(batchMap.get('939960')?.storeBreakdown?.['Nuuvem']).toBeDefined();
+      expect(itadCalls).toHaveLength(3);
+
+      // Immediately inspect 939960 with the same fetch reference: 0 lookup, 0 prices/v3, 0 historylow/v1 calls!
+      itadCalls.length = 0;
+      const modalDeal = await getGameDealInfo('939960', 'BRL', 'Far Cry® New Dawn');
+      expect(itadCalls).toHaveLength(1);
+      expect(itadCalls[0]).toContain('/games/history/v2');
+      expect(modalDeal?.allTimeLowPrice).toBe(11.99);
+      expect(modalDeal?.storeBreakdown?.['Epic Games Store']).toBeDefined();
+      expect(modalDeal?.priceHistory?.some((p) => p.priceBrl === 11.99 && p.isAllTimeLow === true)).toBe(true);
+    });
+
+    it('should skip /games/historylow/v1 when /games/prices/v3 returns historyLow and reuse cached UUID', async () => {
+      process.env.ITAD_API_KEY = 'test_mock_itad_key';
+      clearItadRuntimeCaches();
+      const itadUrls = [];
+
+      globalThis.fetch = vi.fn(async (url) => {
+        const strUrl = String(url);
+        if (strUrl.includes('api.isthereanydeal.com')) {
+          itadUrls.push(strUrl);
+        }
+        if (strUrl.includes('store.steampowered.com/api/appdetails')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              '939960': {
+                success: true,
+                data: {
+                  name: 'Far Cry New Dawn',
+                  price_overview: { initial: 11999, final: 2399, discount_percent: 80 },
+                },
+              },
+            }),
+          };
+        }
+        if (strUrl.includes('/games/lookup/v1')) {
+          return { ok: true, status: 200, json: async () => ({ found: true, game: { id: 'uuid-fcnd-direct', title: 'Far Cry New Dawn' } }) };
+        }
+        if (strUrl.includes('/games/prices/v3')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => [
+              {
+                id: 'uuid-fcnd-direct',
+                historyLow: { all: { amount: 11.99 } },
+                deals: [
+                  { shop: { id: 61, name: 'Steam' }, price: { amount: 23.99 }, regular: { amount: 119.99 }, cut: 80, url: 'https://store.steampowered.com/app/939960/' },
+                  { shop: { id: 16, name: 'Epic Games Store' }, price: { amount: 119.99 }, regular: { amount: 119.99 }, cut: 0, url: 'https://store.epicgames.com/p/far-cry-new-dawn' },
+                ],
+              },
+            ],
+          };
+        }
+        if (strUrl.includes('/games/history/v2')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => [
+              { timestamp: '2024-06-27T18:00:00Z', shop: { id: 61, name: 'Steam' }, deal: { price: { amount: 11.99 }, regular: { amount: 119.99 }, cut: 90 } },
+              { timestamp: '2026-11-10T18:00:00Z', shop: { id: 61, name: 'Steam' }, deal: { price: { amount: 23.99 }, regular: { amount: 119.99 }, cut: 80 } },
+            ],
+          };
+        }
+        return { ok: false, status: 404 };
+      });
+
+      const first = await getGameDealInfo('939960', 'BRL');
+      expect(first?.allTimeLowPrice).toBe(11.99);
+      expect(itadUrls.some((u) => u.includes('/games/historylow/v1'))).toBe(false);
+      expect(itadUrls.some((u) => u.includes('/games/lookup/v1'))).toBe(true);
+
+      // Second modal inspect uses both UUID cache and bulk price cache
+      itadUrls.length = 0;
+      const second = await getGameDealInfo('939960', 'BRL');
+      expect(second?.allTimeLowPrice).toBe(11.99);
+      expect(itadUrls).toHaveLength(1);
+      expect(itadUrls[0]).toContain('/games/history/v2');
+    });
+
+    it('should return allTimeLowPrice: null, isAllTimeLow: false, and priceHistory: [] when degraded (never fabricating ATL)', async () => {
+      process.env.ITAD_API_KEY = 'test_mock_itad_key';
+      expect(
+        synthesizeAnchorPriceHistory(
+          [{ timestamp: '2026-11-10T00:00:00Z', shopId: 'steam', priceUsd: null, priceBrl: 23.99, isAllTimeLow: true }],
+          { shopName: 'Steam', salePrice: 23.99, regularPrice: 119.99, cutPercent: 80, url: '', expiry: null, currency: 'BRL', currencySymbol: 'R$' },
+          null,
+          null,
+          'BRL',
+        ),
+      ).toEqual([]);
+
+      globalThis.fetch = vi.fn(async (url) => {
+        const strUrl = String(url);
+        if (strUrl.includes('store.steampowered.com/api/appdetails')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              '939960': {
+                success: true,
+                data: {
+                  name: 'Far Cry New Dawn',
+                  price_overview: { initial: 11999, final: 2399, discount_percent: 80 },
+                },
+              },
+            }),
+          };
+        }
+        if (strUrl.includes('/games/lookup/v1')) {
+          return { ok: true, status: 200, json: async () => ({ found: true, game: { id: 'uuid-fcnd' } }) };
+        }
+        if (strUrl.includes('/games/prices/v3')) {
+          return { ok: false, status: 429 };
+        }
+        return { ok: false, status: 429 };
+      });
+
+      const degradedDeal = await getGameDealInfo('939960', 'BRL', 'Far Cry New Dawn');
+      expect(degradedDeal?.alternativeCheckDegraded).toBe(true);
+      expect(degradedDeal?.alternativeCheckStatus).toBe('degraded');
+      expect(degradedDeal?.primaryDeal?.salePrice).toBe(23.99);
+      expect(degradedDeal?.allTimeLowPrice).toBeNull();
+      expect(degradedDeal?.isAllTimeLow).toBe(false);
+      expect(degradedDeal?.priceHistory).toEqual([]);
     });
   });
   describe('fetchSteamStoreAppDetails', () => {

@@ -41,7 +41,7 @@ import type {
   FriendsTelemetryApiResult,
 } from '../types/index.js';
 import { getHowLongToBeatStats } from '../utils/hltbNative.js';
-import { getGameDealInfo, synthesizeAnchorPriceHistory } from '../utils/itadApi.js';
+import { getGameDealInfo, synthesizeAnchorPriceHistory, batchResolveItadDeals } from '../utils/itadApi.js';
 import { getSteamTrendingGames } from '../utils/platformStatus.js';
 import {
   resolveSteamId,
@@ -324,17 +324,29 @@ function buildPublicMarketTelemetry(
     primaryDeal,
     dealInfo.cheaperAlternative || null,
   );
-  let priceHistory: PricePoint[] = Array.isArray(dealInfo.priceHistory)
-    ? dealInfo.priceHistory
-    : [];
-  if (priceHistory.length < 2) {
-    priceHistory = synthesizeAnchorPriceHistory(
-      priceHistory,
-      primaryDeal,
-      dealInfo.cheaperAlternative || null,
-      dealInfo.allTimeLowPrice ?? null,
-      primaryDeal.currency,
-    );
+  const isDegraded =
+    Boolean(dealInfo.alternativeCheckDegraded) || dealInfo.alternativeCheckStatus === 'degraded';
+
+  let priceHistory: PricePoint[] = [];
+  let allTimeLowPrice: number | null = dealInfo.allTimeLowPrice ?? null;
+  let isAllTimeLow = Boolean(dealInfo.isAllTimeLow);
+
+  if (isDegraded) {
+    // Never expose or synthesize an All-Time Low or historical chart when ITAD is degraded
+    priceHistory = [];
+    allTimeLowPrice = null;
+    isAllTimeLow = false;
+  } else {
+    priceHistory = Array.isArray(dealInfo.priceHistory) ? dealInfo.priceHistory : [];
+    if (priceHistory.length < 2 && typeof allTimeLowPrice === 'number' && allTimeLowPrice > 0) {
+      priceHistory = synthesizeAnchorPriceHistory(
+        priceHistory,
+        primaryDeal,
+        dealInfo.cheaperAlternative || null,
+        allTimeLowPrice,
+        primaryDeal.currency,
+      );
+    }
   }
 
   return {
@@ -344,6 +356,8 @@ function buildPublicMarketTelemetry(
     title: resolvedTitle,
     imageUrl,
     steamAppId: cleanAppId,
+    isAllTimeLow,
+    allTimeLowPrice,
     primaryDeal,
     cheaperAlternative: dealInfo.cheaperAlternative || null,
     storeBreakdown,
@@ -596,6 +610,15 @@ export async function resolveCuratedMarketList(
       resultMap.set(item.appId, item.cached);
     } else {
       cacheMisses.push(item.appId);
+    }
+  }
+
+  // Pre-warm ITAD UUID and multi-store price caches in 1 bulk batch to prevent per-item 429s
+  if (cacheMisses.length > 0) {
+    try {
+      await batchResolveItadDeals(cacheMisses, currency);
+    } catch {
+      // Non-fatal: single-item lookups handle retries/fallbacks
     }
   }
 
@@ -1046,6 +1069,18 @@ export async function resolveTrendingGames(
       }
     }
 
+    // Pre-warm ITAD UUID and multi-store price caches for trending cache misses in 1 bulk batch
+    if (cacheMissEntries.length > 0) {
+      try {
+        await batchResolveItadDeals(
+          cacheMissEntries.map((c) => String(c.appId)),
+          currency,
+        );
+      } catch {
+        // Non-fatal: individual resolution still handles fallbacks
+      }
+    }
+
     // 2. Resolve cache misses with bounded concurrency to prevent ITAD burst exhaustion
     // and cross-hydrate per-game cache (PK: MARKET#v6#<appId>#<currency>) when partner deals exist
     let missCursor = 0;
@@ -1417,6 +1452,24 @@ export async function resolveWishlistTelemetry(
       fetchedHeaders.set(String(id), info.headerImage);
     }
   }
+
+  // Enrich uncached wishlist titles via 1 bulk ITAD batch (at most 3 HTTP requests total, 0 per-item loops)
+  const uncachedAppIds = targetAppIds.filter((id) => !dealMap.has(id));
+  if (uncachedAppIds.length > 0) {
+    try {
+      const bulkDeals = await batchResolveItadDeals(uncachedAppIds, currency);
+      for (const [appId, bulkDeal] of bulkDeals.entries()) {
+        if (!dealMap.has(appId)) {
+          const headerUrl = fetchedHeaders.get(appId) || getCanonicalHeaderImageUrl(appId);
+          const resolvedTitle = titleMap.get(appId) || titleMap.get(Number(appId)) || null;
+          dealMap.set(appId, buildPublicMarketTelemetry(appId, bulkDeal, headerUrl, resolvedTitle));
+        }
+      }
+    } catch {
+      // Non-fatal: uncached wishlist items fall back cleanly to authentic Steam batch prices
+    }
+  }
+
   for (const [id, deal] of dealMap.entries()) {
     if (deal.imageUrl) {
       fetchedHeaders.set(String(id), deal.imageUrl);
