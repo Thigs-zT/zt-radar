@@ -766,6 +766,8 @@ export interface PublicWishlistItem {
   isUnreleased?: boolean;
   currency: string;
   currencySymbol: string;
+  isAllTimeLow?: boolean;
+  allTimeLowPrice?: number | null;
   primaryDeal?: StoreDeal | null;
   cheaperAlternative?: StoreDeal | null;
   storeBreakdown?: Record<string, StoreDeal>;

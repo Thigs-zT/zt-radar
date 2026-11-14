@@ -4134,6 +4134,282 @@ describe('Public Web API Handler', () => {
       const fcnd = data.items.find((item: { appId: string }) => item.appId === '939960');
       expect(fcnd?.cheaperAlternative?.shopName).toBe('Nuuvem');
       expect(fcnd?.cheaperAlternative?.salePrice).toBe(19.99);
+      expect(fcnd?.allTimeLowPrice).toBe(11.99);
+      expect(fcnd?.isAllTimeLow).toBe(false);
+
+      const sniperElite = data.items.find((item: { appId: string }) => item.appId === '1029690');
+      expect(sniperElite?.allTimeLowPrice).toBeNull();
+      expect(sniperElite?.isAllTimeLow).toBe(false);
+    });
+
+    it('should propagate verified allTimeLowPrice and isAllTimeLow: true from batchResolveItadDeals when currentPrice matches or is within 0.05 of ATL', async () => {
+      const wishlistItems = [
+        { appId: '978460', priority: 1, dateAdded: 600 },
+        { appId: '939960', priority: 2, dateAdded: 500 },
+        { appId: '3008130', priority: 3, dateAdded: 400 },
+      ];
+
+      vi.mocked(fetchSteamWishlist).mockResolvedValueOnce({
+        success: true,
+        items: wishlistItems,
+      });
+
+      ddbMock.on(QueryCommand).resolves({ Items: [] });
+
+      vi.mocked(resolveSteamAppTitles).mockResolvedValueOnce(
+        new Map([
+          ['978460', 'Emily is Away <3'],
+          ['939960', 'Far Cry New Dawn'],
+          ['3008130', 'Dying Light: The Beast'],
+        ]),
+      );
+
+      vi.mocked(batchResolveItadDeals).mockResolvedValueOnce(
+        new Map<string, GameDealInfo>([
+          [
+            '978460',
+            {
+              gameId: 'steam_978460',
+              title: 'Emily is Away <3',
+              imageUrl: 'https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/978460/header.jpg',
+              reviewScore: null,
+              steamAppId: '978460',
+              dealType: 'CURATED_DEAL',
+              isAllTimeLow: false,
+              allTimeLowPrice: 2.04,
+              priceHistory: [],
+              expiry: null,
+              primaryDeal: {
+                shopName: 'Steam',
+                salePrice: 2.06,
+                regularPrice: 20.69,
+                cutPercent: 90,
+                url: 'https://store.steampowered.com/app/978460/',
+                expiry: null,
+                currency: 'BRL',
+                currencySymbol: 'R$',
+              },
+              cheaperAlternative: null,
+              storeBreakdown: {
+                Steam: {
+                  shopName: 'Steam',
+                  salePrice: 2.06,
+                  regularPrice: 20.69,
+                  cutPercent: 90,
+                  url: 'https://store.steampowered.com/app/978460/',
+                  expiry: null,
+                  currency: 'BRL',
+                  currencySymbol: 'R$',
+                },
+              },
+              alternativeCheckStatus: 'confirmed',
+              alternativeCheckDegraded: false,
+            },
+          ],
+          [
+            '939960',
+            {
+              gameId: 'steam_939960',
+              title: 'Far Cry New Dawn',
+              imageUrl: 'https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/939960/header.jpg',
+              reviewScore: null,
+              steamAppId: '939960',
+              dealType: 'CURATED_DEAL',
+              isAllTimeLow: true,
+              allTimeLowPrice: 11.99,
+              priceHistory: [],
+              expiry: null,
+              primaryDeal: {
+                shopName: 'Steam',
+                salePrice: 23.99,
+                regularPrice: 119.99,
+                cutPercent: 80,
+                url: 'https://store.steampowered.com/app/939960/',
+                expiry: null,
+                currency: 'BRL',
+                currencySymbol: 'R$',
+              },
+              cheaperAlternative: {
+                shopName: 'Nuuvem',
+                salePrice: 11.99,
+                regularPrice: 119.99,
+                cutPercent: 90,
+                url: 'https://www.nuuvem.com/item/far-cry-new-dawn',
+                expiry: null,
+                currency: 'BRL',
+                currencySymbol: 'R$',
+              },
+              storeBreakdown: {
+                Steam: {
+                  shopName: 'Steam',
+                  salePrice: 23.99,
+                  regularPrice: 119.99,
+                  cutPercent: 80,
+                  url: 'https://store.steampowered.com/app/939960/',
+                  expiry: null,
+                  currency: 'BRL',
+                  currencySymbol: 'R$',
+                },
+                Nuuvem: {
+                  shopName: 'Nuuvem',
+                  salePrice: 11.99,
+                  regularPrice: 119.99,
+                  cutPercent: 90,
+                  url: 'https://www.nuuvem.com/item/far-cry-new-dawn',
+                  expiry: null,
+                  currency: 'BRL',
+                  currencySymbol: 'R$',
+                },
+              },
+              alternativeCheckStatus: 'confirmed',
+              alternativeCheckDegraded: false,
+            },
+          ],
+          [
+            '3008130',
+            {
+              gameId: 'steam_3008130',
+              title: 'Dying Light: The Beast',
+              imageUrl: 'https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/3008130/header.jpg',
+              reviewScore: null,
+              steamAppId: '3008130',
+              dealType: 'CURATED_DEAL',
+              isAllTimeLow: true,
+              allTimeLowPrice: 249.0,
+              priceHistory: [],
+              expiry: null,
+              primaryDeal: {
+                shopName: 'Steam',
+                salePrice: 249.0,
+                regularPrice: 249.0,
+                cutPercent: 0,
+                url: 'https://store.steampowered.com/app/3008130/',
+                expiry: null,
+                currency: 'BRL',
+                currencySymbol: 'R$',
+              },
+              cheaperAlternative: null,
+              storeBreakdown: {
+                Steam: {
+                  shopName: 'Steam',
+                  salePrice: 249.0,
+                  regularPrice: 249.0,
+                  cutPercent: 0,
+                  url: 'https://store.steampowered.com/app/3008130/',
+                  expiry: null,
+                  currency: 'BRL',
+                  currencySymbol: 'R$',
+                },
+              },
+              alternativeCheckStatus: 'degraded',
+              alternativeCheckDegraded: true,
+            },
+          ],
+        ]),
+      );
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/wishlist/{target}',
+        rawPath: '/public/wishlist/76561198327022168',
+        pathParameters: { target: '76561198327022168' },
+        queryStringParameters: { currency: 'BRL', limit: '10' },
+        requestContext: {
+          http: { method: 'GET', path: '/public/wishlist/76561198327022168' },
+        },
+      };
+
+      const response = await handler(event);
+      expect(response.statusCode).toBe(200);
+
+      const data = JSON.parse(response.body);
+      const emily = data.items.find((item: { appId: string }) => item.appId === '978460');
+      expect(emily?.salePrice).toBe(2.06);
+      expect(emily?.allTimeLowPrice).toBe(2.04);
+      expect(emily?.isAllTimeLow).toBe(true);
+
+      const fcnd = data.items.find((item: { appId: string }) => item.appId === '939960');
+      expect(fcnd?.cheaperAlternative?.shopName).toBe('Nuuvem');
+      expect(fcnd?.cheaperAlternative?.salePrice).toBe(11.99);
+      expect(fcnd?.allTimeLowPrice).toBe(11.99);
+      expect(fcnd?.isAllTimeLow).toBe(true);
+
+      const dyingLight = data.items.find((item: { appId: string }) => item.appId === '3008130');
+      expect(dyingLight?.allTimeLowPrice).toBeNull();
+      expect(dyingLight?.isAllTimeLow).toBe(false);
+    });
+
+    it('should propagate verified allTimeLowPrice and isAllTimeLow from cached DynamoDB market telemetry', async () => {
+      vi.mocked(fetchSteamWishlist).mockResolvedValueOnce({
+        success: true,
+        items: [{ appId: '978460', priority: 1, dateAdded: 1700000000 }],
+      });
+
+      ddbMock.on(QueryCommand).resolvesOnce({
+        Items: [
+          {
+            PK: 'MARKET#v6#978460#BRL',
+            SK: 'TELEMETRY',
+            appId: '978460',
+            title: 'Emily is Away <3',
+            imageUrl: 'https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/978460/header.jpg',
+            dealType: 'CURATED_DEAL',
+            isAllTimeLow: true,
+            allTimeLowPrice: 2.06,
+            alternativeCheckStatus: 'confirmed',
+            alternativeCheckDegraded: false,
+            primaryDeal: {
+              shopName: 'Steam',
+              salePrice: 2.06,
+              regularPrice: 20.69,
+              cutPercent: 90,
+              url: 'https://store.steampowered.com/app/978460/',
+              currency: 'BRL',
+              currencySymbol: 'R$',
+            },
+            storeBreakdown: {
+              Steam: {
+                shopName: 'Steam',
+                salePrice: 2.06,
+                regularPrice: 20.69,
+                cutPercent: 90,
+                url: 'https://store.steampowered.com/app/978460/',
+                currency: 'BRL',
+                currencySymbol: 'R$',
+              },
+              Nuuvem: {
+                shopName: 'Nuuvem',
+                salePrice: 20.69,
+                regularPrice: 20.69,
+                cutPercent: 0,
+                url: 'https://www.nuuvem.com/item/emily-is-away-3',
+                currency: 'BRL',
+                currencySymbol: 'R$',
+              },
+            },
+            ttl: Math.floor(Date.now() / 1000) + 7200,
+          },
+        ],
+      });
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/wishlist/{target}',
+        rawPath: '/public/wishlist/76561198327022168',
+        pathParameters: { target: '76561198327022168' },
+        queryStringParameters: { currency: 'BRL' },
+        requestContext: {
+          http: { method: 'GET', path: '/public/wishlist/76561198327022168' },
+        },
+      };
+
+      const response = await handler(event);
+      expect(response.statusCode).toBe(200);
+      expect(batchResolveItadDeals).not.toHaveBeenCalled();
+
+      const data = JSON.parse(response.body);
+      const emily = data.items.find((item: { appId: string }) => item.appId === '978460');
+      expect(emily?.salePrice).toBe(2.06);
+      expect(emily?.allTimeLowPrice).toBe(2.06);
+      expect(emily?.isAllTimeLow).toBe(true);
     });
   });
 

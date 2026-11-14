@@ -1633,6 +1633,59 @@ export async function resolveWishlistTelemetry(
         ? Math.floor(item.priority)
         : Number(item.priority ?? 0);
 
+    if (!cheaperAlternative && !isUnreleased && storeBreakdown && typeof salePrice === 'number') {
+      const cheaperPartner = Object.values(storeBreakdown)
+        .filter(
+          (offer) =>
+            offer &&
+            typeof offer.salePrice === 'number' &&
+            Number.isFinite(offer.salePrice) &&
+            offer.salePrice >= 0 &&
+            offer.salePrice < salePrice,
+        )
+        .sort((a, b) => a.salePrice - b.salePrice)[0];
+      if (cheaperPartner) {
+        cheaperAlternative = cheaperPartner;
+      }
+    }
+
+    const isDealDegraded = Boolean(
+      dealInfo &&
+      (dealInfo.alternativeCheckDegraded || dealInfo.alternativeCheckStatus === 'degraded'),
+    );
+
+    const allTimeLowPrice =
+      !isUnreleased &&
+      !isDealDegraded &&
+      dealInfo &&
+      typeof dealInfo.allTimeLowPrice === 'number' &&
+      Number.isFinite(dealInfo.allTimeLowPrice) &&
+      dealInfo.allTimeLowPrice >= 0
+        ? Number(dealInfo.allTimeLowPrice.toFixed(2))
+        : null;
+
+    const candidatePrices: number[] = [];
+    if (typeof salePrice === 'number' && Number.isFinite(salePrice) && salePrice >= 0) {
+      candidatePrices.push(salePrice);
+    }
+    if (
+      cheaperAlternative &&
+      typeof cheaperAlternative.salePrice === 'number' &&
+      Number.isFinite(cheaperAlternative.salePrice) &&
+      cheaperAlternative.salePrice >= 0
+    ) {
+      candidatePrices.push(cheaperAlternative.salePrice);
+    }
+    const currentPrice = candidatePrices.length > 0 ? Math.min(...candidatePrices) : null;
+
+    const isAllTimeLow = Boolean(
+      !isUnreleased &&
+      allTimeLowPrice &&
+      allTimeLowPrice > 0 &&
+      currentPrice !== null &&
+      currentPrice <= allTimeLowPrice + 0.05,
+    );
+
     return {
       appId,
       title: resolvedTitle,
@@ -1648,6 +1701,8 @@ export async function resolveWishlistTelemetry(
       isUnreleased,
       currency,
       currencySymbol,
+      isAllTimeLow,
+      allTimeLowPrice,
       primaryDeal,
       cheaperAlternative,
       storeBreakdown,
