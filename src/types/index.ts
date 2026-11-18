@@ -908,6 +908,16 @@ export interface PlatinumTitle {
   completedAt?: string;
 }
 
+/** DynamoDB Platinum Vault record persisted under PK: PLATINUMS#v1#<steamId>, SK: VAULT. */
+export interface PlatinumVaultItem {
+  PK: string;
+  SK: 'VAULT';
+  steamId: string;
+  platinums: PlatinumTitle[];
+  updatedAt: string;
+  ttl?: number;
+}
+
 /** Aggregated Steam store pricing valuation summary across owned library titles. */
 export interface DossierLibraryPricingSummary {
   totalAuditedPaidTitles: number;
@@ -947,6 +957,7 @@ export interface PublicDossierResponse {
   games: DossierOwnedGame[];
   verifiedPlatinums: PlatinumTitle[];
   totalPlatinumsCount: number;
+  unlockedAchievements: number;
   updatedAt: string;
 }
 

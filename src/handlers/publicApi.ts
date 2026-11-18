@@ -36,6 +36,7 @@ import type {
   DossierOwnedGame,
   PublicDossierResponse,
   DossierTelemetryApiResult,
+  PlayerGameAchievementSummary,
   SteamOwnedGameItem,
   SteamOwnedGamesResult,
   SteamPlayerSummary,
@@ -2147,9 +2148,11 @@ export function buildDossierTimeStream(
 }
 
 const DOSSIER_PRICE_BATCH_LIMIT = 250;
-const DOSSIER_ACHIEVEMENT_CANDIDATE_LIMIT = 20;
-const DOSSIER_ACHIEVEMENT_CONCURRENCY = 5;
-const DOSSIER_ACHIEVEMENT_TIMEOUT_MS = 1500;
+const DOSSIER_ACHIEVEMENT_MIN_PLAYTIME_MINUTES = 15;
+const DOSSIER_ACHIEVEMENT_CONCURRENCY = 12;
+const DOSSIER_ACHIEVEMENT_PER_GAME_TIMEOUT_MS = 1200;
+const DOSSIER_ACHIEVEMENT_TOTAL_BUDGET_MS = 20000;
+const PLATINUM_VAULT_TTL_SECONDS = 30 * 24 * 60 * 60; // 30 days
 
 /**
  * Resolves numeric store price and free-to-play status for an owned game
@@ -2186,86 +2189,300 @@ function resolveDossierGamePrice(
 }
 
 /**
- * Queries top played titles for verified 100% achievement completion ("platinums")
- * using bounded concurrency, Promise.allSettled, and a defensive 1500ms timeout.
- * Returns an empty array cleanly when achievements are private (HTTP 403) or none are completed.
+ * Reads previously verified 100% completed titles from the user's DynamoDB Platinum Vault
+ * (PK: PLATINUMS#v1#${steamId}, SK: VAULT).
+ */
+export async function readPlatinumVault(
+  steamId: string,
+  ddbDocClient: DynamoDBDocumentClient = docClient,
+  tableName: string = process.env.TABLE_NAME || '',
+): Promise<PlatinumTitle[]> {
+  if (!steamId || !tableName || !ddbDocClient) {
+    return [];
+  }
+
+  try {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const result = await ddbDocClient.send(
+      new QueryCommand({
+        TableName: tableName,
+        KeyConditionExpression: 'PK = :pk AND SK = :sk',
+        ExpressionAttributeValues: {
+          ':pk': `PLATINUMS#v1#${steamId}`,
+          ':sk': 'VAULT',
+        },
+        Limit: 1,
+      }),
+    );
+
+    const item = result?.Items?.[0] as
+      | {
+          platinums?: PlatinumTitle[] | Record<string, PlatinumTitle>;
+          ttl?: number;
+        }
+      | undefined;
+
+    if (!item) return [];
+    if (item.ttl && Number(item.ttl) <= nowSec) return [];
+
+    const rawList: unknown[] = Array.isArray(item.platinums)
+      ? item.platinums
+      : item.platinums && typeof item.platinums === 'object'
+        ? Object.values(item.platinums)
+        : [];
+
+    const validPlatinums: PlatinumTitle[] = [];
+    const seen = new Set<number>();
+
+    for (const raw of rawList) {
+      if (!raw || typeof raw !== 'object') continue;
+      const entry = raw as Partial<PlatinumTitle>;
+      const appId = Number(entry.appId ?? 0);
+      const totalAchievements = Number(entry.totalAchievements ?? 0);
+      const unlockedAchievements = Number(entry.unlockedAchievements ?? 0);
+      if (
+        !appId ||
+        seen.has(appId) ||
+        totalAchievements <= 0 ||
+        unlockedAchievements !== totalAchievements
+      ) {
+        continue;
+      }
+      seen.add(appId);
+      validPlatinums.push({
+        appId,
+        title:
+          typeof entry.title === 'string' && entry.title.trim()
+            ? entry.title.trim()
+            : `App #${appId}`,
+        totalAchievements,
+        unlockedAchievements,
+        ...(typeof entry.completedAt === 'string' && entry.completedAt
+          ? { completedAt: entry.completedAt }
+          : {}),
+      });
+    }
+
+    return validPlatinums;
+  } catch (err) {
+    console.warn(
+      'Failed to query DynamoDB platinum vault:',
+      err instanceof Error ? err.message : err,
+    );
+    return [];
+  }
+}
+
+/**
+ * Persists the merged list of verified 100% completed titles to the user's DynamoDB Platinum Vault
+ * (PK: PLATINUMS#v1#${steamId}, SK: VAULT) with a 30-day TTL.
+ */
+export async function writePlatinumVault(
+  steamId: string,
+  platinums: PlatinumTitle[],
+  ddbDocClient: DynamoDBDocumentClient = docClient,
+  tableName: string = process.env.TABLE_NAME || '',
+): Promise<void> {
+  if (!steamId || !tableName || !ddbDocClient || !Array.isArray(platinums) || platinums.length === 0) {
+    return;
+  }
+
+  try {
+    const nowSec = Math.floor(Date.now() / 1000);
+    await ddbDocClient.send(
+      new PutCommand({
+        TableName: tableName,
+        Item: {
+          PK: `PLATINUMS#v1#${steamId}`,
+          SK: 'VAULT',
+          steamId,
+          platinums,
+          updatedAt: new Date().toISOString(),
+          ttl: nowSec + PLATINUM_VAULT_TTL_SECONDS,
+        },
+      }),
+    );
+  } catch (err) {
+    console.warn(
+      'Failed to persist platinum vault to DynamoDB:',
+      err instanceof Error ? err.message : err,
+    );
+  }
+}
+
+/**
+ * Executes a single game achievement lookup bounded by an independent per-game timeout
+ * and linked to a parent cancellation signal.
+ */
+async function fetchSingleGameAchievementWithTimeout(
+  steamId: string,
+  appId: number,
+  parentSignal: AbortSignal,
+  timeoutMs: number = DOSSIER_ACHIEVEMENT_PER_GAME_TIMEOUT_MS,
+): Promise<PlayerGameAchievementSummary | null> {
+  if (parentSignal.aborted) {
+    return null;
+  }
+
+  const gameController = new AbortController();
+  const onParentAbort = (): void => {
+    gameController.abort();
+  };
+  parentSignal.addEventListener('abort', onParentAbort, { once: true });
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<null>((resolve) => {
+    timer = setTimeout(() => {
+      gameController.abort();
+      resolve(null);
+    }, timeoutMs);
+  });
+
+  try {
+    return await Promise.race([
+      fetchPlayerGameAchievements(steamId, appId, gameController.signal),
+      timeoutPromise,
+    ]);
+  } catch {
+    return null;
+  } finally {
+    if (timer) clearTimeout(timer);
+    parentSignal.removeEventListener('abort', onParentAbort);
+  }
+}
+
+/**
+ * Audits the player's entire played library (>= 15 minutes playtime) for verified 100%
+ * achievement completions ("platinums"), backed by a persistent DynamoDB Platinum Vault.
+ * Previously verified platinums are preserved without redundant Valve API requests.
  */
 async function resolveDossierPlatinums(
   steamId: string,
   sortedPlayedGames: SteamOwnedGameItem[],
+  ddbDocClient: DynamoDBDocumentClient = docClient,
+  tableName: string = process.env.TABLE_NAME || '',
 ): Promise<PlatinumTitle[]> {
-  const candidates = sortedPlayedGames.slice(0, DOSSIER_ACHIEVEMENT_CANDIDATE_LIMIT);
-  if (candidates.length === 0) {
-    return [];
+  // 1. Load existing verified platinums from DynamoDB Platinum Vault
+  const cachedPlatinums = await readPlatinumVault(steamId, ddbDocClient, tableName);
+  const vaultMap = new Map<number, PlatinumTitle>();
+  for (const plat of cachedPlatinums) {
+    vaultMap.set(plat.appId, plat);
   }
 
-  const platinumByIndex = new Array<PlatinumTitle | null>(candidates.length).fill(null);
-  const controller = new AbortController();
-  let batchTimer: ReturnType<typeof setTimeout> | undefined;
+  // 2. Build candidate pool from full played library (>= 15m) excluding already-verified titles
+  const playtimeByAppId = new Map<number, number>();
+  for (const game of sortedPlayedGames) {
+    const id = Number(game.appId ?? game.appid ?? 0);
+    if (id > 0) {
+      playtimeByAppId.set(id, Number(game.playtime_forever ?? 0));
+    }
+  }
 
-  const timeoutPromise = new Promise<void>((resolve) => {
-    batchTimer = setTimeout(() => {
-      controller.abort();
-      resolve();
-    }, DOSSIER_ACHIEVEMENT_TIMEOUT_MS);
+  const candidates = sortedPlayedGames.filter((g) => {
+    const appId = Number(g.appId ?? g.appid ?? 0);
+    const playtime = Number(g.playtime_forever ?? 0);
+    return (
+      appId > 0 &&
+      playtime >= DOSSIER_ACHIEVEMENT_MIN_PLAYTIME_MINUTES &&
+      !vaultMap.has(appId)
+    );
   });
 
-  let cursor = 0;
-  const worker = async (): Promise<void> => {
-    while (cursor < candidates.length && !controller.signal.aborted) {
-      const idx = cursor++;
-      const candidate = candidates[idx];
-      if (!candidate) break;
+  // 3. Scan unverified candidates using a controlled worker pool and per-game 1200ms timeout
+  const newlyDiscovered: PlatinumTitle[] = [];
+  if (candidates.length > 0) {
+    const batchController = new AbortController();
+    let totalBudgetTimer: ReturnType<typeof setTimeout> | undefined;
 
-      const appId = Number(candidate.appId ?? candidate.appid ?? 0);
-      if (!appId) continue;
+    const totalBudgetPromise = new Promise<void>((resolve) => {
+      totalBudgetTimer = setTimeout(() => {
+        batchController.abort();
+        resolve();
+      }, DOSSIER_ACHIEVEMENT_TOTAL_BUDGET_MS);
+    });
 
-      const [settled] = await Promise.allSettled([
-        fetchPlayerGameAchievements(steamId, appId, controller.signal),
-      ]);
+    const newlyByIndex = new Array<PlatinumTitle | null>(candidates.length).fill(null);
+    let cursor = 0;
 
-      if (controller.signal.aborted) break;
-      if (settled.status !== 'fulfilled' || !settled.value) continue;
+    const worker = async (): Promise<void> => {
+      while (cursor < candidates.length && !batchController.signal.aborted) {
+        const idx = cursor++;
+        const candidate = candidates[idx];
+        if (!candidate) break;
 
-      const ach = settled.value;
-      if (
-        ach.isCompleted &&
-        ach.totalAchievements > 0 &&
-        ach.unlockedAchievements === ach.totalAchievements
-      ) {
-        const rawCandidateName =
-          candidate.name && !/^App #\d+$/i.test(candidate.name) ? candidate.name : null;
-        const title =
-          rawCandidateName ||
-          ach.gameName ||
-          KNOWN_GAME_TITLES[String(appId)] ||
-          APP_DIRECTORY[String(appId)] ||
-          candidate.name ||
-          `App #${appId}`;
+        const appId = Number(candidate.appId ?? candidate.appid ?? 0);
+        if (!appId) continue;
 
-        platinumByIndex[idx] = {
+        const ach = await fetchSingleGameAchievementWithTimeout(
+          steamId,
           appId,
-          title,
-          totalAchievements: ach.totalAchievements,
-          unlockedAchievements: ach.unlockedAchievements,
-          ...(ach.completedAt ? { completedAt: ach.completedAt } : {}),
-        };
+          batchController.signal,
+          DOSSIER_ACHIEVEMENT_PER_GAME_TIMEOUT_MS,
+        );
+
+        if (!ach) continue;
+        if (
+          ach.isCompleted &&
+          ach.totalAchievements > 0 &&
+          ach.unlockedAchievements === ach.totalAchievements
+        ) {
+          const rawCandidateName =
+            candidate.name && !/^App #\d+$/i.test(candidate.name) ? candidate.name : null;
+          const title =
+            rawCandidateName ||
+            ach.gameName ||
+            KNOWN_GAME_TITLES[String(appId)] ||
+            APP_DIRECTORY[String(appId)] ||
+            candidate.name ||
+            `App #${appId}`;
+
+          newlyByIndex[idx] = {
+            appId,
+            title,
+            totalAchievements: ach.totalAchievements,
+            unlockedAchievements: ach.unlockedAchievements,
+            ...(ach.completedAt ? { completedAt: ach.completedAt } : {}),
+          };
+        }
+      }
+    };
+
+    const runWorkers = async (): Promise<void> => {
+      const workerCount = Math.min(DOSSIER_ACHIEVEMENT_CONCURRENCY, candidates.length);
+      await Promise.allSettled(Array.from({ length: workerCount }, () => worker()));
+    };
+
+    try {
+      await Promise.race([runWorkers(), totalBudgetPromise]);
+    } finally {
+      if (totalBudgetTimer) clearTimeout(totalBudgetTimer);
+    }
+
+    for (const item of newlyByIndex) {
+      if (item !== null) {
+        newlyDiscovered.push(item);
       }
     }
-  };
-
-  const runWorkers = async (): Promise<void> => {
-    const workerCount = Math.min(DOSSIER_ACHIEVEMENT_CONCURRENCY, candidates.length);
-    await Promise.allSettled(Array.from({ length: workerCount }, () => worker()));
-  };
-
-  try {
-    await Promise.race([runWorkers(), timeoutPromise]);
-  } finally {
-    if (batchTimer) clearTimeout(batchTimer);
   }
 
-  return platinumByIndex.filter((item): item is PlatinumTitle => item !== null);
+  // 4. Merge cached vault platinums with newly discovered titles deterministically
+  for (const plat of newlyDiscovered) {
+    vaultMap.set(plat.appId, plat);
+  }
+
+  const mergedPlatinums = Array.from(vaultMap.values()).sort((a, b) => {
+    const ptA = playtimeByAppId.get(a.appId) ?? -1;
+    const ptB = playtimeByAppId.get(b.appId) ?? -1;
+    if (ptB !== ptA) return ptB - ptA;
+    return a.appId - b.appId;
+  });
+
+  // 5. Persist updated Platinum Vault when new platinums were discovered
+  if (newlyDiscovered.length > 0) {
+    await writePlatinumVault(steamId, mergedPlatinums, ddbDocClient, tableName);
+  }
+
+  return mergedPlatinums;
 }
 
 /**
@@ -2331,6 +2548,13 @@ export async function resolveDossierTelemetry(
           const cachedPlatinums = Array.isArray(payload.verifiedPlatinums)
             ? payload.verifiedPlatinums
             : [];
+          const cachedUnlockedAchievements =
+            typeof payload.unlockedAchievements === 'number'
+              ? payload.unlockedAchievements
+              : cachedPlatinums.reduce(
+                  (sum, plat) => sum + (Number(plat.unlockedAchievements) || 0),
+                  0,
+                );
           return {
             success: true,
             data: {
@@ -2347,6 +2571,7 @@ export async function resolveDossierTelemetry(
                 typeof payload.totalPlatinumsCount === 'number'
                   ? payload.totalPlatinumsCount
                   : cachedPlatinums.length,
+              unlockedAchievements: cachedUnlockedAchievements,
             },
           };
         }
@@ -2412,9 +2637,11 @@ export async function resolveDossierTelemetry(
   const totalPlaytimeMinutes = allGames.reduce((acc, g) => acc + (g.playtime_forever ?? 0), 0);
   const totalPlaytimeHours = Number((totalPlaytimeMinutes / 60).toFixed(1));
 
-  const sortedPlayedGames = [...playedGamesList].sort(
-    (a, b) => (b.playtime_forever ?? 0) - (a.playtime_forever ?? 0),
-  );
+  const sortedPlayedGames = [...playedGamesList].sort((a, b) => {
+    const playtimeDiff = (b.playtime_forever ?? 0) - (a.playtime_forever ?? 0);
+    if (playtimeDiff !== 0) return playtimeDiff;
+    return Number(a.appId ?? a.appid ?? 0) - Number(b.appId ?? b.appid ?? 0);
+  });
   const sortedAllGames = [...allGames].sort((a, b) => {
     const playtimeDiff = (b.playtime_forever ?? 0) - (a.playtime_forever ?? 0);
     if (playtimeDiff !== 0) return playtimeDiff;
@@ -2455,7 +2682,7 @@ export async function resolveDossierTelemetry(
   const [artworkMap, priceMap, verifiedPlatinums] = await Promise.all([
     batchResolveAuthenticArtwork(top10AppIds, { ddbDocClient, tableName }),
     fetchDossierPrices(),
-    resolveDossierPlatinums(steamId, sortedPlayedGames),
+    resolveDossierPlatinums(steamId, sortedPlayedGames, ddbDocClient, tableName),
   ]);
 
   let totalAuditedPaidTitles = 0;
@@ -2489,6 +2716,10 @@ export async function resolveDossierTelemetry(
   };
 
   const totalPlatinumsCount = verifiedPlatinums.length;
+  const unlockedAchievements = verifiedPlatinums.reduce(
+    (sum, plat) => sum + (Number(plat.unlockedAchievements) || 0),
+    0,
+  );
 
   const topPlayedGames: DossierTopGame[] = top10Games.map((g) => {
     const appIdStr = String(g.appId);
@@ -2621,6 +2852,7 @@ export async function resolveDossierTelemetry(
     games,
     verifiedPlatinums,
     totalPlatinumsCount,
+    unlockedAchievements,
     updatedAt: new Date().toISOString(),
   };
 

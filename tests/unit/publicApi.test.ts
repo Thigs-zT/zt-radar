@@ -55,6 +55,8 @@ import {
   resolveWishlistTelemetry,
   resolveBacklogTelemetry,
   resolveDossierTelemetry,
+  readPlatinumVault,
+  writePlatinumVault,
   computeGamerArchetype,
   buildDossierTimeStream,
   formatCurrency,
@@ -5254,6 +5256,7 @@ describe('Public Web API Handler', () => {
           },
         ],
         totalPlatinumsCount: 1,
+        unlockedAchievements: 54,
         archetype: {
           id: 'TACTICAL_EXPLORER',
           label: 'Tactical Explorer',
@@ -5292,6 +5295,7 @@ describe('Public Web API Handler', () => {
       expect(data.currency).toBe('BRL');
       expect(data.libraryPricingSummary.totalEstimatedValue).toBe(2450.5);
       expect(data.totalPlatinumsCount).toBe(1);
+      expect(data.unlockedAchievements).toBe(54);
       expect(data.verifiedPlatinums).toHaveLength(1);
       expect(data.games).toHaveLength(1);
 
@@ -5639,7 +5643,23 @@ describe('Public Web API Handler', () => {
       const data = JSON.parse(response.body);
 
       expect(data.totalPlatinumsCount).toBe(1);
+      expect(data.unlockedAchievements).toBe(42);
       expect(data.verifiedPlatinums).toEqual([
+        {
+          appId: 1245620,
+          title: 'ELDEN RING',
+          totalAchievements: 42,
+          unlockedAchievements: 42,
+          completedAt: '2025-04-12T18:30:00.000Z',
+        },
+      ]);
+
+      const vaultPut = ddbMock
+        .commandCalls(PutCommand)
+        .find((call) => call.args[0].input.Item?.PK === 'PLATINUMS#v1#76561198327022168');
+      expect(vaultPut).toBeDefined();
+      expect(vaultPut?.args[0].input.Item?.SK).toBe('VAULT');
+      expect(vaultPut?.args[0].input.Item?.platinums).toEqual([
         {
           appId: 1245620,
           title: 'ELDEN RING',
@@ -5681,6 +5701,7 @@ describe('Public Web API Handler', () => {
 
       expect(data.verifiedPlatinums).toEqual([]);
       expect(data.totalPlatinumsCount).toBe(0);
+      expect(data.unlockedAchievements).toBe(0);
       expect(data.libraryPricingSummary).toEqual({
         totalAuditedPaidTitles: 0,
         totalEstimatedValue: 0,
@@ -5691,29 +5712,55 @@ describe('Public Web API Handler', () => {
         expect(game.isFree).toBe(false);
       }
 
-      // Failed pricing fetch must not poison DynamoDB cache
+      // Failed pricing fetch and 0-platinum private check must not poison DynamoDB caches
       const putCalls = ddbMock.commandCalls(PutCommand);
       const dossierPut = putCalls.find((c) =>
         String(c.args[0].input.Item?.PK || '').startsWith('DOSSIER#v2#'),
       );
+      const vaultPut = putCalls.find((c) =>
+        String(c.args[0].input.Item?.PK || '').startsWith('PLATINUMS#v1#'),
+      );
       expect(dossierPut).toBeUndefined();
+      expect(vaultPut).toBeUndefined();
     });
 
-    it('should cap achievement queries at top 20 played titles and enforce 1500ms defensive timeout', async () => {
+    it('should audit full played library beyond top 20 games, skip under-15m titles, and enforce per-game 1200ms timeout', async () => {
       vi.useFakeTimers();
       try {
-        const manyPlayedGames = Array.from({ length: 25 }, (_, i) => ({
+        const topPlayedGames = Array.from({ length: 24 }, (_, i) => ({
           appId: 50000 + i,
           appid: 50000 + i,
           name: `Played Game ${i + 1}`,
-          playtime_forever: (25 - i) * 100,
+          playtime_forever: (30 - i) * 100, // 3000 down to 700 mins
           rtime_last_played: 1735689600,
           img_icon_url: null,
         }));
 
+        const manyPlayedGames = [
+          ...topPlayedGames,
+          // Rank 25 (beyond top 20): low/medium playtime platinum candidate
+          {
+            appId: 978460,
+            appid: 978460,
+            name: 'Emily is Away <3',
+            playtime_forever: 180,
+            rtime_last_played: 1735689600,
+            img_icon_url: null,
+          },
+          // Below 15-minute threshold: must not be queried
+          {
+            appId: 999888,
+            appid: 999888,
+            name: 'Briefly Launched Game',
+            playtime_forever: 10,
+            rtime_last_played: 1735689600,
+            img_icon_url: null,
+          },
+        ];
+
         vi.mocked(getOwnedGames).mockResolvedValueOnce({
           isPrivate: false,
-          gameCount: 25,
+          gameCount: manyPlayedGames.length,
           games: manyPlayedGames,
         });
 
@@ -5729,7 +5776,18 @@ describe('Public Web API Handler', () => {
               isCompleted: true,
             };
           }
-          // Simulate slow hanging upstream for candidate 2
+          // Rank 25 beyond top 20
+          if (appId === 978460) {
+            return {
+              appId: 978460,
+              gameName: 'Emily is Away <3',
+              totalAchievements: 14,
+              unlockedAchievements: 14,
+              isCompleted: true,
+              completedAt: '2025-03-01T10:00:00.000Z',
+            };
+          }
+          // Simulate hanging upstream call for a single title
           if (appId === 50001) {
             return new Promise(() => {});
           }
@@ -5751,12 +5809,13 @@ describe('Public Web API Handler', () => {
         };
 
         const responsePromise = handler(event);
-        await vi.advanceTimersByTimeAsync(1600);
+        await vi.advanceTimersByTimeAsync(1250);
         const response = await responsePromise;
 
         expect(response.statusCode).toBe(200);
         const data = JSON.parse(response.body);
-        expect(data.totalPlatinumsCount).toBe(1);
+        expect(data.totalPlatinumsCount).toBe(2);
+        expect(data.unlockedAchievements).toBe(24);
         expect(data.verifiedPlatinums).toEqual([
           {
             appId: 50000,
@@ -5764,16 +5823,300 @@ describe('Public Web API Handler', () => {
             totalAchievements: 10,
             unlockedAchievements: 10,
           },
+          {
+            appId: 978460,
+            title: 'Emily is Away <3',
+            totalAchievements: 14,
+            unlockedAchievements: 14,
+            completedAt: '2025-03-01T10:00:00.000Z',
+          },
         ]);
 
         const queriedIds = vi
           .mocked(fetchPlayerGameAchievements)
           .mock.calls.map((call) => call[1]);
-        expect(queriedIds.length).toBeLessThanOrEqual(20);
-        expect(queriedIds.every((id) => id < 50020)).toBe(true);
+        expect(queriedIds).toHaveLength(25);
+        expect(queriedIds).toContain(978460);
+        expect(queriedIds).not.toContain(999888);
       } finally {
         vi.useRealTimers();
       }
+    });
+
+    it('should reuse cached Platinum Vault items without re-querying Valve and merge newly discovered platinums', async () => {
+      const nowSec = Math.floor(Date.now() / 1000);
+      const existingVaultPlatinums = [
+        {
+          appId: 1086940,
+          title: "Baldur's Gate 3",
+          totalAchievements: 54,
+          unlockedAchievements: 54,
+          completedAt: '2025-01-15T12:00:00.000Z',
+        },
+        {
+          appId: 264710,
+          title: 'Subnautica',
+          totalAchievements: 17,
+          unlockedAchievements: 17,
+          completedAt: '2024-11-20T09:00:00.000Z',
+        },
+      ];
+
+      ddbMock.on(QueryCommand).callsFake((input) => {
+        const pk = input?.ExpressionAttributeValues?.[':pk'];
+        if (pk === 'PLATINUMS#v1#76561198327022168') {
+          return {
+            Items: [
+              {
+                PK: 'PLATINUMS#v1#76561198327022168',
+                SK: 'VAULT',
+                steamId: '76561198327022168',
+                platinums: existingVaultPlatinums,
+                ttl: nowSec + 86400,
+              },
+            ],
+          };
+        }
+        return { Items: [] };
+      });
+
+      const libraryWithLowPlaytimePlatinums = [
+        {
+          appId: 1086940,
+          appid: 1086940,
+          name: "Baldur's Gate 3",
+          playtime_forever: 6000,
+          rtime_last_played: 1735689600,
+          img_icon_url: null,
+        },
+        ...Array.from({ length: 20 }, (_, i) => ({
+          appId: 60000 + i,
+          appid: 60000 + i,
+          name: `Mid Game ${i + 1}`,
+          playtime_forever: (25 - i) * 100,
+          rtime_last_played: 1735689600,
+          img_icon_url: null,
+        })),
+        {
+          appId: 264710,
+          appid: 264710,
+          name: 'Subnautica',
+          playtime_forever: 420,
+          rtime_last_played: 1735689600,
+          img_icon_url: null,
+        },
+        {
+          appId: 848450,
+          appid: 848450,
+          name: 'Subnautica: Below Zero',
+          playtime_forever: 310,
+          rtime_last_played: 1735689600,
+          img_icon_url: null,
+        },
+        {
+          appId: 978460,
+          appid: 978460,
+          name: 'Emily is Away <3',
+          playtime_forever: 120,
+          rtime_last_played: 1735689600,
+          img_icon_url: null,
+        },
+      ];
+
+      vi.mocked(getOwnedGames).mockResolvedValueOnce({
+        isPrivate: false,
+        gameCount: libraryWithLowPlaytimePlatinums.length,
+        games: libraryWithLowPlaytimePlatinums,
+      });
+
+      vi.mocked(fetchPlayerGameAchievements).mockImplementation(async (_steamId, appId) => {
+        if (appId === 848450) {
+          return {
+            appId: 848450,
+            gameName: 'Subnautica: Below Zero',
+            totalAchievements: 13,
+            unlockedAchievements: 13,
+            isCompleted: true,
+            completedAt: '2025-02-10T14:00:00.000Z',
+          };
+        }
+        if (appId === 978460) {
+          return {
+            appId: 978460,
+            gameName: 'Emily is Away <3',
+            totalAchievements: 14,
+            unlockedAchievements: 14,
+            isCompleted: true,
+            completedAt: '2025-03-05T16:00:00.000Z',
+          };
+        }
+        return null;
+      });
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/dossier/{target}',
+        rawPath: '/public/dossier/76561198327022168',
+        pathParameters: {
+          target: '76561198327022168',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/dossier/76561198327022168',
+          },
+        },
+      };
+
+      const response = await handler(event);
+      expect(response.statusCode).toBe(200);
+      const data = JSON.parse(response.body);
+
+      // Already-verified vault games must not be re-queried from Valve
+      const queriedIds = vi
+        .mocked(fetchPlayerGameAchievements)
+        .mock.calls.map((call) => call[1]);
+      expect(queriedIds).not.toContain(1086940);
+      expect(queriedIds).not.toContain(264710);
+      expect(queriedIds).toContain(848450);
+      expect(queriedIds).toContain(978460);
+
+      // Merged list contains both cached vault and newly discovered platinums ordered by playtime desc
+      expect(data.totalPlatinumsCount).toBe(4);
+      expect(data.unlockedAchievements).toBe(54 + 17 + 13 + 14);
+      expect(data.verifiedPlatinums.map((p: { appId: number }) => p.appId)).toEqual([
+        1086940,
+        264710,
+        848450,
+        978460,
+      ]);
+
+      // Persistent Platinum Vault updated with merged 4-item list
+      const vaultPut = ddbMock
+        .commandCalls(PutCommand)
+        .find((call) => call.args[0].input.Item?.PK === 'PLATINUMS#v1#76561198327022168');
+      expect(vaultPut).toBeDefined();
+      expect(vaultPut?.args[0].input.Item?.SK).toBe('VAULT');
+      expect(vaultPut?.args[0].input.Item?.platinums).toHaveLength(4);
+      expect(vaultPut?.args[0].input.Item?.ttl).toBeGreaterThan(nowSec + 29 * 24 * 60 * 60);
+    });
+
+    it('should preserve vault platinums on subsequent call with zero redundant Valve queries when all played titles are cached', async () => {
+      const nowSec = Math.floor(Date.now() / 1000);
+      ddbMock.on(QueryCommand).callsFake((input) => {
+        const pk = input?.ExpressionAttributeValues?.[':pk'];
+        if (pk === 'PLATINUMS#v1#76561198327022168') {
+          return {
+            Items: [
+              {
+                PK: 'PLATINUMS#v1#76561198327022168',
+                SK: 'VAULT',
+                steamId: '76561198327022168',
+                platinums: [
+                  {
+                    appId: 1086940,
+                    title: "Baldur's Gate 3",
+                    totalAchievements: 54,
+                    unlockedAchievements: 54,
+                  },
+                  {
+                    appId: 1245620,
+                    title: 'ELDEN RING',
+                    totalAchievements: 42,
+                    unlockedAchievements: 42,
+                  },
+                ],
+                ttl: nowSec + 86400,
+              },
+            ],
+          };
+        }
+        return { Items: [] };
+      });
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/dossier/{target}',
+        rawPath: '/public/dossier/76561198327022168',
+        pathParameters: {
+          target: '76561198327022168',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/dossier/76561198327022168',
+          },
+        },
+      };
+
+      const response = await handler(event);
+      expect(response.statusCode).toBe(200);
+      const data = JSON.parse(response.body);
+
+      expect(vi.mocked(fetchPlayerGameAchievements)).not.toHaveBeenCalled();
+      expect(data.totalPlatinumsCount).toBe(2);
+      expect(data.unlockedAchievements).toBe(96);
+      expect(data.verifiedPlatinums).toHaveLength(2);
+
+      // No redundant vault write when zero new platinums were discovered
+      const vaultPut = ddbMock
+        .commandCalls(PutCommand)
+        .find((call) => call.args[0].input.Item?.PK === 'PLATINUMS#v1#76561198327022168');
+      expect(vaultPut).toBeUndefined();
+    });
+
+    it('should read map-formatted or array-formatted Platinum Vault records and ignore expired TTLs', async () => {
+      const nowSec = Math.floor(Date.now() / 1000);
+      ddbMock.on(QueryCommand).resolvesOnce({
+        Items: [
+          {
+            PK: 'PLATINUMS#v1#76561198327022168',
+            SK: 'VAULT',
+            platinums: {
+              '978460': {
+                appId: 978460,
+                title: 'Emily is Away <3',
+                totalAchievements: 14,
+                unlockedAchievements: 14,
+              },
+              '999999': {
+                appId: 999999,
+                title: 'Incomplete Entry',
+                totalAchievements: 10,
+                unlockedAchievements: 5,
+              },
+            },
+            ttl: nowSec + 3600,
+          },
+        ],
+      });
+
+      const valid = await readPlatinumVault('76561198327022168', ddbMock as unknown as DynamoDBDocumentClient, MOCK_TABLE);
+      expect(valid).toEqual([
+        {
+          appId: 978460,
+          title: 'Emily is Away <3',
+          totalAchievements: 14,
+          unlockedAchievements: 14,
+        },
+      ]);
+
+      ddbMock.on(QueryCommand).resolvesOnce({
+        Items: [
+          {
+            PK: 'PLATINUMS#v1#76561198327022168',
+            SK: 'VAULT',
+            platinums: valid,
+            ttl: nowSec - 10,
+          },
+        ],
+      });
+      const expired = await readPlatinumVault('76561198327022168', ddbMock as unknown as DynamoDBDocumentClient, MOCK_TABLE);
+      expect(expired).toEqual([]);
+
+      await writePlatinumVault('76561198327022168', valid, ddbMock as unknown as DynamoDBDocumentClient, MOCK_TABLE);
+      const vaultPut = ddbMock
+        .commandCalls(PutCommand)
+        .find((call) => call.args[0].input.Item?.PK === 'PLATINUMS#v1#76561198327022168');
+      expect(vaultPut?.args[0].input.Item?.platinums).toEqual(valid);
     });
 
     it('should respond with 204 No Content and CORS headers on OPTIONS preflight for dossier', async () => {
