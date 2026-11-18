@@ -11,6 +11,7 @@ import {
   isAuthenticArtworkUrl,
   isGenericSteamTitle,
   getCanonicalHeaderImageUrl,
+  fetchPlayerGameAchievements,
 } from '../../src/utils/steamWeb.js';
 import { BRAND_COLORS } from '../../src/utils/theme.js';
 
@@ -726,6 +727,129 @@ describe('batchFetchSteamAppPrices', () => {
 
       expect(artworkMap.get('1163550')).toBe('https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/1163550/header.jpg');
       expect(titleMap.get('1163550')).toBe('Captain Tsubasa: Rise of New Champions');
+    });
+  });
+
+  describe('fetchPlayerGameAchievements', () => {
+    it('should detect 100% completed title and derive completedAt from latest unlocktime', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          playerstats: {
+            success: true,
+            gameName: 'ELDEN RING',
+            achievements: [
+              { apiname: 'ACH_1', achieved: 1, unlocktime: 1700000000 },
+              { apiname: 'ACH_2', achieved: 1, unlocktime: 1700086400 },
+            ],
+          },
+        }),
+      });
+
+      const result = await fetchPlayerGameAchievements('76561198327022168', 1245620, undefined, 'test-key');
+
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      expect(fetchSpy.mock.calls[0][0]).toContain(
+        'ISteamUserStats/GetPlayerAchievements/v1/?appid=1245620&key=test-key&steamid=76561198327022168',
+      );
+      expect(result).toEqual({
+        appId: 1245620,
+        gameName: 'ELDEN RING',
+        totalAchievements: 2,
+        unlockedAchievements: 2,
+        isCompleted: true,
+        completedAt: new Date(1700086400 * 1000).toISOString(),
+      });
+
+      fetchSpy.mockRestore();
+    });
+
+    it('should return isCompleted false for partially unlocked achievements without completedAt', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          playerstats: {
+            success: true,
+            gameName: "Baldur's Gate 3",
+            achievements: [
+              { apiname: 'ACH_1', achieved: 1, unlocktime: 1700000000 },
+              { apiname: 'ACH_2', achieved: 0, unlocktime: 0 },
+              { apiname: 'ACH_3', achieved: 0, unlocktime: 0 },
+            ],
+          },
+        }),
+      });
+
+      const result = await fetchPlayerGameAchievements('76561198327022168', 1086940, undefined, 'test-key');
+
+      expect(result).toEqual({
+        appId: 1086940,
+        gameName: "Baldur's Gate 3",
+        totalAchievements: 3,
+        unlockedAchievements: 1,
+        isCompleted: false,
+      });
+      expect(result?.completedAt).toBeUndefined();
+
+      fetchSpy.mockRestore();
+    });
+
+    it('should return null cleanly when Valve returns HTTP 403 for private achievements', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
+        ok: false,
+        status: 403,
+      });
+
+      const result = await fetchPlayerGameAchievements('76561198327022168', 1245620, undefined, 'test-key');
+      expect(result).toBeNull();
+
+      fetchSpy.mockRestore();
+    });
+
+    it('should return null when game has no achievements or playerstats.success is false', async () => {
+      const fetchSpy = vi
+        .spyOn(globalThis, 'fetch')
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({
+            playerstats: {
+              success: false,
+              error: 'Requested app has no stats',
+            },
+          }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({
+            playerstats: {
+              success: true,
+              achievements: [],
+            },
+          }),
+        });
+
+      expect(
+        await fetchPlayerGameAchievements('76561198327022168', 100, undefined, 'test-key'),
+      ).toBeNull();
+      expect(
+        await fetchPlayerGameAchievements('76561198327022168', 101, undefined, 'test-key'),
+      ).toBeNull();
+
+      fetchSpy.mockRestore();
+    });
+
+    it('should return null immediately when passed an already-aborted signal or missing API key', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+      const controller = new AbortController();
+      controller.abort();
+
+      expect(
+        await fetchPlayerGameAchievements('76561198327022168', 1245620, controller.signal, 'test-key'),
+      ).toBeNull();
+      expect(await fetchPlayerGameAchievements('76561198327022168', 1245620, undefined, '')).toBeNull();
+      expect(fetchSpy).not.toHaveBeenCalled();
+
+      fetchSpy.mockRestore();
     });
   });
 });

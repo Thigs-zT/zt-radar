@@ -31,6 +31,9 @@ import type {
   DossierArchetype,
   DossierConstellationGame,
   DossierSummaryMetrics,
+  PlatinumTitle,
+  DossierLibraryPricingSummary,
+  DossierOwnedGame,
   PublicDossierResponse,
   DossierTelemetryApiResult,
   SteamOwnedGameItem,
@@ -53,12 +56,14 @@ import {
   getPlayerSummaries,
   getSteamFriendList,
   getOwnedGames,
+  fetchPlayerGameAchievements,
   batchResolveAuthenticArtwork,
   resolveAuthenticArtwork,
   isAuthenticArtworkUrl,
   isGenericSteamTitle,
   getCanonicalHeaderImageUrl,
   APP_DIRECTORY,
+  KNOWN_F2P_APP_IDS as STEAM_KNOWN_F2P_APP_IDS,
 } from '../utils/steamWeb.js';
 
 const ddbClient = new DynamoDBClient({});
@@ -2141,12 +2146,135 @@ export function buildDossierTimeStream(
   return timeStream;
 }
 
+const DOSSIER_PRICE_BATCH_LIMIT = 250;
+const DOSSIER_ACHIEVEMENT_CANDIDATE_LIMIT = 20;
+const DOSSIER_ACHIEVEMENT_CONCURRENCY = 5;
+const DOSSIER_ACHIEVEMENT_TIMEOUT_MS = 1500;
+
 /**
- * Resolves player Gamer Dossier telemetry including tenure, TimeStream, and behavioral archetype.
+ * Resolves numeric store price and free-to-play status for an owned game
+ * from Steam Storefront price telemetry and known F2P registries.
+ */
+function resolveDossierGamePrice(
+  appId: number,
+  priceInfo?: SteamAppPriceInfo,
+): { price: number | null; isFree: boolean } {
+  const isRegistryF2P = KNOWN_F2P_APP_IDS.has(appId) || STEAM_KNOWN_F2P_APP_IDS.has(appId);
+
+  if (priceInfo?.isFree) {
+    return { price: 0, isFree: true };
+  }
+
+  if (priceInfo && !priceInfo.isDelisted && !priceInfo.isUnreleased) {
+    const rawPrice =
+      priceInfo.final ??
+      priceInfo.salePrice ??
+      priceInfo.price ??
+      priceInfo.initial ??
+      priceInfo.regularPrice ??
+      null;
+    if (typeof rawPrice === 'number' && Number.isFinite(rawPrice) && rawPrice > 0) {
+      return { price: Number(rawPrice.toFixed(2)), isFree: false };
+    }
+  }
+
+  if (isRegistryF2P) {
+    return { price: 0, isFree: true };
+  }
+
+  return { price: null, isFree: false };
+}
+
+/**
+ * Queries top played titles for verified 100% achievement completion ("platinums")
+ * using bounded concurrency, Promise.allSettled, and a defensive 1500ms timeout.
+ * Returns an empty array cleanly when achievements are private (HTTP 403) or none are completed.
+ */
+async function resolveDossierPlatinums(
+  steamId: string,
+  sortedPlayedGames: SteamOwnedGameItem[],
+): Promise<PlatinumTitle[]> {
+  const candidates = sortedPlayedGames.slice(0, DOSSIER_ACHIEVEMENT_CANDIDATE_LIMIT);
+  if (candidates.length === 0) {
+    return [];
+  }
+
+  const platinumByIndex = new Array<PlatinumTitle | null>(candidates.length).fill(null);
+  const controller = new AbortController();
+  let batchTimer: ReturnType<typeof setTimeout> | undefined;
+
+  const timeoutPromise = new Promise<void>((resolve) => {
+    batchTimer = setTimeout(() => {
+      controller.abort();
+      resolve();
+    }, DOSSIER_ACHIEVEMENT_TIMEOUT_MS);
+  });
+
+  let cursor = 0;
+  const worker = async (): Promise<void> => {
+    while (cursor < candidates.length && !controller.signal.aborted) {
+      const idx = cursor++;
+      const candidate = candidates[idx];
+      if (!candidate) break;
+
+      const appId = Number(candidate.appId ?? candidate.appid ?? 0);
+      if (!appId) continue;
+
+      const [settled] = await Promise.allSettled([
+        fetchPlayerGameAchievements(steamId, appId, controller.signal),
+      ]);
+
+      if (controller.signal.aborted) break;
+      if (settled.status !== 'fulfilled' || !settled.value) continue;
+
+      const ach = settled.value;
+      if (
+        ach.isCompleted &&
+        ach.totalAchievements > 0 &&
+        ach.unlockedAchievements === ach.totalAchievements
+      ) {
+        const rawCandidateName =
+          candidate.name && !/^App #\d+$/i.test(candidate.name) ? candidate.name : null;
+        const title =
+          rawCandidateName ||
+          ach.gameName ||
+          KNOWN_GAME_TITLES[String(appId)] ||
+          APP_DIRECTORY[String(appId)] ||
+          candidate.name ||
+          `App #${appId}`;
+
+        platinumByIndex[idx] = {
+          appId,
+          title,
+          totalAchievements: ach.totalAchievements,
+          unlockedAchievements: ach.unlockedAchievements,
+          ...(ach.completedAt ? { completedAt: ach.completedAt } : {}),
+        };
+      }
+    }
+  };
+
+  const runWorkers = async (): Promise<void> => {
+    const workerCount = Math.min(DOSSIER_ACHIEVEMENT_CONCURRENCY, candidates.length);
+    await Promise.allSettled(Array.from({ length: workerCount }, () => worker()));
+  };
+
+  try {
+    await Promise.race([runWorkers(), timeoutPromise]);
+  } finally {
+    if (batchTimer) clearTimeout(batchTimer);
+  }
+
+  return platinumByIndex.filter((item): item is PlatinumTitle => item !== null);
+}
+
+/**
+ * Resolves player Gamer Dossier telemetry including tenure, TimeStream, behavioral archetype,
+ * batch Steam library pricing, and verified 100% achievement platinums.
  */
 export async function resolveDossierTelemetry(
   target: string,
-  preferredCurrency: string = 'USD',
+  preferredCurrency: string = 'BRL',
   ddbDocClient: DynamoDBDocumentClient = docClient,
   tableName: string = process.env.TABLE_NAME || '',
 ): Promise<DossierTelemetryApiResult> {
@@ -2171,8 +2299,9 @@ export async function resolveDossierTelemetry(
     };
   }
 
-  const isBrl = (preferredCurrency || '').toUpperCase().trim() === 'BRL';
-  const currency = isBrl ? 'BRL' : 'USD';
+  const isUsd = (preferredCurrency || '').toUpperCase().trim() === 'USD';
+  const currency = isUsd ? 'USD' : 'BRL';
+  const countryCode = isUsd ? 'us' : 'br';
   const nowSec = Math.floor(Date.now() / 1000);
 
   // 1. Check DynamoDB Cache
@@ -2183,7 +2312,7 @@ export async function resolveDossierTelemetry(
           TableName: tableName,
           KeyConditionExpression: 'PK = :pk AND SK = :sk',
           ExpressionAttributeValues: {
-            ':pk': `DOSSIER#v1#${steamId}`,
+            ':pk': `DOSSIER#v2#${steamId}#${currency}`,
             ':sk': 'TELEMETRY',
           },
           Limit: 1,
@@ -2199,11 +2328,25 @@ export async function resolveDossierTelemetry(
         const isFresh = !cached.ttl || cached.ttl > nowSec;
         if (isFresh) {
           const { PK, SK, ttl, ...payload } = cached;
+          const cachedPlatinums = Array.isArray(payload.verifiedPlatinums)
+            ? payload.verifiedPlatinums
+            : [];
           return {
             success: true,
             data: {
               ...(payload as PublicDossierResponse),
               currency,
+              games: Array.isArray(payload.games) ? payload.games : [],
+              libraryPricingSummary: payload.libraryPricingSummary ?? {
+                totalAuditedPaidTitles: 0,
+                totalEstimatedValue: 0,
+                currency,
+              },
+              verifiedPlatinums: cachedPlatinums,
+              totalPlatinumsCount:
+                typeof payload.totalPlatinumsCount === 'number'
+                  ? payload.totalPlatinumsCount
+                  : cachedPlatinums.length,
             },
           };
         }
@@ -2272,11 +2415,80 @@ export async function resolveDossierTelemetry(
   const sortedPlayedGames = [...playedGamesList].sort(
     (a, b) => (b.playtime_forever ?? 0) - (a.playtime_forever ?? 0),
   );
+  const sortedAllGames = [...allGames].sort((a, b) => {
+    const playtimeDiff = (b.playtime_forever ?? 0) - (a.playtime_forever ?? 0);
+    if (playtimeDiff !== 0) return playtimeDiff;
+    return Number(a.appId ?? a.appid ?? 0) - Number(b.appId ?? b.appid ?? 0);
+  });
+
   const top10Games = sortedPlayedGames.slice(0, 10);
   const top10AppIds = top10Games.map((g) => g.appId);
 
-  // 3. Hydrate top 10 most-played games with authentic artwork
-  const artworkMap = await batchResolveAuthenticArtwork(top10AppIds, { ddbDocClient, tableName });
+  const pricingCandidates =
+    sortedAllGames.length > DOSSIER_PRICE_BATCH_LIMIT
+      ? sortedAllGames.filter((g) => {
+          const id = Number(g.appId ?? g.appid ?? 0);
+          return !KNOWN_F2P_APP_IDS.has(id) && !STEAM_KNOWN_F2P_APP_IDS.has(id);
+        })
+      : sortedAllGames;
+  const pricingTargetAppIds = pricingCandidates
+    .slice(0, DOSSIER_PRICE_BATCH_LIMIT)
+    .map((g) => Number(g.appId ?? g.appid ?? 0))
+    .filter((id) => id > 0);
+
+  let pricingFetchFailed = false;
+  const fetchDossierPrices = async (): Promise<Map<number, SteamAppPriceInfo>> => {
+    if (pricingTargetAppIds.length === 0) return new Map();
+    try {
+      return await batchFetchSteamAppPrices(
+        pricingTargetAppIds,
+        countryCode,
+        DOSSIER_PRICE_BATCH_LIMIT,
+      );
+    } catch {
+      pricingFetchFailed = true;
+      return new Map();
+    }
+  };
+
+  // 3. Concurrently hydrate top-10 artwork, batch library prices, and achievement platinums
+  const [artworkMap, priceMap, verifiedPlatinums] = await Promise.all([
+    batchResolveAuthenticArtwork(top10AppIds, { ddbDocClient, tableName }),
+    fetchDossierPrices(),
+    resolveDossierPlatinums(steamId, sortedPlayedGames),
+  ]);
+
+  let totalAuditedPaidTitles = 0;
+  let totalEstimatedValue = 0;
+
+  const games: DossierOwnedGame[] = sortedAllGames.map((g) => {
+    const appId = Number(g.appId ?? g.appid ?? 0);
+    const appIdStr = String(appId);
+    const name = g.name || KNOWN_GAME_TITLES[appIdStr] || APP_DIRECTORY[appIdStr] || `App #${appId}`;
+    const playtimeMinutes = Number(g.playtime_forever ?? 0);
+    const { price, isFree } = resolveDossierGamePrice(appId, priceMap.get(appId));
+
+    if (!isFree && price !== null && price > 0) {
+      totalAuditedPaidTitles += 1;
+      totalEstimatedValue += price;
+    }
+
+    return {
+      appId,
+      name,
+      playtimeMinutes,
+      price,
+      isFree,
+    };
+  });
+
+  const libraryPricingSummary: DossierLibraryPricingSummary = {
+    totalAuditedPaidTitles,
+    totalEstimatedValue: Number(totalEstimatedValue.toFixed(2)),
+    currency,
+  };
+
+  const totalPlatinumsCount = verifiedPlatinums.length;
 
   const topPlayedGames: DossierTopGame[] = top10Games.map((g) => {
     const appIdStr = String(g.appId);
@@ -2405,18 +2617,22 @@ export async function resolveDossierTelemetry(
     timeStream,
     archetype,
     constellationGames,
+    libraryPricingSummary,
+    games,
+    verifiedPlatinums,
+    totalPlatinumsCount,
     updatedAt: new Date().toISOString(),
   };
 
-  // 8. Persist to DynamoDB Cache (TTL 3600 seconds)
-  if (tableName && ddbDocClient) {
+  // 8. Persist to DynamoDB Cache (TTL 3600 seconds) unless upstream pricing threw
+  if (tableName && ddbDocClient && !pricingFetchFailed) {
     try {
       const ttl = nowSec + 3600;
       await ddbDocClient.send(
         new PutCommand({
           TableName: tableName,
           Item: {
-            PK: `DOSSIER#v1#${steamId}`,
+            PK: `DOSSIER#v2#${steamId}#${currency}`,
             SK: 'TELEMETRY',
             ...dossierData,
             ttl,
@@ -3068,7 +3284,7 @@ export const handler = async (event: HttpApiEvent): Promise<PublicApiResponse> =
       }
 
       const currencyParam = event.queryStringParameters?.currency;
-      const preferredCurrency = (currencyParam || 'USD').toUpperCase() === 'BRL' ? 'BRL' : 'USD';
+      const preferredCurrency = (currencyParam || 'BRL').toUpperCase().trim() === 'USD' ? 'USD' : 'BRL';
       const result = await resolveDossierTelemetry(cleanTarget, preferredCurrency, docClient, tableName);
       if (!result.success) {
         return createJsonResponse(result.statusCode, {

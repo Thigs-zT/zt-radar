@@ -31,6 +31,7 @@ import type {
   AchievementFilterMode,
   AchievementTrackerLinks,
   PlayerAchievementsResult,
+  PlayerGameAchievementSummary,
   SteamOwnedGameItem,
   SteamOwnedGamesResult,
   SteamRawFriend,
@@ -1129,6 +1130,106 @@ export async function getPlayerAchievementsSafe(
   } catch {
     clearTimeout(timer);
     return null;
+  }
+}
+
+/**
+ * Fetches player achievement completion telemetry for a single Steam AppID via
+ * ISteamUserStats/GetPlayerAchievements/v1 with an optional external AbortSignal
+ * and a defensive 1500ms timeout.
+ * Returns null if achievements are private (HTTP 403), unsupported, or on network error.
+ */
+export async function fetchPlayerGameAchievements(
+  steamId: string,
+  appId: number,
+  signal?: AbortSignal,
+  apiKey: string = process.env['STEAM_API_KEY'] ?? '',
+): Promise<PlayerGameAchievementSummary | null> {
+  const cleanSteamId = typeof steamId === 'string' ? steamId.trim() : '';
+  const numericAppId = Number(appId);
+  if (!cleanSteamId || !Number.isFinite(numericAppId) || numericAppId <= 0 || !apiKey) {
+    return null;
+  }
+
+  if (signal?.aborted) {
+    return null;
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 1500);
+  const onExternalAbort = (): void => {
+    controller.abort();
+  };
+
+  if (signal) {
+    signal.addEventListener('abort', onExternalAbort, { once: true });
+  }
+
+  type RawAchievement = {
+    apiname?: string;
+    achieved?: number;
+    unlocktime?: number;
+  };
+  type AchievementsResponse = {
+    playerstats?: {
+      success?: boolean;
+      error?: string;
+      gameName?: string;
+      achievements?: RawAchievement[];
+    };
+  };
+
+  try {
+    const url = `${API_BASE}/ISteamUserStats/GetPlayerAchievements/v1/?appid=${numericAppId}&key=${encodeURIComponent(apiKey)}&steamid=${encodeURIComponent(cleanSteamId)}`;
+    const res = await fetch(url, {
+      headers: { 'User-Agent': USER_AGENT },
+      signal: controller.signal,
+    });
+
+    if (!res.ok) {
+      return null;
+    }
+
+    const data = (await res.json()) as AchievementsResponse;
+    if (data?.playerstats?.success === false) {
+      return null;
+    }
+
+    const achievements = data?.playerstats?.achievements;
+    if (!Array.isArray(achievements) || achievements.length === 0) {
+      return null;
+    }
+
+    const totalAchievements = achievements.length;
+    const unlockedAchievements = achievements.filter((a) => a.achieved === 1).length;
+    const isCompleted = unlockedAchievements === totalAchievements && totalAchievements > 0;
+
+    let completedAt: string | undefined;
+    if (isCompleted) {
+      const maxUnlockTime = achievements.reduce((max, a) => {
+        const ts = typeof a.unlocktime === 'number' && Number.isFinite(a.unlocktime) ? a.unlocktime : 0;
+        return ts > max ? ts : max;
+      }, 0);
+      if (maxUnlockTime > 0) {
+        completedAt = new Date(maxUnlockTime * 1000).toISOString();
+      }
+    }
+
+    return {
+      appId: numericAppId,
+      gameName: data?.playerstats?.gameName ?? null,
+      totalAchievements,
+      unlockedAchievements,
+      isCompleted,
+      ...(completedAt ? { completedAt } : {}),
+    };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+    if (signal) {
+      signal.removeEventListener('abort', onExternalAbort);
+    }
   }
 }
 

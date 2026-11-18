@@ -641,6 +641,16 @@ export interface PlayerAchievementsResult {
   appId?: number;
 }
 
+/** Lightweight achievement completion summary returned by fetchPlayerGameAchievements. */
+export interface PlayerGameAchievementSummary {
+  appId: number;
+  gameName: string | null;
+  totalAchievements: number;
+  unlockedAchievements: number;
+  isCompleted: boolean;
+  completedAt?: string;
+}
+
 // ---------------------------------------------------------------------------
 // HowLongToBeat Stats
 // ---------------------------------------------------------------------------
@@ -889,6 +899,31 @@ export interface DossierSummaryMetrics {
   topPlayedGames: DossierTopGame[];
 }
 
+/** Verified 100% achievement-completed title for the Gamer Dossier. */
+export interface PlatinumTitle {
+  appId: number;
+  title: string;
+  totalAchievements: number;
+  unlockedAchievements: number;
+  completedAt?: string;
+}
+
+/** Aggregated Steam store pricing valuation summary across owned library titles. */
+export interface DossierLibraryPricingSummary {
+  totalAuditedPaidTitles: number;
+  totalEstimatedValue: number;
+  currency: string;
+}
+
+/** Owned game entry enriched with store pricing for library ROI calculation. */
+export interface DossierOwnedGame {
+  appId: number;
+  name: string;
+  playtimeMinutes: number;
+  price?: number | null;
+  isFree?: boolean;
+}
+
 /** Public Gamer Dossier response payload for Web / PWA companion. */
 export interface PublicDossierResponse {
   steamId: string;
@@ -908,8 +943,18 @@ export interface PublicDossierResponse {
   timeStream: DossierTimeStreamYear[];
   archetype: DossierArchetype;
   constellationGames: DossierConstellationGame[];
+  libraryPricingSummary: DossierLibraryPricingSummary;
+  games: DossierOwnedGame[];
+  verifiedPlatinums: PlatinumTitle[];
+  totalPlatinumsCount: number;
   updatedAt: string;
 }
+
+/** Alias for PublicDossierResponse. */
+export type PublicGamerDossier = PublicDossierResponse;
+
+/** Alias for PublicDossierResponse. */
+export type GamerDossierResponse = PublicDossierResponse;
 
 /** Result shape returned by resolveDossierTelemetry. */
 export type DossierTelemetryApiResult =

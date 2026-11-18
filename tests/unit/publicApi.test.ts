@@ -35,6 +35,7 @@ vi.mock('../../src/utils/steamWeb.js', async (importOriginal) => {
     getPlayerSummaries: vi.fn(),
     getSteamFriendList: vi.fn(),
     getOwnedGames: vi.fn(),
+    fetchPlayerGameAchievements: vi.fn(),
   };
 });
 
@@ -74,6 +75,7 @@ import {
   getPlayerSummaries,
   getSteamFriendList,
   getOwnedGames,
+  fetchPlayerGameAchievements,
 } from '../../src/utils/steamWeb.js';
 
 describe('Public Web API Handler', () => {
@@ -463,6 +465,8 @@ describe('Public Web API Handler', () => {
         },
       ],
     });
+
+    vi.mocked(fetchPlayerGameAchievements).mockResolvedValue(null);
 
     vi.mocked(getSteamFriendList).mockResolvedValue({
       success: true,
@@ -5200,14 +5204,14 @@ describe('Public Web API Handler', () => {
     it('should serve dossier immediately from DynamoDB cache on fresh cache hit without upstream calls', async () => {
       const nowSec = Math.floor(Date.now() / 1000);
       const cachedDossier = {
-        PK: 'DOSSIER#v1#76561198327022168',
+        PK: 'DOSSIER#v2#76561198327022168#BRL',
         SK: 'TELEMETRY',
         steamId: '76561198327022168',
         target: '76561198327022168',
         personaName: 'CachedPlayer',
         avatarUrl: 'https://cdn/cached.jpg',
         profileUrl: 'https://steamcommunity.com/profiles/76561198327022168',
-        currency: 'USD',
+        currency: 'BRL',
         totalGames: 42,
         playedGames: 30,
         unplayedGames: 12,
@@ -5226,6 +5230,30 @@ describe('Public Web API Handler', () => {
         },
         timeStream: [],
         constellationGames: [],
+        libraryPricingSummary: {
+          totalAuditedPaidTitles: 28,
+          totalEstimatedValue: 2450.5,
+          currency: 'BRL',
+        },
+        games: [
+          {
+            appId: 1086940,
+            name: "Baldur's Gate 3",
+            playtimeMinutes: 6000,
+            price: 199.99,
+            isFree: false,
+          },
+        ],
+        verifiedPlatinums: [
+          {
+            appId: 1086940,
+            title: "Baldur's Gate 3",
+            totalAchievements: 54,
+            unlockedAchievements: 54,
+            completedAt: '2025-05-01T12:00:00.000Z',
+          },
+        ],
+        totalPlatinumsCount: 1,
         archetype: {
           id: 'TACTICAL_EXPLORER',
           label: 'Tactical Explorer',
@@ -5261,10 +5289,17 @@ describe('Public Web API Handler', () => {
       const data = JSON.parse(response.body);
       expect(data.personaName).toBe('CachedPlayer');
       expect(data.totalGames).toBe(42);
+      expect(data.currency).toBe('BRL');
+      expect(data.libraryPricingSummary.totalEstimatedValue).toBe(2450.5);
+      expect(data.totalPlatinumsCount).toBe(1);
+      expect(data.verifiedPlatinums).toHaveLength(1);
+      expect(data.games).toHaveLength(1);
 
       // Upstream Steam helpers must NOT have been called due to cache hit
       expect(vi.mocked(getPlayerSummary)).not.toHaveBeenCalled();
       expect(vi.mocked(getOwnedGames)).not.toHaveBeenCalled();
+      expect(vi.mocked(batchFetchSteamAppPrices)).not.toHaveBeenCalled();
+      expect(vi.mocked(fetchPlayerGameAchievements)).not.toHaveBeenCalled();
     });
 
     it('should persist fresh dossier to DynamoDB cache with 3600s TTL on cache miss', async () => {
@@ -5289,7 +5324,7 @@ describe('Public Web API Handler', () => {
 
       const putCalls = ddbMock.commandCalls(PutCommand);
       const dossierPutCall = putCalls.find(
-        (call) => call.args[0].input.Item?.PK === 'DOSSIER#v1#76561198327022168',
+        (call) => call.args[0].input.Item?.PK === 'DOSSIER#v2#76561198327022168#BRL',
       );
       expect(dossierPutCall).toBeDefined();
       expect(dossierPutCall?.args[0].input.Item?.SK).toBe('TELEMETRY');
@@ -5297,13 +5332,151 @@ describe('Public Web API Handler', () => {
       expect(ttl).toBeGreaterThan(Math.floor(Date.now() / 1000));
     });
 
-    it('should support optional currency parameter (BRL and USD)', async () => {
-      const event: HttpApiEvent = {
+    it('should support BRL default and optional currency parameter (BRL and USD)', async () => {
+      const brlDefaultEvent: HttpApiEvent = {
+        routeKey: 'GET /public/dossier/{target}',
+        rawPath: '/public/dossier/76561198327022168',
+        pathParameters: {
+          target: '76561198327022168',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/dossier/76561198327022168',
+          },
+        },
+      };
+
+      const brlResponse = await handler(brlDefaultEvent);
+      expect(brlResponse.statusCode).toBe(200);
+      const brlData = JSON.parse(brlResponse.body);
+      expect(brlData.currency).toBe('BRL');
+      expect(brlData.libraryPricingSummary.currency).toBe('BRL');
+      expect(vi.mocked(batchFetchSteamAppPrices)).toHaveBeenLastCalledWith(
+        [1086940, 1245620, 1091500],
+        'br',
+        250,
+      );
+
+      const usdEvent: HttpApiEvent = {
         routeKey: 'GET /public/dossier/{target}',
         rawPath: '/public/dossier/76561198327022168',
         queryStringParameters: {
-          currency: 'BRL',
+          currency: 'USD',
         },
+        pathParameters: {
+          target: '76561198327022168',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/dossier/76561198327022168',
+          },
+        },
+      };
+
+      const usdResponse = await handler(usdEvent);
+      expect(usdResponse.statusCode).toBe(200);
+      const usdData = JSON.parse(usdResponse.body);
+      expect(usdData.currency).toBe('USD');
+      expect(usdData.libraryPricingSummary.currency).toBe('USD');
+      expect(vi.mocked(batchFetchSteamAppPrices)).toHaveBeenLastCalledWith(
+        [1086940, 1245620, 1091500],
+        'us',
+        250,
+      );
+    });
+
+    it('should enrich dossier library games with batch Steam pricing, F2P flags, and null for delisted titles', async () => {
+      vi.mocked(getOwnedGames).mockResolvedValueOnce({
+        isPrivate: false,
+        gameCount: 5,
+        games: [
+          {
+            appId: 1086940,
+            appid: 1086940,
+            name: "Baldur's Gate 3",
+            playtime_forever: 6000,
+            rtime_last_played: 1735689600,
+            img_icon_url: null,
+          },
+          {
+            appId: 730,
+            appid: 730,
+            name: 'Counter-Strike 2',
+            playtime_forever: 4200,
+            rtime_last_played: 1735689600,
+            img_icon_url: null,
+          },
+          {
+            appId: 999001,
+            appid: 999001,
+            name: 'Free Indie License',
+            playtime_forever: 180,
+            rtime_last_played: 1735689600,
+            img_icon_url: null,
+          },
+          {
+            appId: 888888,
+            appid: 888888,
+            name: 'Delisted Legacy Title',
+            playtime_forever: 120,
+            rtime_last_played: 1704067200,
+            img_icon_url: null,
+          },
+          {
+            appId: 1091500,
+            appid: 1091500,
+            name: 'Cyberpunk 2077',
+            playtime_forever: 0,
+            rtime_last_played: 0,
+            img_icon_url: null,
+          },
+        ],
+      });
+
+      vi.mocked(batchFetchSteamAppPrices).mockResolvedValueOnce(
+        new Map([
+          [
+            1086940,
+            {
+              initial: 199.99,
+              final: 159.99,
+              isFree: false,
+            },
+          ],
+          [
+            999001,
+            {
+              isFree: true,
+              salePrice: 0,
+              regularPrice: 0,
+            },
+          ],
+          [
+            888888,
+            {
+              isDelisted: true,
+              isFree: false,
+              isUnreleased: true,
+              salePrice: null,
+              regularPrice: null,
+            },
+          ],
+          [
+            1091500,
+            {
+              initial: 199.9,
+              final: 99.95,
+              isFree: false,
+            },
+          ],
+        ]),
+      );
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/dossier/{target}',
+        rawPath: '/public/dossier/76561198327022168',
         pathParameters: {
           target: '76561198327022168',
         },
@@ -5318,7 +5491,289 @@ describe('Public Web API Handler', () => {
       const response = await handler(event);
       expect(response.statusCode).toBe(200);
       const data = JSON.parse(response.body);
+
       expect(data.currency).toBe('BRL');
+      expect(data.libraryPricingSummary).toEqual({
+        totalAuditedPaidTitles: 2,
+        totalEstimatedValue: 259.94,
+        currency: 'BRL',
+      });
+
+      expect(Array.isArray(data.games)).toBe(true);
+      expect(data.games).toHaveLength(5);
+
+      const bg3 = data.games.find((g: { appId: number }) => g.appId === 1086940);
+      expect(bg3).toEqual({
+        appId: 1086940,
+        name: "Baldur's Gate 3",
+        playtimeMinutes: 6000,
+        price: 159.99,
+        isFree: false,
+      });
+
+      const cs2 = data.games.find((g: { appId: number }) => g.appId === 730);
+      expect(cs2).toEqual({
+        appId: 730,
+        name: 'Counter-Strike 2',
+        playtimeMinutes: 4200,
+        price: 0,
+        isFree: true,
+      });
+
+      const freeLicense = data.games.find((g: { appId: number }) => g.appId === 999001);
+      expect(freeLicense).toEqual({
+        appId: 999001,
+        name: 'Free Indie License',
+        playtimeMinutes: 180,
+        price: 0,
+        isFree: true,
+      });
+
+      const delisted = data.games.find((g: { appId: number }) => g.appId === 888888);
+      expect(delisted).toEqual({
+        appId: 888888,
+        name: 'Delisted Legacy Title',
+        playtimeMinutes: 120,
+        price: null,
+        isFree: false,
+      });
+
+      const unplayedPaid = data.games.find((g: { appId: number }) => g.appId === 1091500);
+      expect(unplayedPaid).toEqual({
+        appId: 1091500,
+        name: 'Cyberpunk 2077',
+        playtimeMinutes: 0,
+        price: 99.95,
+        isFree: false,
+      });
+    });
+
+    it('should detect verified 100% achievement platinums while excluding partial, empty, and private titles', async () => {
+      vi.mocked(getOwnedGames).mockResolvedValueOnce({
+        isPrivate: false,
+        gameCount: 4,
+        games: [
+          {
+            appId: 1086940,
+            appid: 1086940,
+            name: "Baldur's Gate 3",
+            playtime_forever: 8000,
+            rtime_last_played: 1735689600,
+            img_icon_url: null,
+          },
+          {
+            appId: 1245620,
+            appid: 1245620,
+            name: 'ELDEN RING',
+            playtime_forever: 6000,
+            rtime_last_played: 1735689600,
+            img_icon_url: null,
+          },
+          {
+            appId: 1145360,
+            appid: 1145360,
+            name: 'Hades',
+            playtime_forever: 3000,
+            rtime_last_played: 1735689600,
+            img_icon_url: null,
+          },
+          {
+            appId: 1091500,
+            appid: 1091500,
+            name: 'Cyberpunk 2077',
+            playtime_forever: 0,
+            rtime_last_played: 0,
+            img_icon_url: null,
+          },
+        ],
+      });
+
+      vi.mocked(fetchPlayerGameAchievements).mockImplementation(async (_steamId, appId) => {
+        if (appId === 1086940) {
+          return {
+            appId: 1086940,
+            gameName: "Baldur's Gate 3",
+            totalAchievements: 54,
+            unlockedAchievements: 40,
+            isCompleted: false,
+          };
+        }
+        if (appId === 1245620) {
+          return {
+            appId: 1245620,
+            gameName: 'ELDEN RING',
+            totalAchievements: 42,
+            unlockedAchievements: 42,
+            isCompleted: true,
+            completedAt: '2025-04-12T18:30:00.000Z',
+          };
+        }
+        if (appId === 1145360) {
+          return {
+            appId: 1145360,
+            gameName: 'Hades',
+            totalAchievements: 0,
+            unlockedAchievements: 0,
+            isCompleted: false,
+          };
+        }
+        return null;
+      });
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/dossier/{target}',
+        rawPath: '/public/dossier/76561198327022168',
+        pathParameters: {
+          target: '76561198327022168',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/dossier/76561198327022168',
+          },
+        },
+      };
+
+      const response = await handler(event);
+      expect(response.statusCode).toBe(200);
+      const data = JSON.parse(response.body);
+
+      expect(data.totalPlatinumsCount).toBe(1);
+      expect(data.verifiedPlatinums).toEqual([
+        {
+          appId: 1245620,
+          title: 'ELDEN RING',
+          totalAchievements: 42,
+          unlockedAchievements: 42,
+          completedAt: '2025-04-12T18:30:00.000Z',
+        },
+      ]);
+
+      // Unplayed game (1091500) must not be queried for achievements
+      const queriedAppIds = vi
+        .mocked(fetchPlayerGameAchievements)
+        .mock.calls.map((call) => call[1]);
+      expect(queriedAppIds).toEqual([1086940, 1245620, 1145360]);
+      expect(queriedAppIds).not.toContain(1091500);
+    });
+
+    it('should return empty verifiedPlatinums cleanly on private achievements or rejections with zero synthetic fallbacks', async () => {
+      vi.mocked(fetchPlayerGameAchievements).mockRejectedValue(new Error('HTTP 403 Forbidden'));
+      vi.mocked(batchFetchSteamAppPrices).mockRejectedValueOnce(new Error('Storefront unavailable'));
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/dossier/{target}',
+        rawPath: '/public/dossier/76561198327022168',
+        pathParameters: {
+          target: '76561198327022168',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/dossier/76561198327022168',
+          },
+        },
+      };
+
+      const response = await handler(event);
+      expect(response.statusCode).toBe(200);
+      const data = JSON.parse(response.body);
+
+      expect(data.verifiedPlatinums).toEqual([]);
+      expect(data.totalPlatinumsCount).toBe(0);
+      expect(data.libraryPricingSummary).toEqual({
+        totalAuditedPaidTitles: 0,
+        totalEstimatedValue: 0,
+        currency: 'BRL',
+      });
+      for (const game of data.games) {
+        expect(game.price).toBeNull();
+        expect(game.isFree).toBe(false);
+      }
+
+      // Failed pricing fetch must not poison DynamoDB cache
+      const putCalls = ddbMock.commandCalls(PutCommand);
+      const dossierPut = putCalls.find((c) =>
+        String(c.args[0].input.Item?.PK || '').startsWith('DOSSIER#v2#'),
+      );
+      expect(dossierPut).toBeUndefined();
+    });
+
+    it('should cap achievement queries at top 20 played titles and enforce 1500ms defensive timeout', async () => {
+      vi.useFakeTimers();
+      try {
+        const manyPlayedGames = Array.from({ length: 25 }, (_, i) => ({
+          appId: 50000 + i,
+          appid: 50000 + i,
+          name: `Played Game ${i + 1}`,
+          playtime_forever: (25 - i) * 100,
+          rtime_last_played: 1735689600,
+          img_icon_url: null,
+        }));
+
+        vi.mocked(getOwnedGames).mockResolvedValueOnce({
+          isPrivate: false,
+          gameCount: 25,
+          games: manyPlayedGames,
+        });
+
+        vi.mocked(batchFetchSteamAppPrices).mockResolvedValueOnce(new Map());
+
+        vi.mocked(fetchPlayerGameAchievements).mockImplementation(async (_steamId, appId) => {
+          if (appId === 50000) {
+            return {
+              appId: 50000,
+              gameName: 'Played Game 1',
+              totalAchievements: 10,
+              unlockedAchievements: 10,
+              isCompleted: true,
+            };
+          }
+          // Simulate slow hanging upstream for candidate 2
+          if (appId === 50001) {
+            return new Promise(() => {});
+          }
+          return null;
+        });
+
+        const event: HttpApiEvent = {
+          routeKey: 'GET /public/dossier/{target}',
+          rawPath: '/public/dossier/76561198327022168',
+          pathParameters: {
+            target: '76561198327022168',
+          },
+          requestContext: {
+            http: {
+              method: 'GET',
+              path: '/public/dossier/76561198327022168',
+            },
+          },
+        };
+
+        const responsePromise = handler(event);
+        await vi.advanceTimersByTimeAsync(1600);
+        const response = await responsePromise;
+
+        expect(response.statusCode).toBe(200);
+        const data = JSON.parse(response.body);
+        expect(data.totalPlatinumsCount).toBe(1);
+        expect(data.verifiedPlatinums).toEqual([
+          {
+            appId: 50000,
+            title: 'Played Game 1',
+            totalAchievements: 10,
+            unlockedAchievements: 10,
+          },
+        ]);
+
+        const queriedIds = vi
+          .mocked(fetchPlayerGameAchievements)
+          .mock.calls.map((call) => call[1]);
+        expect(queriedIds.length).toBeLessThanOrEqual(20);
+        expect(queriedIds.every((id) => id < 50020)).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('should respond with 204 No Content and CORS headers on OPTIONS preflight for dossier', async () => {
