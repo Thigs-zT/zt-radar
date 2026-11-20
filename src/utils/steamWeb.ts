@@ -36,6 +36,9 @@ import type {
   SteamOwnedGamesResult,
   SteamRawFriend,
   SteamFriendListResult,
+  SteamDeckCompatibilityStatus,
+  ControllerSupportLevel,
+  SteamPlatforms,
 } from '../types/index.js';
 import { BRAND_COLORS } from './theme.js';
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
@@ -3055,4 +3058,132 @@ export function buildAchievementsEmbedPayload(
   };
 
   return { embed, embeds: [embed], components };
+}
+
+const STEAM_DECK_COMPAT_TIMEOUT_MS = 1200;
+
+/**
+ * Extracts platform support and controller support flags from Valve's raw appdetails data.
+ * Never fabricates platform support when the platforms object is absent.
+ */
+export function extractAppDetailsCompatibility(
+  rawData:
+    | {
+        platforms?: { windows?: unknown; mac?: unknown; linux?: unknown } | null;
+        controller_support?: unknown;
+      }
+    | null
+    | undefined,
+): {
+  platforms: SteamPlatforms | null;
+  controllerSupport: ControllerSupportLevel;
+} {
+  if (!rawData || typeof rawData !== 'object') {
+    return { platforms: null, controllerSupport: null };
+  }
+
+  let platforms: SteamPlatforms | null = null;
+  if (rawData.platforms && typeof rawData.platforms === 'object' && !Array.isArray(rawData.platforms)) {
+    const p = rawData.platforms;
+    if ('windows' in p || 'mac' in p || 'linux' in p) {
+      platforms = {
+        windows: Boolean(p.windows),
+        mac: Boolean(p.mac),
+        linux: Boolean(p.linux),
+      };
+    }
+  }
+
+  let controllerSupport: ControllerSupportLevel = null;
+  if (typeof rawData.controller_support === 'string') {
+    const normalized = rawData.controller_support.trim().toLowerCase();
+    if (normalized === 'full') {
+      controllerSupport = 'full';
+    } else if (normalized === 'partial') {
+      controllerSupport = 'partial';
+    }
+  }
+
+  return { platforms, controllerSupport };
+}
+
+/**
+ * Queries Valve's official Steam Deck compatibility endpoint with a strict 1200ms timeout.
+ * Maps resolved_category: 3 -> 'verified', 2 -> 'playable', 1 -> 'unsupported', otherwise 'unknown'.
+ * Never throws or blocks callers on timeout or network failures.
+ */
+export async function fetchSteamDeckCompatibility(
+  appId: number,
+  signal?: AbortSignal,
+): Promise<SteamDeckCompatibilityStatus> {
+  if (!Number.isFinite(appId) || appId <= 0 || signal?.aborted) {
+    return 'unknown';
+  }
+
+  const cleanAppId = Math.floor(appId);
+  const timeoutController = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
+  try {
+    const nativeTimeoutSignal =
+      typeof AbortSignal.timeout === 'function'
+        ? AbortSignal.timeout(STEAM_DECK_COMPAT_TIMEOUT_MS)
+        : timeoutController.signal;
+
+    const signals: AbortSignal[] = [timeoutController.signal, nativeTimeoutSignal];
+    if (signal) {
+      signals.push(signal);
+    }
+
+    const combinedSignal =
+      typeof AbortSignal.any === 'function' ? AbortSignal.any(signals) : nativeTimeoutSignal;
+
+    const url = `https://store.steampowered.com/saleaction/ajaxgetdeckappcompatibilityreport?nAppID=${cleanAppId}`;
+
+    const fetchPromise = (async (): Promise<SteamDeckCompatibilityStatus> => {
+      const res = await fetch(url, {
+        headers: { 'User-Agent': USER_AGENT },
+        signal: combinedSignal,
+      });
+
+      if (!res.ok) {
+        return 'unknown';
+      }
+
+      const data = (await res.json()) as {
+        resolved_category?: number;
+        results?: { resolved_category?: number };
+      };
+
+      const category = data?.results?.resolved_category ?? data?.resolved_category;
+      switch (category) {
+        case 3:
+          return 'verified';
+        case 2:
+          return 'playable';
+        case 1:
+          return 'unsupported';
+        default:
+          return 'unknown';
+      }
+    })();
+
+    const timeoutPromise = new Promise<SteamDeckCompatibilityStatus>((resolve) => {
+      timer = setTimeout(() => {
+        timeoutController.abort(
+          new DOMException(
+            `Steam Deck compatibility exceeded ${STEAM_DECK_COMPAT_TIMEOUT_MS}ms timeout`,
+            'TimeoutError',
+          ),
+        );
+        resolve('unknown');
+      }, STEAM_DECK_COMPAT_TIMEOUT_MS);
+    });
+
+    return await Promise.race([fetchPromise, timeoutPromise]);
+  } catch {
+    return 'unknown';
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }

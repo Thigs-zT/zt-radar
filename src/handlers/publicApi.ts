@@ -10,6 +10,7 @@
  * - GET /public/backlog/{target}: Retrieves public Backlog Vault telemetry with playtime metrics and live store valuation.
  * - GET /public/dossier/{target}: Retrieves public Gamer Dossier telemetry with TimeStream and behavioral archetype.
  * - GET /public/friends/{target}: Retrieves public Steam friends list enriched with persona names and avatars.
+ * - GET /public/sales/calendar: Retrieves official Steam sales and festival schedule with status metadata.
  */
 
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
@@ -43,10 +44,13 @@ import type {
   PublicSteamFriend,
   PublicFriendsResponse,
   FriendsTelemetryApiResult,
+  GameCompatibilityInfo,
+  SteamDeckCompatibilityStatus,
 } from '../types/index.js';
 import { getHowLongToBeatStats } from '../utils/hltbNative.js';
 import { getGameDealInfo, synthesizeAnchorPriceHistory, batchResolveItadDeals } from '../utils/itadApi.js';
 import { getSteamTrendingGames } from '../utils/platformStatus.js';
+import { buildSalesCalendarPayload } from '../utils/steamSales.js';
 import {
   resolveSteamId,
   fetchSteamWishlist,
@@ -63,6 +67,7 @@ import {
   isAuthenticArtworkUrl,
   isGenericSteamTitle,
   getCanonicalHeaderImageUrl,
+  fetchSteamDeckCompatibility,
   APP_DIRECTORY,
   KNOWN_F2P_APP_IDS as STEAM_KNOWN_F2P_APP_IDS,
 } from '../utils/steamWeb.js';
@@ -316,6 +321,7 @@ function buildPublicMarketTelemetry(
   dealInfo: GameDealInfo,
   imageUrl: string,
   titleFallback: string | null = null,
+  steamDeckStatus?: SteamDeckCompatibilityStatus,
 ): PublicMarketTelemetry {
   const effectiveTitleFallback =
     titleFallback || KNOWN_GAME_TITLES[cleanAppId] || APP_DIRECTORY?.[cleanAppId] || null;
@@ -355,8 +361,22 @@ function buildPublicMarketTelemetry(
     }
   }
 
+  const {
+    platforms: dealPlatforms,
+    controllerSupport: dealControllerSupport,
+    ...dealInfoRest
+  } = dealInfo;
+
+  const compatibility: GameCompatibilityInfo | undefined = dealPlatforms
+    ? {
+        steamDeck: steamDeckStatus ?? 'unknown',
+        controllerSupport: dealControllerSupport ?? null,
+        platforms: dealPlatforms,
+      }
+    : undefined;
+
   return {
-    ...dealInfo,
+    ...dealInfoRest,
     appId: cleanAppId,
     gameId: dealInfo.gameId || `steam_${cleanAppId}`,
     title: resolvedTitle,
@@ -374,6 +394,7 @@ function buildPublicMarketTelemetry(
     isUnreleased: dealInfo.isUnreleased,
     salePrice: primaryDeal.salePrice,
     regularPrice: primaryDeal.regularPrice,
+    ...(compatibility ? { compatibility } : {}),
     updatedAt: new Date().toISOString(),
   };
 }
@@ -496,6 +517,19 @@ export async function getCachedMarketTelemetry(
           isUnreleased: cached.isUnreleased,
           salePrice: cached.salePrice ?? cached.primaryDeal?.salePrice ?? null,
           regularPrice: cached.regularPrice ?? cached.primaryDeal?.regularPrice ?? null,
+          ...(cached.compatibility && cached.compatibility.platforms
+            ? {
+                compatibility: {
+                  steamDeck: cached.compatibility.steamDeck ?? 'unknown',
+                  controllerSupport: cached.compatibility.controllerSupport ?? null,
+                  platforms: {
+                    windows: Boolean(cached.compatibility.platforms.windows),
+                    mac: Boolean(cached.compatibility.platforms.mac),
+                    linux: Boolean(cached.compatibility.platforms.linux),
+                  },
+                },
+              }
+            : {}),
           updatedAt: cached.updatedAt || new Date().toISOString(),
         };
       }
@@ -534,17 +568,26 @@ export async function resolveMarketTelemetry(
     return cached;
   }
 
-  // 2. Fetch live data via getGameDealInfo with defensive outer timeout guard
+  // 2. Fetch live data via getGameDealInfo and Steam Deck compatibility in parallel with defensive outer timeout guard
   let lookupTimer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const dealInfo = await Promise.race([
-      getGameDealInfo(cleanAppId, currency, effectiveTitleFallback),
-      new Promise<null>((resolve) => {
-        lookupTimer = setTimeout(() => {
-          console.warn(`[MarketTelemetry] Deal lookup exceeded ${MARKET_DEAL_LOOKUP_TIMEOUT_MS}ms for appId ${cleanAppId}; returning fallback.`);
-          resolve(null);
-        }, MARKET_DEAL_LOOKUP_TIMEOUT_MS);
-      }),
+    const numericAppId = /^\d+$/.test(cleanAppId) ? Number(cleanAppId) : NaN;
+    const deckCompatPromise: Promise<SteamDeckCompatibilityStatus> =
+      Number.isFinite(numericAppId) && numericAppId > 0
+        ? fetchSteamDeckCompatibility(numericAppId).catch(() => 'unknown')
+        : Promise.resolve('unknown');
+
+    const [dealInfo, steamDeckStatus] = await Promise.all([
+      Promise.race([
+        getGameDealInfo(cleanAppId, currency, effectiveTitleFallback),
+        new Promise<null>((resolve) => {
+          lookupTimer = setTimeout(() => {
+            console.warn(`[MarketTelemetry] Deal lookup exceeded ${MARKET_DEAL_LOOKUP_TIMEOUT_MS}ms for appId ${cleanAppId}; returning fallback.`);
+            resolve(null);
+          }, MARKET_DEAL_LOOKUP_TIMEOUT_MS);
+        }),
+      ]),
+      deckCompatPromise,
     ]);
 
     if (dealInfo && dealInfo.primaryDeal) {
@@ -559,6 +602,7 @@ export async function resolveMarketTelemetry(
         dealInfo,
         authenticImageUrl,
         effectiveTitleFallback,
+        steamDeckStatus,
       );
 
       // 3. Cache only when multi-store ITAD data is verified (never cache degraded or Steam-only fallbacks)
@@ -3141,6 +3185,19 @@ export const handler = async (event: HttpApiEvent): Promise<PublicApiResponse> =
   }
 
   try {
+    // Route 0: GET /public/sales/calendar
+    const isSalesCalendarRoute =
+      event.routeKey === 'GET /public/sales/calendar' ||
+      rawPath === '/public/sales/calendar' ||
+      rawPath === '/public/sales/calendar/' ||
+      rawPath.endsWith('/public/sales/calendar') ||
+      rawPath.endsWith('/public/sales/calendar/');
+
+    if (isSalesCalendarRoute) {
+      const calendarPayload = buildSalesCalendarPayload();
+      return createJsonResponse(200, calendarPayload);
+    }
+
     // Route 1: GET /public/market/trending
     const isTrendingRoute =
       event.routeKey === 'GET /public/market/trending' ||

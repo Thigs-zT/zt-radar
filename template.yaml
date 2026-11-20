@@ -245,6 +245,18 @@ Resources:
             ApiId: !Ref DiscordApi
             Path: /public/friends/{target}
             Method: options
+        GetPublicSalesCalendar:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref DiscordApi
+            Path: /public/sales/calendar
+            Method: get
+        OptionsPublicSalesCalendar:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref DiscordApi
+            Path: /public/sales/calendar
+            Method: options
 
 Outputs:
   InteractionsEndpoint:

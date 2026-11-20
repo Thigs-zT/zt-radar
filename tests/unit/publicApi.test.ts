@@ -36,6 +36,7 @@ vi.mock('../../src/utils/steamWeb.js', async (importOriginal) => {
     getSteamFriendList: vi.fn(),
     getOwnedGames: vi.fn(),
     fetchPlayerGameAchievements: vi.fn(),
+    fetchSteamDeckCompatibility: vi.fn(async () => 'unknown' as const),
   };
 });
 
@@ -78,6 +79,7 @@ import {
   getSteamFriendList,
   getOwnedGames,
   fetchPlayerGameAchievements,
+  fetchSteamDeckCompatibility,
 } from '../../src/utils/steamWeb.js';
 
 describe('Public Web API Handler', () => {
@@ -236,6 +238,7 @@ describe('Public Web API Handler', () => {
     vi.clearAllMocks();
     process.env.TABLE_NAME = MOCK_TABLE;
     vi.mocked(batchResolveItadDeals).mockResolvedValue(new Map());
+    vi.mocked(fetchSteamDeckCompatibility).mockResolvedValue('unknown');
 
     // Default mock implementation for getGameDealInfo
     vi.mocked(getGameDealInfo).mockImplementation(async (rawId, currency = 'USD') => {
@@ -1566,6 +1569,132 @@ describe('Public Web API Handler', () => {
       const cachedData = JSON.parse(cachedResponse.body);
       expect(cachedData.allTimeLowPrice).toBe(44.99);
       expect(cachedData.priceHistory).toEqual(sampleHistory);
+      expect(getGameDealInfo).not.toHaveBeenCalled();
+    });
+
+    it('should enrich GET /public/market/{appId} with compatibility metadata, persist to MARKET#v6, and restore from cache', async () => {
+      vi.mocked(fetchSteamDeckCompatibility).mockResolvedValueOnce('verified');
+      vi.mocked(getGameDealInfo).mockResolvedValueOnce({
+        ...mockDealBaldursGate,
+        platforms: { windows: true, mac: true, linux: false },
+        controllerSupport: 'full',
+      });
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/market/{appId}',
+        rawPath: '/public/market/1086940',
+        pathParameters: {
+          appId: '1086940',
+        },
+        requestContext: {
+          http: {
+            method: 'GET',
+            path: '/public/market/1086940',
+          },
+        },
+      };
+
+      const liveResponse = await handler(event);
+      expect(liveResponse.statusCode).toBe(200);
+
+      const liveData = JSON.parse(liveResponse.body);
+      expect(liveData.compatibility).toEqual({
+        steamDeck: 'verified',
+        controllerSupport: 'full',
+        platforms: { windows: true, mac: true, linux: false },
+      });
+      expect(liveData.platforms).toBeUndefined();
+      expect(liveData.controllerSupport).toBeUndefined();
+      expect(fetchSteamDeckCompatibility).toHaveBeenCalledWith(1086940);
+
+      const putCalls = ddbMock.commandCalls(PutCommand);
+      const marketPut = putCalls.find((call) => call.args[0].input.Item?.PK === 'MARKET#v6#1086940#USD');
+      expect(marketPut?.args[0].input.Item?.compatibility).toEqual({
+        steamDeck: 'verified',
+        controllerSupport: 'full',
+        platforms: { windows: true, mac: true, linux: false },
+      });
+
+      // Cache hit must restore compatibility without live upstream calls
+      vi.mocked(getGameDealInfo).mockClear();
+      vi.mocked(fetchSteamDeckCompatibility).mockClear();
+      ddbMock.on(QueryCommand).resolves({
+        Items: marketPut?.args[0].input.Item ? [marketPut.args[0].input.Item] : [],
+      });
+
+      const cachedResponse = await handler(event);
+      expect(cachedResponse.statusCode).toBe(200);
+      const cachedData = JSON.parse(cachedResponse.body);
+      expect(cachedData.compatibility).toEqual({
+        steamDeck: 'verified',
+        controllerSupport: 'full',
+        platforms: { windows: true, mac: true, linux: false },
+      });
+      expect(getGameDealInfo).not.toHaveBeenCalled();
+      expect(fetchSteamDeckCompatibility).not.toHaveBeenCalled();
+    });
+
+    it('should preserve backwards compatibility for existing MARKET#v6 cached items lacking compatibility', async () => {
+      const nowSec = Math.floor(Date.now() / 1000);
+      const legacyCachedItem = {
+        PK: 'MARKET#v6#1086940#USD',
+        SK: 'TELEMETRY',
+        appId: '1086940',
+        gameId: 'steam_1086940',
+        title: "Baldur's Gate 3",
+        imageUrl: 'https://example.com/bg3.jpg',
+        reviewScore: 96,
+        steamAppId: '1086940',
+        dealType: 'CURATED_DEAL',
+        isAllTimeLow: false,
+        allTimeLowPrice: 44.99,
+        priceHistory: [
+          {
+            timestamp: '2024-05-01T12:00:00.000Z',
+            shopId: 'steam',
+            shopName: 'Steam',
+            priceUsd: 59.99,
+            priceBrl: null,
+            price: 59.99,
+            regularPrice: 59.99,
+            cutPercent: 0,
+            isAllTimeLow: false,
+          },
+          {
+            timestamp: '2024-11-28T12:00:00.000Z',
+            shopId: 'gog',
+            shopName: 'GOG',
+            priceUsd: 44.99,
+            priceBrl: null,
+            price: 44.99,
+            regularPrice: 59.99,
+            cutPercent: 25,
+            isAllTimeLow: true,
+          },
+        ],
+        primaryDeal: mockDealBaldursGate.primaryDeal,
+        cheaperAlternative: mockDealBaldursGate.cheaperAlternative,
+        storeBreakdown: mockDealBaldursGate.storeBreakdown,
+        alternativeCheckStatus: 'confirmed',
+        alternativeCheckDegraded: false,
+        ttl: nowSec + 3600,
+        updatedAt: new Date().toISOString(),
+      };
+
+      ddbMock.on(QueryCommand).resolvesOnce({ Items: [legacyCachedItem] });
+
+      const event: HttpApiEvent = {
+        routeKey: 'GET /public/market/{appId}',
+        rawPath: '/public/market/1086940',
+        pathParameters: { appId: '1086940' },
+        requestContext: { http: { method: 'GET', path: '/public/market/1086940' } },
+      };
+
+      const response = await handler(event);
+      expect(response.statusCode).toBe(200);
+      const data = JSON.parse(response.body);
+      expect(data.title).toBe("Baldur's Gate 3");
+      expect(data.compatibility).toBeUndefined();
       expect(getGameDealInfo).not.toHaveBeenCalled();
     });
   });
@@ -6670,6 +6799,116 @@ describe('Public Web API Handler', () => {
           http: {
             method: 'OPTIONS',
             path: '/public/friends/76561198327022168',
+          },
+        },
+      };
+
+      const response = await handler(event);
+      expect(response.statusCode).toBe(204);
+      expect(response.headers['Access-Control-Allow-Origin']).toBe('*');
+      expect(response.headers['Access-Control-Allow-Methods']).toContain('OPTIONS');
+      expect(response.body).toBe('');
+    });
+  });
+
+  describe('Route: GET /public/sales/calendar', () => {
+    it('should return active sale, next major seasonal sale, next event, and full categorized schedule when a sale is active', async () => {
+      vi.useFakeTimers();
+      try {
+        vi.setSystemTime(new Date('2026-10-04T12:00:00Z'));
+
+        const event: HttpApiEvent = {
+          routeKey: 'GET /public/sales/calendar',
+          rawPath: '/public/sales/calendar',
+          requestContext: {
+            http: {
+              method: 'GET',
+              path: '/public/sales/calendar',
+            },
+          },
+        };
+
+        const response = await handler(event);
+        expect(response.statusCode).toBe(200);
+        expect(response.headers['Access-Control-Allow-Origin']).toBe('*');
+
+        const data = JSON.parse(response.body);
+        expect(data.serverTime).toBe('2026-10-04T12:00:00.000Z');
+        expect(data.activeSale).toMatchObject({
+          name: 'Autumn Sale 2026',
+          type: 'seasonal',
+          status: 'active',
+          durationDays: 7,
+        });
+        expect(data.nextEvent).toMatchObject({
+          name: 'Cooking Fest',
+          type: 'fest',
+          status: 'upcoming',
+          durationDays: 7,
+        });
+        expect(data.nextMajorSale).toMatchObject({
+          name: 'Winter Sale 2026',
+          type: 'seasonal',
+          status: 'upcoming',
+          durationDays: 21,
+        });
+
+        expect(Array.isArray(data.schedule)).toBe(true);
+        expect(data.schedule.length).toBeGreaterThanOrEqual(8);
+
+        for (let i = 0; i < data.schedule.length - 1; i++) {
+          const currStart = new Date(data.schedule[i].startDate).getTime();
+          const nextStart = new Date(data.schedule[i + 1].startDate).getTime();
+          expect(currStart).toBeLessThanOrEqual(nextStart);
+        }
+
+        const summer = data.schedule.find((e: { name: string }) => e.name === 'Steam Summer Sale 2026');
+        const autumn = data.schedule.find((e: { name: string }) => e.name === 'Autumn Sale 2026');
+        const winter = data.schedule.find((e: { name: string }) => e.name === 'Winter Sale 2026');
+        expect(summer?.status).toBe('past');
+        expect(summer?.durationDays).toBe(14);
+        expect(autumn?.status).toBe('active');
+        expect(winter?.status).toBe('upcoming');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('should return activeSale null and resolve nextEvent and nextMajorSale when between events', async () => {
+      vi.useFakeTimers();
+      try {
+        vi.setSystemTime(new Date('2026-11-10T12:00:00Z'));
+
+        const event: HttpApiEvent = {
+          rawPath: '/prod/public/sales/calendar',
+          requestContext: {
+            http: {
+              method: 'GET',
+              path: '/prod/public/sales/calendar',
+            },
+          },
+        };
+
+        const response = await handler(event);
+        expect(response.statusCode).toBe(200);
+        const data = JSON.parse(response.body);
+
+        expect(data.activeSale).toBeNull();
+        expect(data.nextEvent?.name).toBe('Auto-Battler RPG Fest');
+        expect(data.nextEvent?.status).toBe('upcoming');
+        expect(data.nextMajorSale?.name).toBe('Winter Sale 2026');
+        expect(data.nextMajorSale?.type).toBe('seasonal');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('should respond with 204 No Content and CORS headers on OPTIONS preflight for sales calendar', async () => {
+      const event: HttpApiEvent = {
+        requestContext: {
+          http: {
+            method: 'OPTIONS',
+            path: '/public/sales/calendar',
           },
         },
       };

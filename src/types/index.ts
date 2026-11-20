@@ -140,6 +140,26 @@ export interface PricePoint {
   isAllTimeLow: boolean;
 }
 
+/** Steam Deck Verified / Playable / Unsupported status from Valve Storefront. */
+export type SteamDeckCompatibilityStatus = 'verified' | 'playable' | 'unsupported' | 'unknown';
+
+/** Steam Storefront controller support level. */
+export type ControllerSupportLevel = 'full' | 'partial' | null;
+
+/** Supported operating system platforms from Valve appdetails. */
+export interface SteamPlatforms {
+  windows: boolean;
+  mac: boolean;
+  linux: boolean;
+}
+
+/** Platform, controller, and Steam Deck compatibility metadata. */
+export interface GameCompatibilityInfo {
+  steamDeck: SteamDeckCompatibilityStatus;
+  controllerSupport: ControllerSupportLevel;
+  platforms: SteamPlatforms;
+}
+
 /**
  * Fully resolved game deal info returned by getGameDealInfo().
  * Aggregates Steam Store data, ITAD multi-store comparison, and historical low.
@@ -179,6 +199,10 @@ export interface GameDealInfo {
   isPlatformExclusive?: boolean;
   /** Flag indicating whether the title is unreleased or unpriced. */
   isUnreleased?: boolean;
+  /** Supported operating system platforms extracted from Valve appdetails. */
+  platforms?: SteamPlatforms;
+  /** Controller support level extracted from Valve appdetails. */
+  controllerSupport?: ControllerSupportLevel;
 }
 
 // ---------------------------------------------------------------------------
@@ -737,12 +761,30 @@ export interface SteamSaleStatus {
   isActive: boolean;
 }
 
+/** Computed timeline status of a Steam sale event. */
+export type SteamSaleEventStatus = 'past' | 'active' | 'upcoming';
+
+/** Enriched Steam sale event exposed by GET /public/sales/calendar. */
+export interface PublicSteamSaleEvent extends SteamSaleEvent {
+  status: SteamSaleEventStatus;
+  durationDays: number;
+}
+
+/** Public Steam sales calendar response payload. */
+export interface PublicSalesCalendarResponse {
+  activeSale: PublicSteamSaleEvent | null;
+  nextMajorSale: PublicSteamSaleEvent | null;
+  nextEvent: PublicSteamSaleEvent | null;
+  schedule: PublicSteamSaleEvent[];
+  serverTime: string;
+}
+
 // ---------------------------------------------------------------------------
 // Public Web API Intelligence
 // ---------------------------------------------------------------------------
 
 /** Public Market telemetry response for Web / PWA companion. */
-export interface PublicMarketTelemetry extends Omit<GameDealInfo, 'primaryDeal'> {
+export interface PublicMarketTelemetry extends Omit<GameDealInfo, 'primaryDeal' | 'platforms' | 'controllerSupport'> {
   appId: string;
   updatedAt: string;
   isPlatformExclusive?: boolean;
@@ -751,6 +793,7 @@ export interface PublicMarketTelemetry extends Omit<GameDealInfo, 'primaryDeal'>
   regularPrice?: number | null;
   primaryDeal?: StoreDeal | null;
   priceHistory?: PricePoint[];
+  compatibility?: GameCompatibilityInfo;
 }
 
 /** Public Duel payload response retrieved from DynamoDB. */

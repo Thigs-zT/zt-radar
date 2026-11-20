@@ -12,6 +12,8 @@ import {
   isGenericSteamTitle,
   getCanonicalHeaderImageUrl,
   fetchPlayerGameAchievements,
+  fetchSteamDeckCompatibility,
+  extractAppDetailsCompatibility,
 } from '../../src/utils/steamWeb.js';
 import { BRAND_COLORS } from '../../src/utils/theme.js';
 
@@ -850,6 +852,96 @@ describe('batchFetchSteamAppPrices', () => {
       expect(fetchSpy).not.toHaveBeenCalled();
 
       fetchSpy.mockRestore();
+    });
+  });
+
+  describe('fetchSteamDeckCompatibility & extractAppDetailsCompatibility', () => {
+    it('should map resolved_category 3, 2, 1, and 0/unknown to canonical Steam Deck compatibility statuses', async () => {
+      const fetchSpy = vi
+        .spyOn(globalThis, 'fetch')
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ success: 1, results: { appid: 1086940, resolved_category: 3 } }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ success: 1, results: { appid: 1091500, resolved_category: 2 } }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ success: 1, results: { appid: 730, resolved_category: 1 } }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ success: 1, results: { appid: 999999, resolved_category: 0 } }),
+        });
+
+      expect(await fetchSteamDeckCompatibility(1086940)).toBe('verified');
+      expect(await fetchSteamDeckCompatibility(1091500)).toBe('playable');
+      expect(await fetchSteamDeckCompatibility(730)).toBe('unsupported');
+      expect(await fetchSteamDeckCompatibility(999999)).toBe('unknown');
+
+      expect(fetchSpy).toHaveBeenCalledTimes(4);
+      expect(fetchSpy.mock.calls[0][0]).toBe(
+        'https://store.steampowered.com/saleaction/ajaxgetdeckappcompatibilityreport?nAppID=1086940',
+      );
+      expect(fetchSpy.mock.calls[0][1]?.signal).toBeInstanceOf(AbortSignal);
+
+      fetchSpy.mockRestore();
+    });
+
+    it('should fall back cleanly to unknown on HTTP error, network failure, or timeout/abort', async () => {
+      const fetchSpy = vi
+        .spyOn(globalThis, 'fetch')
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 503,
+        })
+        .mockRejectedValueOnce(new Error('Network error'))
+        .mockRejectedValueOnce(new DOMException('The operation was aborted due to timeout', 'TimeoutError'));
+
+      expect(await fetchSteamDeckCompatibility(1086940)).toBe('unknown');
+      expect(await fetchSteamDeckCompatibility(1086940)).toBe('unknown');
+      expect(await fetchSteamDeckCompatibility(1086940)).toBe('unknown');
+
+      const controller = new AbortController();
+      controller.abort();
+      expect(await fetchSteamDeckCompatibility(1086940, controller.signal)).toBe('unknown');
+      expect(await fetchSteamDeckCompatibility(0)).toBe('unknown');
+
+      fetchSpy.mockRestore();
+    });
+
+    it('should extract authentic platforms and controllerSupport without fabricating missing data', () => {
+      expect(
+        extractAppDetailsCompatibility({
+          platforms: { windows: true, mac: true, linux: false },
+          controller_support: 'full',
+        }),
+      ).toEqual({
+        platforms: { windows: true, mac: true, linux: false },
+        controllerSupport: 'full',
+      });
+
+      expect(
+        extractAppDetailsCompatibility({
+          platforms: { windows: true, mac: false, linux: true },
+          controller_support: 'partial',
+        }),
+      ).toEqual({
+        platforms: { windows: true, mac: false, linux: true },
+        controllerSupport: 'partial',
+      });
+
+      expect(extractAppDetailsCompatibility({})).toEqual({
+        platforms: null,
+        controllerSupport: null,
+      });
+
+      expect(extractAppDetailsCompatibility(null)).toEqual({
+        platforms: null,
+        controllerSupport: null,
+      });
     });
   });
 });

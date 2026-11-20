@@ -6,7 +6,15 @@
  * Supported stores: Steam, Epic Games Store, Nuuvem, GOG.
  */
 
-import type { StoreDeal, GameDealInfo, AutocompleteChoice, PricePoint } from '../types/index.js';
+import type {
+  StoreDeal,
+  GameDealInfo,
+  AutocompleteChoice,
+  PricePoint,
+  SteamPlatforms,
+  ControllerSupportLevel,
+} from '../types/index.js';
+import { extractAppDetailsCompatibility } from './steamWeb.js';
 
 const ITAD_API_KEY = process.env.ITAD_API_KEY;
 const ITAD_BASE_URL = 'https://api.isthereanydeal.com';
@@ -359,6 +367,12 @@ export interface RawSteamAppDetails {
   is_free?: boolean;
   metacritic?: { score?: number };
   price_overview?: RawSteamAppDetailsPriceOverview;
+  platforms?: {
+    windows?: boolean;
+    mac?: boolean;
+    linux?: boolean;
+  };
+  controller_support?: string;
 }
 
 interface RawSteamAppDetailsMap {
@@ -1371,6 +1385,8 @@ export async function getGameDealInfo(
     let bannerImage: string | null = null;
     let reviewScore: number | null = null;
     let officialSteamTitle: string | null = null;
+    let platforms: SteamPlatforms | undefined;
+    let controllerSupport: ControllerSupportLevel | undefined;
     const itadKey = process.env.ITAD_API_KEY || ITAD_API_KEY;
 
     // 1. Concurrently kick off bounded Steam Store details (1500ms) and ITAD resolution
@@ -1789,6 +1805,11 @@ export async function getGameDealInfo(
       }
       bannerImage = appDetails.header_image || null;
       reviewScore = appDetails.metacritic?.score ?? null;
+      const extractedCompatibility = extractAppDetailsCompatibility(appDetails);
+      if (extractedCompatibility.platforms) {
+        platforms = extractedCompatibility.platforms;
+      }
+      controllerSupport = extractedCompatibility.controllerSupport;
 
       if (appDetails.is_free) {
         const steamDeal: StoreDeal = {
@@ -1932,6 +1953,8 @@ export async function getGameDealInfo(
       alternativeCheckStatus,
       alternativeCheckDegraded,
       isPlatformExclusive,
+      ...(platforms !== undefined ? { platforms } : {}),
+      ...(controllerSupport !== undefined ? { controllerSupport } : {}),
     };
   } catch (error: unknown) {
     if (lookupTimer) clearTimeout(lookupTimer);

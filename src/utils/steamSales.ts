@@ -9,6 +9,9 @@
 import type {
   SteamSaleEvent,
   SteamSaleStatus,
+  SteamSaleEventStatus,
+  PublicSteamSaleEvent,
+  PublicSalesCalendarResponse,
   DiscordEmbed,
   DiscordActionRow,
 } from '../types/index.js';
@@ -155,6 +158,60 @@ function toUnix(isoString: string): number {
 function getDurationDays(startDate: string, endDate: string): number {
   const ms = new Date(endDate).getTime() - new Date(startDate).getTime();
   return Math.max(1, Math.round(ms / (1000 * 60 * 60 * 24)));
+}
+
+/**
+ * Builds the structured public JSON payload for GET /public/sales/calendar,
+ * reusing STEAM_SALES_SCHEDULE, getCurrentOrNextSale, and getUpcomingSales.
+ */
+export function buildSalesCalendarPayload(referenceDate?: Date): PublicSalesCalendarResponse {
+  const nowDate = referenceDate ? new Date(referenceDate.getTime()) : new Date();
+  const nowMs = nowDate.getTime();
+  const currentStatus = getCurrentOrNextSale(nowDate);
+  const nonEndedEvents = getUpcomingSales(STEAM_SALES_SCHEDULE.length, nowDate);
+  const upcomingOnly = nonEndedEvents.filter((event) => new Date(event.startDate).getTime() > nowMs);
+
+  const toPublicEvent = (event: SteamSaleEvent, status: SteamSaleEventStatus): PublicSteamSaleEvent => ({
+    ...event,
+    status,
+    durationDays: getDurationDays(event.startDate, event.endDate),
+  });
+
+  const activeSale =
+    currentStatus.isActive && currentStatus.sale
+      ? toPublicEvent(currentStatus.sale, 'active')
+      : null;
+
+  const nextEventRaw =
+    !currentStatus.isActive && currentStatus.sale
+      ? currentStatus.sale
+      : (upcomingOnly[0] ?? null);
+  const nextEvent = nextEventRaw ? toPublicEvent(nextEventRaw, 'upcoming') : null;
+
+  const nextMajorRaw = upcomingOnly.find((event) => event.type === 'seasonal') ?? null;
+  const nextMajorSale = nextMajorRaw ? toPublicEvent(nextMajorRaw, 'upcoming') : null;
+
+  const schedule = [...STEAM_SALES_SCHEDULE]
+    .sort((a, b) => new Date(a.startDate).getTime() - new Date(b.startDate).getTime())
+    .map((event) => {
+      const startMs = new Date(event.startDate).getTime();
+      const endMs = new Date(event.endDate).getTime();
+      let status: SteamSaleEventStatus = 'upcoming';
+      if (startMs <= nowMs && nowMs <= endMs) {
+        status = 'active';
+      } else if (endMs < nowMs) {
+        status = 'past';
+      }
+      return toPublicEvent(event, status);
+    });
+
+  return {
+    activeSale,
+    nextMajorSale,
+    nextEvent,
+    schedule,
+    serverTime: nowDate.toISOString(),
+  };
 }
 
 /**
